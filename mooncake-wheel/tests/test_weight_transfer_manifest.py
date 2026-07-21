@@ -154,6 +154,141 @@ def test_runtime_manifest_imports_framework_inventory_without_framework_dependen
     assert manifest.fragments[0].owner == ("owner", "sglang-fragment")
 
 
+def test_runtime_manifest_v2_imports_multi_axis_logical_box() -> None:
+    tensor = framework_tensor(
+        tensor_id="layers.2.experts.w1",
+        global_shape=(8, 16, 32),
+        global_offset=(3, 8, 0),
+        local_shape=(1, 8, 32),
+        partition_dim=None,
+        shard_dims=(0, 1),
+        expert_id=None,
+        nbytes=512,
+        stride=(256, 32, 1),
+        storage_offset=0,
+        byte_offset=0,
+    )
+    inventory = SimpleNamespace(
+        model_id="qwen3.5-moe",
+        revision="step-42",
+        instance_id="sglang-instance",
+        generation=9,
+        tensors=(tensor,),
+        format_version=2,
+    )
+
+    manifest = RuntimeManifest.from_runtime_inventory(inventory)
+
+    assert manifest.format_version == 2
+    assert manifest.tensors[0].effective_shard_dims == (0, 1)
+    assert manifest.fragments[0].global_offset == (3, 8, 0)
+    assert manifest.fragments[0].local_shape == (1, 8, 32)
+
+
+def test_runtime_manifest_v2_rejects_partial_non_shard_dimension() -> None:
+    tensor = framework_tensor(
+        tensor_id="layers.2.experts.w1",
+        global_shape=(8, 16, 32),
+        global_offset=(3, 8, 4),
+        local_shape=(1, 8, 28),
+        partition_dim=None,
+        shard_dims=(0, 1),
+        expert_id=None,
+        nbytes=448,
+        stride=(224, 28, 1),
+        storage_offset=0,
+        byte_offset=0,
+    )
+    inventory = SimpleNamespace(
+        model_id="qwen3.5-moe",
+        revision="step-42",
+        instance_id="sglang-instance",
+        generation=9,
+        tensors=(tensor,),
+        format_version=2,
+    )
+
+    with pytest.raises(ValueError, match="non-shard axis"):
+        RuntimeManifest.from_runtime_inventory(inventory)
+
+
+def test_tensor_descriptor_rejects_conflicting_legacy_and_v2_shard_dims() -> None:
+    with pytest.raises(ValueError, match="conflicts with shard_dims"):
+        tensor_descriptor(partition_dim=0, shard_dims=(1,))
+
+
+@pytest.mark.parametrize(
+    "shard_dims",
+    [
+        (0, 0),
+        (2,),
+        (True,),
+        "01",
+    ],
+)
+def test_tensor_descriptor_rejects_invalid_shard_dims(shard_dims) -> None:
+    with pytest.raises(ValueError, match="shard_dims"):
+        tensor_descriptor(partition_dim=None, shard_dims=shard_dims)
+
+
+def test_weight_manifest_v2_round_trip_preserves_shard_dims() -> None:
+    tensor = tensor_descriptor(
+        tensor_id="layers.2.experts.w1",
+        global_shape=(2, 8, 4),
+        partition_dim=None,
+        shard_dims=(0, 1),
+        expert_id=None,
+    )
+    group_id = "weights/default/qwen/rev"
+    manifest = WeightManifest(
+        namespace="default",
+        model_id="qwen",
+        revision="rev",
+        group_id=group_id,
+        manifest_key=f"{group_id}/manifest",
+        tensors=(tensor,),
+        fragments=tuple(
+            StoredFragment(
+                fragment_id=f"stored-e{expert}-o{out_shard}",
+                tensor_id=tensor.tensor_id,
+                global_offset=(expert, out_shard * 4, 0),
+                local_shape=(1, 4, 4),
+                object_key=f"{group_id}/payload/e{expert}-o{out_shard}",
+                object_offset=0,
+                nbytes=32,
+            )
+            for expert in range(2)
+            for out_shard in range(2)
+        ),
+        created_at="2026-07-22T00:00:00Z",
+        format_version=2,
+    )
+
+    encoded = manifest.to_json()
+    decoded = WeightManifest.from_json(encoded)
+
+    assert decoded == manifest
+    assert json.loads(encoded)["tensors"][0]["shard_dims"] == [0, 1]
+
+
+def test_weight_manifest_v1_json_schema_does_not_emit_shard_dims() -> None:
+    manifest = WeightManifest(
+        namespace="default",
+        model_id="qwen",
+        revision="rev",
+        group_id="weights/default/qwen/rev",
+        manifest_key="weights/default/qwen/rev/manifest",
+        tensors=(tensor_descriptor(),),
+        fragments=(stored_fragment(),),
+        created_at="2026-07-17T00:00:00Z",
+    )
+
+    raw = json.loads(manifest.to_json())
+
+    assert manifest.format_version == 1
+    assert "shard_dims" not in raw["tensors"][0]
+
+
 @pytest.mark.parametrize("aliases", ["ab", b"ab"])
 def test_runtime_manifest_rejects_scalar_alias_sequences(aliases) -> None:
     inventory = SimpleNamespace(
@@ -340,7 +475,7 @@ def test_weight_manifest_rejects_duplicate_fragment_geometry() -> None:
 @pytest.mark.parametrize(
     "overrides, message",
     [
-        ({"format_version": 2}, "unsupported runtime inventory format_version"),
+        ({"format_version": 3}, "unsupported runtime inventory format_version"),
         ({"generation": 8}, "lease generation mismatch"),
     ],
 )

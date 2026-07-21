@@ -28,6 +28,7 @@ class TensorDescriptor:
     layer_id: int | None = None
     expert_id: int | None = None
     layout_fingerprint: str = "contiguous"
+    shard_dims: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         shape = _require_integer_tuple(self.global_shape, "global_shape", minimum=1)
@@ -41,11 +42,33 @@ class TensorDescriptor:
             _require_integer(self.partition_dim, "partition_dim", minimum=0)
             if self.partition_dim >= len(shape):
                 raise ValueError("partition_dim is out of range")
+        if self.shard_dims is not None:
+            shard_dims = _require_integer_tuple(
+                self.shard_dims, "shard_dims", minimum=0
+            )
+            if len(shard_dims) != len(set(shard_dims)):
+                raise ValueError("shard_dims must not contain duplicates")
+            if any(dim >= len(shape) for dim in shard_dims):
+                raise ValueError("shard_dims contains an out-of-range dimension")
+            shard_dims = tuple(sorted(shard_dims))
+            if self.partition_dim is not None and shard_dims != (
+                self.partition_dim,
+            ):
+                raise ValueError("partition_dim conflicts with shard_dims")
+            object.__setattr__(self, "shard_dims", shard_dims)
         for name in ("layer_id", "expert_id"):
             value = getattr(self, name)
             if value is not None:
                 _require_integer(value, name, minimum=0)
         _require_nonempty_string(self.layout_fingerprint, "layout_fingerprint")
+
+    @property
+    def effective_shard_dims(self) -> tuple[int, ...]:
+        if self.shard_dims is not None:
+            return self.shard_dims
+        if self.partition_dim is None:
+            return ()
+        return (self.partition_dim,)
 
 
 @dataclass(frozen=True)
@@ -257,7 +280,8 @@ def _validate_fragment_geometry(tensor: TensorDescriptor, fragment: Fragment) ->
         if offset < 0 or extent < 0 or offset + extent > total:
             raise ValueError(f"fragment is out of bounds: {fragment.fragment_id}")
 
-    if tensor.partition_dim is None:
+    shard_dims = frozenset(tensor.effective_shard_dims)
+    if not shard_dims:
         if fragment.global_offset != (0,) * ndim:
             raise ValueError(
                 f"replicated fragment has an offset: {fragment.fragment_id}"
@@ -268,12 +292,12 @@ def _validate_fragment_geometry(tensor: TensorDescriptor, fragment: Fragment) ->
             )
     else:
         for dim in range(ndim):
-            if dim == tensor.partition_dim:
+            if dim in shard_dims:
                 continue
             if fragment.global_offset[dim] != 0:
-                raise ValueError(f"fragment offset uses a non-partition axis: {dim}")
+                raise ValueError(f"fragment offset uses a non-shard axis: {dim}")
             if fragment.local_shape[dim] != tensor.global_shape[dim]:
-                raise ValueError(f"fragment shape uses a non-partition axis: {dim}")
+                raise ValueError(f"fragment shape uses a non-shard axis: {dim}")
 
     expected_nbytes = prod(fragment.local_shape) * tensor.itemsize
     if fragment.nbytes != expected_nbytes:
@@ -301,26 +325,58 @@ def _validate_stored_coverage(
 
     for tensor in tensors:
         tensor_fragments = by_tensor.get(tensor.tensor_id, [])
-        if tensor.partition_dim is None:
-            if len(tensor_fragments) != 1:
-                raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
-            continue
-
-        dim = tensor.partition_dim
-        intervals = sorted(
-            (
-                fragment.global_offset[dim],
-                fragment.global_offset[dim] + fragment.local_shape[dim],
-            )
-            for fragment in tensor_fragments
+        covered_volume = sum(
+            prod(fragment.local_shape) for fragment in tensor_fragments
         )
-        cursor = 0
-        for begin, end in intervals:
-            if begin != cursor:
-                raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
-            cursor = end
-        if cursor != tensor.global_shape[dim]:
+        if covered_volume != prod(tensor.global_shape) or _has_overlapping_boxes(
+            tensor_fragments
+        ):
             raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
+
+
+def _has_overlapping_boxes(fragments: Sequence[StoredFragment]) -> bool:
+    if len(fragments) < 2:
+        return False
+
+    ndim = len(fragments[0].global_offset)
+    sweep_dim = max(
+        range(ndim),
+        key=lambda dim: len(
+            {
+                (
+                    fragment.global_offset[dim],
+                    fragment.global_offset[dim] + fragment.local_shape[dim],
+                )
+                for fragment in fragments
+            }
+        ),
+    )
+    ordered = sorted(fragments, key=lambda item: item.global_offset[sweep_dim])
+    active: list[StoredFragment] = []
+    for fragment in ordered:
+        begin = fragment.global_offset[sweep_dim]
+        active = [
+            candidate
+            for candidate in active
+            if candidate.global_offset[sweep_dim]
+            + candidate.local_shape[sweep_dim]
+            > begin
+        ]
+        for candidate in active:
+            if all(
+                left_offset < right_offset + right_extent
+                and right_offset < left_offset + left_extent
+                for left_offset, left_extent, right_offset, right_extent in zip(
+                    candidate.global_offset,
+                    candidate.local_shape,
+                    fragment.global_offset,
+                    fragment.local_shape,
+                    strict=True,
+                )
+            ):
+                return True
+        active.append(fragment)
+    return False
 
 
 @dataclass(frozen=True)
@@ -331,18 +387,28 @@ class RuntimeManifest:
     tensors: tuple[TensorDescriptor, ...]
     fragments: tuple[RuntimeFragment, ...]
     lease_id: str | None = None
+    format_version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tensors", tuple(self.tensors))
         object.__setattr__(self, "fragments", tuple(self.fragments))
         for name in ("model_id", "revision", "instance_id"):
             _require_nonempty_string(getattr(self, name), name)
+        _require_integer(self.format_version, "format_version", minimum=1)
+        if self.format_version not in (1, 2):
+            raise ValueError(
+                f"unsupported runtime inventory format_version: {self.format_version}"
+            )
         if self.lease_id is not None:
             _require_nonempty_string(self.lease_id, "lease_id")
         if not all(isinstance(item, TensorDescriptor) for item in self.tensors):
             raise ValueError("RuntimeManifest tensors must be TensorDescriptor")
         if not all(isinstance(item, RuntimeFragment) for item in self.fragments):
             raise ValueError("RuntimeManifest fragments must be RuntimeFragment")
+        if self.format_version == 1 and any(
+            tensor.shard_dims is not None for tensor in self.tensors
+        ):
+            raise ValueError("runtime manifest v1 cannot contain shard_dims")
         _validate_fragments(self.tensors, self.fragments)
 
     @classmethod
@@ -354,7 +420,7 @@ class RuntimeManifest:
     ) -> RuntimeManifest:
         format_version = _read_field(inventory, "format_version")
         _require_integer(format_version, "format_version", minimum=1)
-        if format_version != 1:
+        if format_version not in (1, 2):
             raise ValueError(
                 f"unsupported runtime inventory format_version: {format_version}"
             )
@@ -372,6 +438,11 @@ class RuntimeManifest:
                 layer_id=_read_optional_field(record, "layer_id"),
                 expert_id=_read_optional_field(record, "expert_id"),
                 layout_fingerprint=_read_field(record, "layout_fingerprint"),
+                shard_dims=(
+                    _read_optional_field(record, "shard_dims")
+                    if format_version == 2
+                    else None
+                ),
             )
             previous = tensors.setdefault(descriptor.tensor_id, descriptor)
             if previous != descriptor:
@@ -417,6 +488,7 @@ class RuntimeManifest:
             tensors=tuple(sorted(tensors.values(), key=lambda item: item.tensor_id)),
             fragments=tuple(fragments),
             lease_id=_read_optional_field(inventory, "lease_id"),
+            format_version=format_version,
         )
 
 
@@ -436,7 +508,7 @@ class WeightManifest:
         object.__setattr__(self, "tensors", tuple(self.tensors))
         object.__setattr__(self, "fragments", tuple(self.fragments))
         _require_integer(self.format_version, "format_version", minimum=1)
-        if self.format_version != 1:
+        if self.format_version not in (1, 2):
             raise ValueError(f"unsupported format_version: {self.format_version}")
         for name in (
             "namespace",
@@ -453,6 +525,10 @@ class WeightManifest:
             raise ValueError("WeightManifest tensors must be TensorDescriptor")
         if not all(isinstance(item, StoredFragment) for item in self.fragments):
             raise ValueError("WeightManifest fragments must be StoredFragment")
+        if self.format_version == 1 and any(
+            tensor.shard_dims is not None for tensor in self.tensors
+        ):
+            raise ValueError("weight manifest v1 cannot contain shard_dims")
         payload_prefix = f"{self.group_id}/payload/"
         if any(
             not fragment.object_key.startswith(payload_prefix)
@@ -463,8 +539,34 @@ class WeightManifest:
         _validate_stored_coverage(self.tensors, self.fragments)
 
     def to_json(self) -> str:
+        tensors = []
+        for tensor in self.tensors:
+            item = {
+                "tensor_id": tensor.tensor_id,
+                "global_shape": tensor.global_shape,
+                "dtype": tensor.dtype,
+                "itemsize": tensor.itemsize,
+                "partition_dim": tensor.partition_dim,
+                "layer_id": tensor.layer_id,
+                "expert_id": tensor.expert_id,
+                "layout_fingerprint": tensor.layout_fingerprint,
+            }
+            if self.format_version == 2:
+                item["shard_dims"] = tensor.effective_shard_dims
+            tensors.append(item)
+        raw = {
+            "namespace": self.namespace,
+            "model_id": self.model_id,
+            "revision": self.revision,
+            "group_id": self.group_id,
+            "manifest_key": self.manifest_key,
+            "tensors": tensors,
+            "fragments": [asdict(fragment) for fragment in self.fragments],
+            "created_at": self.created_at,
+            "format_version": self.format_version,
+        }
         return json.dumps(
-            asdict(self), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         )
 
     @classmethod
@@ -496,18 +598,23 @@ class WeightManifest:
             ),
             "weight manifest",
         )
-        tensor_fields = frozenset(
-            {
-                "tensor_id",
-                "global_shape",
-                "dtype",
-                "itemsize",
-                "partition_dim",
-                "layer_id",
-                "expert_id",
-                "layout_fingerprint",
-            }
-        )
+        format_version = raw["format_version"]
+        _require_integer(format_version, "format_version", minimum=1)
+        if format_version not in (1, 2):
+            raise ValueError(f"unsupported format_version: {format_version}")
+        tensor_fields = {
+            "tensor_id",
+            "global_shape",
+            "dtype",
+            "itemsize",
+            "partition_dim",
+            "layer_id",
+            "expert_id",
+            "layout_fingerprint",
+        }
+        if format_version == 2:
+            tensor_fields.add("shard_dims")
+        tensor_fields = frozenset(tensor_fields)
         fragment_fields = frozenset(
             {
                 "fragment_id",
@@ -541,5 +648,5 @@ class WeightManifest:
             tensors=tensors,
             fragments=fragments,
             created_at=raw["created_at"],
-            format_version=raw["format_version"],
+            format_version=format_version,
         )
