@@ -146,10 +146,285 @@ class CopyRange:
 
 
 @dataclass(frozen=True)
+class TransferRegion:
+    tensor_id: str
+    source: SourceFragment
+    target: RuntimeFragment
+    overlap_offset: tuple[int, ...]
+    overlap_shape: tuple[int, ...]
+    source_base_offset: int
+    target_base_offset: int
+    inner_bytes: int
+    outer_loop_counts: tuple[int, ...]
+    source_strides: tuple[int, ...]
+    target_strides: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "overlap_offset",
+            "overlap_shape",
+            "outer_loop_counts",
+            "source_strides",
+            "target_strides",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, (str, bytes, bytearray)):
+                raise ValueError(f"transfer region {name} must contain integers")
+            try:
+                normalized = tuple(value)
+            except TypeError as error:
+                raise ValueError(
+                    f"transfer region {name} must contain integers"
+                ) from error
+            if any(type(item) is not int for item in normalized):
+                raise ValueError(f"transfer region {name} must contain integers")
+            object.__setattr__(self, name, normalized)
+
+        if not self.tensor_id:
+            raise ValueError("transfer region tensor_id must not be empty")
+        if (
+            self.source.tensor_id != self.tensor_id
+            or self.target.tensor_id != self.tensor_id
+        ):
+            raise ValueError("transfer region tensor mismatch")
+        ndim = len(self.overlap_offset)
+        if (
+            ndim == 0
+            or len(self.overlap_shape) != ndim
+            or len(self.source.global_offset) != ndim
+            or len(self.target.global_offset) != ndim
+        ):
+            raise ValueError("transfer region logical rank mismatch")
+        if any(offset < 0 for offset in self.overlap_offset) or any(
+            extent <= 0 for extent in self.overlap_shape
+        ):
+            raise ValueError("transfer region logical box is invalid")
+        if not _box_contains(
+            self.source.global_offset,
+            self.source.local_shape,
+            self.overlap_offset,
+            self.overlap_shape,
+        ):
+            raise ValueError("transfer region exceeds source logical fragment")
+        if not _box_contains(
+            self.target.global_offset,
+            self.target.local_shape,
+            self.overlap_offset,
+            self.overlap_shape,
+        ):
+            raise ValueError("transfer region exceeds target logical fragment")
+
+        for name in ("source_base_offset", "target_base_offset", "inner_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int:
+                raise ValueError(f"transfer region {name} must be an integer")
+        if self.source_base_offset < 0 or self.target_base_offset < 0:
+            raise ValueError("transfer region base offsets must be non-negative")
+        if self.inner_bytes <= 0:
+            raise ValueError("transfer region inner_bytes must be positive")
+        if not (
+            len(self.outer_loop_counts)
+            == len(self.source_strides)
+            == len(self.target_strides)
+        ):
+            raise ValueError("transfer region outer loop rank mismatch")
+        if any(count <= 0 for count in self.outer_loop_counts):
+            raise ValueError("transfer region outer loop counts must be positive")
+        if any(stride < 0 for stride in self.source_strides) or any(
+            stride < 0 for stride in self.target_strides
+        ):
+            raise ValueError("transfer region strides must be non-negative")
+
+        source_itemsize = _fragment_itemsize(self.source)
+        target_itemsize = _fragment_itemsize(self.target)
+        if source_itemsize != target_itemsize:
+            raise ValueError("transfer region source and target itemsize differ")
+        expected_bytes = prod(self.overlap_shape) * source_itemsize
+        if self.total_bytes != expected_bytes:
+            raise ValueError("transfer region loop geometry does not match overlap")
+        expected_source_offset = _logical_byte_offset(
+            self.source, self.overlap_offset, source_itemsize
+        )
+        expected_target_offset = _logical_byte_offset(
+            self.target, self.overlap_offset, target_itemsize
+        )
+        if self.source_base_offset != expected_source_offset:
+            raise ValueError("transfer region source base offset is inconsistent")
+        if self.target_base_offset != expected_target_offset:
+            raise ValueError("transfer region target base offset is inconsistent")
+
+        _validate_outer_strides(
+            self.outer_loop_counts,
+            self.source_strides,
+            self.inner_bytes,
+            "source",
+        )
+        _validate_outer_strides(
+            self.outer_loop_counts,
+            self.target_strides,
+            self.inner_bytes,
+            "target",
+        )
+        self.validate_bounds()
+
+    @property
+    def segment_count(self) -> int:
+        return prod(self.outer_loop_counts)
+
+    @property
+    def total_bytes(self) -> int:
+        return self.inner_bytes * self.segment_count
+
+    @property
+    def source_offset(self) -> int:
+        return self.source_base_offset
+
+    @property
+    def target_offset(self) -> int:
+        return self.target_base_offset
+
+    @property
+    def nbytes(self) -> int:
+        return self.inner_bytes
+
+    @property
+    def repeat(self) -> int:
+        return self.segment_count
+
+    @property
+    def source_stride(self) -> int:
+        if not self.source_strides:
+            return 0
+        if len(self.source_strides) == 1:
+            return self.source_strides[0]
+        raise ValueError("N-D transfer region has multiple source strides")
+
+    @property
+    def target_stride(self) -> int:
+        if not self.target_strides:
+            return 0
+        if len(self.target_strides) == 1:
+            return self.target_strides[0]
+        raise ValueError("N-D transfer region has multiple target strides")
+
+    def validate_bounds(self) -> None:
+        source_end = self.source_base_offset + sum(
+            (count - 1) * stride
+            for count, stride in zip(
+                self.outer_loop_counts, self.source_strides, strict=True
+            )
+        ) + self.inner_bytes
+        if source_end > self.source.nbytes:
+            raise ValueError("transfer region exceeds source fragment")
+        target_end = self.target_base_offset + sum(
+            (count - 1) * stride
+            for count, stride in zip(
+                self.outer_loop_counts, self.target_strides, strict=True
+            )
+        ) + self.inner_bytes
+        if target_end > self.target.nbytes:
+            raise ValueError("transfer region exceeds target fragment")
+
+    def iter_segments(self) -> Iterable[tuple[int, int, int]]:
+        if not self.outer_loop_counts:
+            yield self.source_base_offset, self.target_base_offset, self.inner_bytes
+            return
+        indices = [0] * len(self.outer_loop_counts)
+        while True:
+            yield (
+                self.source_base_offset
+                + sum(
+                    index * stride
+                    for index, stride in zip(
+                        indices, self.source_strides, strict=True
+                    )
+                ),
+                self.target_base_offset
+                + sum(
+                    index * stride
+                    for index, stride in zip(
+                        indices, self.target_strides, strict=True
+                    )
+                ),
+                self.inner_bytes,
+            )
+            for dim in range(len(indices) - 1, -1, -1):
+                indices[dim] += 1
+                if indices[dim] < self.outer_loop_counts[dim]:
+                    break
+                indices[dim] = 0
+            else:
+                return
+
+
+def _box_contains(
+    outer_offset: tuple[int, ...],
+    outer_shape: tuple[int, ...],
+    inner_offset: tuple[int, ...],
+    inner_shape: tuple[int, ...],
+) -> bool:
+    return all(
+        outer_begin <= inner_begin
+        and inner_begin + inner_extent <= outer_begin + outer_extent
+        for outer_begin, outer_extent, inner_begin, inner_extent in zip(
+            outer_offset,
+            outer_shape,
+            inner_offset,
+            inner_shape,
+            strict=True,
+        )
+    )
+
+
+def _fragment_itemsize(fragment: SourceFragment) -> int:
+    elements = prod(fragment.local_shape)
+    if elements <= 0 or fragment.nbytes % elements != 0:
+        raise ValueError("transfer region fragment byte size is invalid")
+    itemsize = fragment.nbytes // elements
+    if itemsize <= 0:
+        raise ValueError("transfer region fragment itemsize is invalid")
+    return itemsize
+
+
+def _logical_byte_offset(
+    fragment: SourceFragment | RuntimeFragment,
+    overlap_offset: tuple[int, ...],
+    itemsize: int,
+) -> int:
+    linear_offset = 0
+    stride = 1
+    for global_begin, local_begin, extent in zip(
+        reversed(overlap_offset),
+        reversed(fragment.global_offset),
+        reversed(fragment.local_shape),
+        strict=True,
+    ):
+        linear_offset += (global_begin - local_begin) * stride
+        stride *= extent
+    return linear_offset * itemsize
+
+
+def _validate_outer_strides(
+    counts: tuple[int, ...],
+    strides: tuple[int, ...],
+    inner_bytes: int,
+    side: str,
+) -> None:
+    span = inner_bytes
+    for count, stride in zip(reversed(counts), reversed(strides), strict=True):
+        if count > 1 and stride < span:
+            raise ValueError(f"transfer region {side} strides overlap")
+        span += (count - 1) * stride
+
+
+TransferOperation = CopyRange | TransferRegion
+
+
+@dataclass(frozen=True)
 class TransferPlan:
     model_id: str
     revision: str
-    operations: tuple[CopyRange, ...]
+    operations: tuple[TransferOperation, ...]
     source_executors: tuple[ExecutorTransferPlan, ...] = ()
     target_executors: tuple[ExecutorTransferPlan, ...] = ()
 
@@ -168,6 +443,10 @@ class TransferPlan:
     @property
     def total_bytes(self) -> int:
         return sum(operation.total_bytes for operation in self.operations)
+
+    @property
+    def regions(self) -> tuple[TransferOperation, ...]:
+        return self.operations
 
 
 def _collect_manifests(
