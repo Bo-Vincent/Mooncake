@@ -127,6 +127,164 @@ def registration_leases(
     )
 
 
+def nd_te_manifests(
+    prefix: str,
+    address_base: int,
+    *,
+    source: bool,
+) -> tuple[RuntimeManifest, ...]:
+    tensor = TensorDescriptor(
+        tensor_id="layers.0.experts.w1",
+        global_shape=(4, 6, 8),
+        dtype="uint8",
+        itemsize=1,
+        partition_dim=None,
+        layer_id=0,
+        expert_id=None,
+        layout_fingerprint="framework:logical-contiguous:v2",
+        shard_dims=(0,) if source else (2,),
+    )
+    result = []
+    for rank in range(2):
+        worker_id = f"{prefix}-{rank}"
+        offset = (rank * 2, 0, 0) if source else (0, 0, rank * 4)
+        shape = (2, 6, 8) if source else (4, 6, 4)
+        parallel_rank = ParallelRank(ep=rank) if source else ParallelRank(tp=rank)
+        fragment = RuntimeFragment(
+            fragment_id=f"{worker_id}-fragment",
+            tensor_id=tensor.tensor_id,
+            global_offset=offset,
+            local_shape=shape,
+            address=address_base + rank * 0x1000,
+            nbytes=prod(shape),
+            worker_id=worker_id,
+            endpoint=f"{worker_id}:12345",
+            rank=parallel_rank,
+            lease_generation=1,
+        )
+        result.append(
+            RuntimeManifest(
+                model_id="qwen-family-moe",
+                revision="step-42",
+                instance_id=worker_id,
+                tensors=(tensor,),
+                fragments=(fragment,),
+                lease_id=f"{worker_id}-runtime-lease",
+                format_version=2,
+            )
+        )
+    return tuple(result)
+
+
+def test_te_sink_lowers_nd_regions_in_bounded_batches() -> None:
+    sources = nd_te_manifests("source", 0x10000, source=True)
+    targets = nd_te_manifests("target", 0x40000, source=False)
+    plan = plan_runtime_transfer(sources, targets)
+    engine = FakeTransferEngine()
+
+    receipts = MooncakeTransferEngineSink(
+        engine,
+        max_batch_operations=5,
+        max_region_segments=12,
+    ).execute(
+        plan,
+        sources[0],
+        targets,
+        target_registrations=registration_leases(targets),
+    )
+
+    assert [receipt.operation_count for receipt in receipts] == [12, 12]
+    assert [receipt.nbytes for receipt in receipts] == [48, 48]
+    assert [len(call[3]) for call in engine.calls] == [5, 5, 2, 5, 5, 2]
+    assert max(len(call[3]) for call in engine.calls) == 5
+
+
+def test_te_reader_lowers_nd_regions_in_bounded_batches() -> None:
+    sources = nd_te_manifests("source", 0x10000, source=True)
+    target = nd_te_manifests("target", 0x40000, source=False)[1]
+    plan = plan_runtime_transfer_to_local_target(sources, target)
+    engine = FakeTransferEngine()
+
+    receipts = MooncakeTransferEngineReader(
+        engine,
+        max_batch_operations=5,
+        max_region_segments=12,
+    ).execute(
+        plan,
+        sources,
+        target,
+        source_registrations=registration_leases(sources),
+        target_pre_registered=True,
+        target_registrations=registration_leases((target,)),
+    )
+
+    assert [receipt.operation_count for receipt in receipts] == [12, 12]
+    assert [receipt.nbytes for receipt in receipts] == [48, 48]
+    assert [len(call[3]) for call in engine.calls] == [5, 5, 2, 5, 5, 2]
+    assert max(len(call[3]) for call in engine.calls) == 5
+
+
+@pytest.mark.parametrize("executor", ["sink", "reader"])
+def test_te_rejects_nd_region_above_lowering_limit(executor: str) -> None:
+    sources = nd_te_manifests("source", 0x10000, source=True)
+    targets = nd_te_manifests("target", 0x40000, source=False)
+    engine = FakeTransferEngine()
+
+    with pytest.raises(TransferEngineError, match="max_region_segments"):
+        if executor == "sink":
+            plan = plan_runtime_transfer(sources, targets)
+            MooncakeTransferEngineSink(engine, max_region_segments=11).execute(
+                plan,
+                sources[0],
+                targets,
+                target_registrations=registration_leases(targets),
+            )
+        else:
+            target = targets[1]
+            plan = plan_runtime_transfer_to_local_target(sources, target)
+            MooncakeTransferEngineReader(engine, max_region_segments=11).execute(
+                plan,
+                sources,
+                target,
+                source_registrations=registration_leases(sources),
+                target_pre_registered=True,
+                target_registrations=registration_leases((target,)),
+            )
+
+    assert engine.calls == []
+    assert engine.register_calls == []
+
+
+def test_te_sink_keeps_legacy_copy_range_plan_executable() -> None:
+    sources = manifests(tp=1, prefix="source", address_base=0x10000)
+    targets = manifests(tp=1, prefix="target", address_base=0x40000)
+    planned = plan_runtime_transfer(sources, targets)
+    region = planned.operations[0]
+    legacy = CopyRange(
+        tensor_id=region.tensor_id,
+        source=region.source,
+        target=region.target,
+        source_offset=region.source_offset,
+        target_offset=region.target_offset,
+        nbytes=region.nbytes,
+        repeat=region.repeat,
+        source_stride=region.source_stride,
+        target_stride=region.target_stride,
+    )
+    plan = replace(planned, operations=(legacy,))
+    engine = FakeTransferEngine()
+
+    receipts = MooncakeTransferEngineSink(engine).execute(
+        plan,
+        sources[0],
+        targets,
+        target_registrations=registration_leases(targets),
+    )
+
+    assert receipts[0].nbytes == sources[0].fragments[0].nbytes
+    assert len(engine.calls) == 1
+
+
 def test_te_sink_executes_local_source_ranges_without_staging_buffer() -> None:
     sources = manifests(tp=2, prefix="source", address_base=0x10000)
     targets = manifests(tp=4, prefix="target", address_base=0x40000)

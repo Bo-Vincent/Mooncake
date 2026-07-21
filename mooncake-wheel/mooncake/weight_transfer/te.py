@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Sequence
 
 from .manifest import RuntimeFragment, RuntimeManifest
-from .planner import CopyRange, TransferPlan, resolve_executor_plans
+from .planner import TransferOperation, TransferPlan, resolve_executor_plans
 
 
 class TransferEngineError(RuntimeError):
@@ -82,11 +82,18 @@ def _same_snapshot(current: RuntimeFragment, planned: RuntimeFragment) -> bool:
 
 
 class MooncakeTransferEngineSink:
-    def __init__(self, engine: Any, *, max_batch_operations: int = 1024) -> None:
-        if max_batch_operations <= 0:
-            raise ValueError("max_batch_operations must be positive")
+    def __init__(
+        self,
+        engine: Any,
+        *,
+        max_batch_operations: int = 1024,
+        max_region_segments: int = 1_000_000,
+    ) -> None:
+        if max_batch_operations <= 0 or max_region_segments <= 0:
+            raise ValueError("transfer lowering limits must be positive")
         self.engine = engine
         self.max_batch_operations = max_batch_operations
+        self.max_region_segments = max_region_segments
 
     def execute(
         self,
@@ -150,7 +157,7 @@ class MooncakeTransferEngineSink:
         )
 
         operations_by_endpoint: dict[
-            str, list[tuple[CopyRange, RuntimeFragment, RuntimeFragment]]
+            str, list[tuple[TransferOperation, RuntimeFragment, RuntimeFragment]]
         ] = {}
         used_sources: dict[str, RuntimeFragment] = {}
         for operation in local_operations:
@@ -182,6 +189,12 @@ class MooncakeTransferEngineSink:
                 raise TransferEngineError(
                     f"invalid copy range for {operation.tensor_id}: {error}"
                 ) from error
+            if operation.repeat > self.max_region_segments:
+                raise TransferEngineError(
+                    f"transfer region exceeds max_region_segments: "
+                    f"{operation.tensor_id}: {operation.repeat} > "
+                    f"{self.max_region_segments}"
+                )
             self._validate_registration(target, target_registration_by_id, "target")
             used_sources[current.fragment_id] = current
             operations_by_endpoint.setdefault(target.endpoint, []).append(
@@ -371,11 +384,18 @@ class MooncakeTransferEngineSink:
 class MooncakeTransferEngineReader:
     """Execute a local target plan with target-initiated zero-copy reads."""
 
-    def __init__(self, engine: Any, *, max_batch_operations: int = 1024) -> None:
-        if max_batch_operations <= 0:
-            raise ValueError("max_batch_operations must be positive")
+    def __init__(
+        self,
+        engine: Any,
+        *,
+        max_batch_operations: int = 1024,
+        max_region_segments: int = 1_000_000,
+    ) -> None:
+        if max_batch_operations <= 0 or max_region_segments <= 0:
+            raise ValueError("transfer lowering limits must be positive")
         self.engine = engine
         self.max_batch_operations = max_batch_operations
+        self.max_region_segments = max_region_segments
 
     def execute(
         self,
@@ -445,7 +465,7 @@ class MooncakeTransferEngineReader:
             else {}
         )
         operations_by_endpoint: dict[
-            str, list[tuple[CopyRange, RuntimeFragment, RuntimeFragment]]
+            str, list[tuple[TransferOperation, RuntimeFragment, RuntimeFragment]]
         ] = {}
         used_targets: dict[str, RuntimeFragment] = {}
         for index in target_executor.operation_indices:
@@ -484,6 +504,12 @@ class MooncakeTransferEngineReader:
                     target, registration_by_id, "target"
                 )
             operation.validate_bounds()
+            if operation.repeat > self.max_region_segments:
+                raise TransferEngineError(
+                    f"transfer region exceeds max_region_segments: "
+                    f"{operation.tensor_id}: {operation.repeat} > "
+                    f"{self.max_region_segments}"
+                )
             used_targets[target.fragment_id] = target
             operations_by_endpoint.setdefault(source.endpoint, []).append(
                 (operation, source, target)
@@ -507,55 +533,16 @@ class MooncakeTransferEngineReader:
                 operation_count = 0
                 total_bytes = 0
                 for operation, source, target in operations:
-                    source_base = source.address + operation.source_offset
-                    target_base = target.address + operation.target_offset
-                    next_segment = 0
-                    while next_segment < operation.repeat:
-                        batch_count = min(
-                            self.max_batch_operations - len(sizes),
-                            operation.repeat - next_segment,
-                        )
-                        source_start = (
-                            source_base + next_segment * operation.source_stride
-                        )
-                        target_start = (
-                            target_base + next_segment * operation.target_stride
-                        )
-                        next_source_addresses = (
-                            list(
-                                range(
-                                    source_start,
-                                    source_start
-                                    + batch_count * operation.source_stride,
-                                    operation.source_stride,
-                                )
-                            )
-                            if operation.source_stride
-                            else [source_start] * batch_count
-                        )
-                        next_target_addresses = (
-                            list(
-                                range(
-                                    target_start,
-                                    target_start
-                                    + batch_count * operation.target_stride,
-                                    operation.target_stride,
-                                )
-                            )
-                            if operation.target_stride
-                            else [target_start] * batch_count
-                        )
-                        if sizes:
-                            source_addresses.extend(next_source_addresses)
-                            target_addresses.extend(next_target_addresses)
-                            sizes.extend([operation.nbytes] * batch_count)
-                        else:
-                            source_addresses = next_source_addresses
-                            target_addresses = next_target_addresses
-                            sizes = [operation.nbytes] * batch_count
-                        operation_count += batch_count
-                        total_bytes += operation.nbytes * batch_count
-                        next_segment += batch_count
+                    for (
+                        source_offset,
+                        target_offset,
+                        nbytes,
+                    ) in operation.iter_segments():
+                        source_addresses.append(source.address + source_offset)
+                        target_addresses.append(target.address + target_offset)
+                        sizes.append(nbytes)
+                        operation_count += 1
+                        total_bytes += nbytes
                         if len(sizes) == self.max_batch_operations:
                             self._transfer_batch(
                                 endpoint, target_addresses, source_addresses, sizes
