@@ -353,12 +353,17 @@ class MooncakeTransferEngineSink:
         target_addresses: list[int],
         sizes: list[int],
     ) -> None:
-        result = self.engine.batch_transfer_sync_write(
-            endpoint,
-            source_addresses,
-            target_addresses,
-            sizes,
-        )
+        try:
+            result = self.engine.batch_transfer_sync_write(
+                endpoint,
+                source_addresses,
+                target_addresses,
+                sizes,
+            )
+        except Exception as error:
+            raise TransferEngineError(
+                f"batch transfer to {endpoint} failed: {error}"
+            ) from error
         if result != 0:
             raise TransferEngineError(f"batch transfer to {endpoint} failed: {result}")
 
@@ -591,7 +596,12 @@ class MooncakeTransferEngineReader:
         primary_error: BaseException | None = None
         try:
             for address, nbytes in sizes_by_address.items():
-                result = self.engine.register_memory(address, nbytes)
+                try:
+                    result = self.engine.register_memory(address, nbytes)
+                except Exception as error:
+                    raise TransferEngineError(
+                        f"target register_memory failed for {address}: {error}"
+                    ) from error
                 if result != 0:
                     raise TransferEngineError(
                         f"target register_memory failed for {address}: {result}"

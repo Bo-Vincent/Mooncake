@@ -187,6 +187,28 @@ def test_te_sink_surfaces_endpoint_failure() -> None:
         )
 
 
+def test_te_sink_wraps_write_exception() -> None:
+    sources = manifests(tp=2, prefix="source", address_base=0x10000)
+    targets = manifests(tp=4, prefix="target", address_base=0x40000)
+    plan = plan_runtime_transfer(sources, targets)
+    engine = FakeTransferEngine()
+
+    def fail_write(*args, **kwargs):
+        raise RuntimeError("write exploded")
+
+    engine.batch_transfer_sync_write = fail_write
+
+    with pytest.raises(TransferEngineError, match="write exploded"):
+        MooncakeTransferEngineSink(engine).execute(
+            plan,
+            sources[0],
+            targets,
+            target_registrations=registration_leases(targets),
+        )
+
+    assert engine.unregister_calls == [0x10000]
+
+
 def test_te_sink_rejects_stale_source_generation() -> None:
     sources = manifests(tp=2, prefix="source", address_base=0x10000)
     targets = manifests(tp=4, prefix="target", address_base=0x40000)
@@ -430,6 +452,26 @@ def test_te_reader_pulls_local_target_ranges_without_source_rpc() -> None:
     assert engine.calls == [("source-t0:12345", [0x41000], [0x10002], [2])]
     assert engine.register_calls == []
     assert engine.unregister_calls == []
+
+
+def test_te_reader_wraps_target_registration_exception() -> None:
+    sources = manifests(tp=2, prefix="source", address_base=0x10000)
+    target = manifests(tp=4, prefix="target", address_base=0x40000)[1]
+    plan = plan_runtime_transfer_to_local_target(sources, target)
+    engine = FakeTransferEngine()
+
+    def fail_register(*args, **kwargs):
+        raise RuntimeError("register exploded")
+
+    engine.register_memory = fail_register
+
+    with pytest.raises(TransferEngineError, match="register exploded"):
+        MooncakeTransferEngineReader(engine).execute(
+            plan,
+            sources,
+            target,
+            source_registrations=registration_leases(sources),
+        )
 
 
 def test_te_reader_requires_generation_bound_source_registration_leases() -> None:

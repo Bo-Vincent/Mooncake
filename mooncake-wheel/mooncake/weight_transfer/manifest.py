@@ -358,8 +358,8 @@ class RuntimeManifest:
                 dtype=_read_field(record, "dtype"),
                 itemsize=_read_field(record, "itemsize"),
                 partition_dim=_read_field(record, "partition_dim"),
-                layer_id=_read_field(record, "layer_id"),
-                expert_id=_read_field(record, "expert_id"),
+                layer_id=_read_optional_field(record, "layer_id"),
+                expert_id=_read_optional_field(record, "expert_id"),
                 layout_fingerprint=_read_field(record, "layout_fingerprint"),
             )
             previous = tensors.setdefault(descriptor.tensor_id, descriptor)

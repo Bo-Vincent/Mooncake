@@ -548,6 +548,26 @@ def test_payload_failure_does_not_publish_manifest() -> None:
     assert all(store.remove_forces)
 
 
+def test_upload_surfaces_scalar_batch_put_from_error() -> None:
+    store, weight_store = make_weight_store()
+    sources = source_manifests(dp=1, tp=1)
+    plan = weight_store.prepare_upload(sources)
+    store.batch_put_from = lambda *args, **kwargs: -17
+
+    with pytest.raises(WeightStoreError, match="batch_put_from failed: -17"):
+        upload_all(weight_store, plan, sources)
+
+
+def test_upload_surfaces_scalar_batch_is_exist_error() -> None:
+    store, weight_store = make_weight_store()
+    sources = source_manifests(dp=1, tp=1)
+    plan = weight_store.prepare_upload(sources)
+    store.batch_is_exist = lambda *args, **kwargs: -18
+
+    with pytest.raises(WeightStoreError, match="existence check failed: -18"):
+        upload_all(weight_store, plan, sources)
+
+
 def test_commit_is_idempotent_for_the_same_upload_plan() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests()
@@ -986,6 +1006,21 @@ def test_load_rejects_partial_range_result() -> None:
 
     store.get_into_ranges = partial
     with pytest.raises(WeightStoreError, match="get_into_ranges failed"):
+        weight_store.load(load_plan, targets[0])
+
+
+def test_load_surfaces_scalar_get_into_ranges_error() -> None:
+    store, weight_store = make_weight_store()
+    sources = source_manifests(dp=1, tp=2)
+    upload_plan = weight_store.prepare_upload(sources)
+    manifest = weight_store.commit(
+        upload_plan, upload_all(weight_store, upload_plan, sources)
+    )
+    targets = target_manifests(dp=1, tp=4)
+    load_plan = weight_store.plan_load(manifest, targets)
+    store.get_into_ranges = lambda *args, **kwargs: -19
+
+    with pytest.raises(WeightStoreError, match="get_into_ranges failed: -19"):
         weight_store.load(load_plan, targets[0])
 
 
