@@ -254,14 +254,20 @@ class WeightStore:
         config_factory: Callable[[Sequence[str], StoreRecordType], Any] | None = None,
         max_range_bytes: int = 64 * 1024 * 1024,
         max_ranges_per_request: int = 1024,
+        max_region_segments: int = 1_000_000,
     ) -> None:
-        if max_range_bytes <= 0 or max_ranges_per_request <= 0:
+        if (
+            max_range_bytes <= 0
+            or max_ranges_per_request <= 0
+            or max_region_segments <= 0
+        ):
             raise ValueError("range limits must be positive")
         self.store = store
         self.key_prefix = key_prefix.strip("/")
         self.config_factory = config_factory or _default_config_factory
         self.max_range_bytes = max_range_bytes
         self.max_ranges_per_request = max_ranges_per_request
+        self.max_region_segments = max_region_segments
 
     def prepare_upload(
         self,
@@ -307,6 +313,11 @@ class WeightStore:
             created_at=datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
+            format_version=(
+                2
+                if any(manifest.format_version == 2 for manifest in source_manifests)
+                else 1
+            ),
         )
         return WeightUploadPlan(
             manifest=manifest,
@@ -662,6 +673,18 @@ class WeightStore:
             if not _same_runtime_snapshot(current, operation.target):
                 raise WeightStoreError(
                     f"stale target fragment: {operation.target.fragment_id}"
+                )
+            try:
+                operation.validate_bounds()
+            except ValueError as error:
+                raise WeightStoreError(
+                    f"invalid transfer region for {operation.tensor_id}: {error}"
+                ) from error
+            if operation.repeat > self.max_region_segments:
+                raise WeightStoreError(
+                    f"transfer region exceeds max_region_segments: "
+                    f"{operation.tensor_id}: {operation.repeat} > "
+                    f"{self.max_region_segments}"
                 )
             operations_by_target.setdefault(operation.target.fragment_id, []).append(
                 operation

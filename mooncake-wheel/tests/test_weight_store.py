@@ -261,11 +261,97 @@ def target_manifests(
     return tuple(manifests)
 
 
+def nd_store_manifests(
+    prefix: str,
+    *,
+    source: bool,
+    target_dim: int = 2,
+) -> tuple[RuntimeManifest, ...]:
+    tensor = TensorDescriptor(
+        tensor_id="layers.0.experts.w1",
+        global_shape=(4, 6, 8),
+        dtype="uint8",
+        itemsize=1,
+        partition_dim=None,
+        layer_id=0,
+        expert_id=None,
+        layout_fingerprint="framework:logical-contiguous:v2",
+        shard_dims=(0,) if source else (target_dim,),
+    )
+    manifests = []
+    rank_count = 4 if source else 2
+    for rank in range(rank_count):
+        if source:
+            offset = (rank, 0, 0)
+            shape = (1, 6, 8)
+            parallel_rank = ParallelRank(ep=rank)
+        else:
+            shape_list = list(tensor.global_shape)
+            shape_list[target_dim] //= rank_count
+            offset_list = [0, 0, 0]
+            offset_list[target_dim] = rank * shape_list[target_dim]
+            offset = tuple(offset_list)
+            shape = tuple(shape_list)
+            parallel_rank = ParallelRank(tp=rank)
+        values = []
+        for coordinate in product(*(range(extent) for extent in shape)):
+            global_coordinate = tuple(
+                begin + local for begin, local in zip(offset, coordinate, strict=True)
+            )
+            values.append(
+                global_coordinate[0] * 48
+                + global_coordinate[1] * 8
+                + global_coordinate[2]
+                if source
+                else 255
+            )
+        owner = (ctypes.c_ubyte * prod(shape))(*values)
+        worker_id = f"{prefix}-{rank}"
+        fragment = RuntimeFragment(
+            fragment_id=f"{worker_id}-fragment",
+            tensor_id=tensor.tensor_id,
+            global_offset=offset,
+            local_shape=shape,
+            address=ctypes.addressof(owner),
+            nbytes=prod(shape),
+            worker_id=worker_id,
+            endpoint=f"{worker_id}:12345",
+            rank=parallel_rank,
+            lease_generation=1,
+            owner=owner,
+        )
+        manifests.append(
+            RuntimeManifest(
+                model_id="qwen-family-moe",
+                revision="step-42",
+                instance_id=worker_id,
+                tensors=(tensor,),
+                fragments=(fragment,),
+                format_version=2,
+            )
+        )
+    return tuple(manifests)
+
+
+def expected_nd_fragment(fragment: RuntimeFragment) -> bytes:
+    values = []
+    for coordinate in product(*(range(extent) for extent in fragment.local_shape)):
+        global_coordinate = tuple(
+            begin + local
+            for begin, local in zip(fragment.global_offset, coordinate, strict=True)
+        )
+        values.append(
+            global_coordinate[0] * 48 + global_coordinate[1] * 8 + global_coordinate[2]
+        )
+    return bytes(values)
+
+
 def make_weight_store(
     store: InMemoryStore | None = None,
     *,
     max_range_bytes: int = 64 * 1024 * 1024,
     max_ranges_per_request: int = 1024,
+    max_region_segments: int = 1_000_000,
 ):
     current = store or InMemoryStore()
     return current, WeightStore(
@@ -277,6 +363,7 @@ def make_weight_store(
         ),
         max_range_bytes=max_range_bytes,
         max_ranges_per_request=max_ranges_per_request,
+        max_region_segments=max_region_segments,
     )
 
 
@@ -289,6 +376,60 @@ def upload_all(weight_store: WeightStore, plan, manifests):
         weight_store.abort_upload(plan, receipts)
         raise
     return receipts
+
+
+@pytest.mark.parametrize("target_dim", [1, 2])
+def test_store_v2_preserves_expert_boxes_and_loads_cross_dim(
+    target_dim: int,
+) -> None:
+    store, weight_store = make_weight_store(max_ranges_per_request=5)
+    sources = nd_store_manifests("source", source=True)
+    targets = nd_store_manifests("target", source=False, target_dim=target_dim)
+
+    upload_plan = weight_store.prepare_upload(sources)
+
+    assert upload_plan.manifest.format_version == 2
+    assert upload_plan.manifest.tensors[0].effective_shard_dims == (0,)
+    assert len(upload_plan.operations) == 4
+    assert len({item.target.object_key for item in upload_plan.operations}) == 4
+    assert {item.target.global_offset for item in upload_plan.operations} == {
+        (rank, 0, 0) for rank in range(4)
+    }
+
+    manifest = weight_store.commit(
+        upload_plan, upload_all(weight_store, upload_plan, sources)
+    )
+    loaded = weight_store.load_manifest(manifest.manifest_key)
+    load_plan = weight_store.plan_load(loaded, targets)
+    for target in targets:
+        weight_store.load(load_plan, target)
+
+    assert loaded == manifest
+    assert all(route.source_pp is None for route in load_plan.transfer.pipeline_routes)
+    assert max(store.range_batch_sizes) <= 5
+    for target in targets:
+        assert bytes(target.fragments[0].owner) == expected_nd_fragment(
+            target.fragments[0]
+        )
+
+
+def test_store_nd_lowering_limit_fails_before_registration_or_read() -> None:
+    store, weight_store = make_weight_store(max_region_segments=5)
+    sources = nd_store_manifests("source", source=True)
+    targets = nd_store_manifests("target", source=False, target_dim=2)
+    upload_plan = weight_store.prepare_upload(sources)
+    manifest = weight_store.commit(
+        upload_plan, upload_all(weight_store, upload_plan, sources)
+    )
+    load_plan = weight_store.plan_load(manifest, targets)
+    register_calls = store.register_calls
+    range_get_calls = store.range_get_calls
+
+    with pytest.raises(WeightStoreError, match="max_region_segments"):
+        weight_store.load(load_plan, targets[0])
+
+    assert store.register_calls == register_calls
+    assert store.range_get_calls == range_get_calls
 
 
 def test_upload_deduplicates_dp_and_commits_manifest_last() -> None:
