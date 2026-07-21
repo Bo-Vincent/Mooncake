@@ -1,7 +1,7 @@
 # N-D Logical-Box 异构权重转换设计
 
-日期：2026-07-21  
-状态：已确认，待实现
+日期：2026-07-21
+状态：已实现，并通过单元、Store、CUDA TE 和真实推理 smoke 验证
 
 ## 1. 目标
 
@@ -289,8 +289,22 @@ planner 内不保存展开后的 segments。
 - `max_region_segments`：单个 region 允许 lowering 的 segment 总数，超过时
   fail closed，提示使用能够原生消费 N-D region 的 executor。
 
+target 物理冲突校验不会把整个模型的 segment 总数当成固定拒绝阈值。对于
+同一 runtime fragment，只有当所有 `TransferRegion` 都是 canonical geometry，
+且 logical boxes 可证明完整、无重叠地覆盖 fragment 时，校验器才把它压缩成
+一个 `[address, address + nbytes)` 区间；不同完整 fragment 之间直接检查这些
+区间。无法作出该证明的手工或不完整 operations 仍使用有预算的 lazy segment
+扫描并 fail closed。这样既不会因大模型累计超过 100 万 segments 而误拒绝，
+也不会取消真实物理地址冲突校验。
+
 因此 planner operation 数量只与 fragment-box overlap 数量相关，不与 row 或
 element 数量相关；TE 的临时 host metadata 始终受 batch 上界限制。
+
+planner 对每个 logical tensor 的 source boxes 建立纯几何 interval index，选择
+source box 区分度最高的维度做候选查询，再调用完整 N-D overlap 和 coverage
+校验。该索引不读取 tensor 名字，也不假设查询维度等于 target shard dimension；
+因此 dim0 -> dim1/dim2 时会返回所有真实相交 source boxes，但不会让每个
+target expert allocation 线性扫描全部 source experts。
 
 对于本次基于 contiguous copy API 的 TE，跨维转换在数学上仍可能需要多个
 实际 contiguous writes。该设计限制的是 planner 对象数量和 lowering 内存，
@@ -349,6 +363,66 @@ SGLang 等框架 adapter 负责：
 
 Mooncake 不包含 Qwen、DeepSeek、q_proj、down_proj 或 expert 参数名规则。
 
+### 10.1 live G2G snapshot 生命周期
+
+一次 target model world 只获取一份 source snapshot：
+
+1. target global rank 0 调用 source control plane 获取 manifest、`transfer_id`
+   和 lease timeout，并在启动后台线程前同步续租一次；
+2. rank 0 将同一 session 广播给所有 target ranks，各 rank 只根据自己的
+   target manifest 生成和执行局部 plan；
+3. 每个 rank 即使本地 manifest/plan 失败，也必须到达一次固定的 world
+   readiness gate；rank 0 把 heartbeat 健康状态并入该 gate，只有全部 rank
+   ready 才允许任何 rank 开始 TE DMA；
+4. 各 rank 汇总 `(transfer_success, release_safe)`，只有全部 rank 都能证明
+   TE 调用完成后，rank 0 才停止 heartbeat 并释放 source lease 一次；
+5. 任一 rank 无法证明完成、collective 失败或 TE 返回不确定状态时，不主动
+   释放 source lease，由 TTL 保留 source allocation；
+6. source 的权重更新、offload 和 pointer 失效操作先在每个 rank 预留本地
+   snapshot update token，再做 world collective；全员成功才进入含 barrier 的
+   mutation body，否则取消已取得的 token 并让所有 rank 一致失败；
+7. source manager 同时记录 transfer deadline，scheduler 周期性清理已过 TTL
+   的 `transfer_id -> lease_id` bookkeeping；实际 lease 仍由 snapshot
+   coordinator 的 generation/TTL 语义裁决。
+
+这套控制面只用于 live runtime source。Store source 使用已发布 manifest 中的
+object generation 和 range bounds，不需要 source runtime heartbeat，也不改变
+Store 的 publication 语义。
+
+### 10.2 当前 TE lowering 与未来 executor
+
+本次 live G2G 使用同步 `execute`，并把每个 backend batch 限制为最多 8192 个
+contiguous operations。这个选择不是 planner 限制：当前 Python async binding
+在部分提交或状态查询失败时不能稳定返回可等待的 batch handle，也就无法证明
+DMA 已经终止；此时注销或复用 source allocation 会破坏 lease 安全条件。
+
+未来 async 或 M2N lowering 必须提供有所有权的执行 handle，并满足：
+
+- 部分提交失败仍返回可追踪 handle；
+- 能等待到成功或失败的 terminal 状态；
+- terminal 后显式释放 handle，并在释放失败时 fail closed；
+- executor 继续消费同一个 backend-neutral `TransferRegion`，不修改 manifest
+  或 planner，也不要求 `ncclMemAlloc`。
+
+因此当前同步 TE、未来安全 async TE 和未来 M2N executor 是同一 plan 的不同
+lowering，而不是三套模型语义或三套 reshard planner。
+
+### 10.3 当前性能证据
+
+H20 上 Qwen3-Next、source TP4/EP4、target TP2/EP2、RDMA G2G 的单轮 smoke：
+
+- 38,057 个 compact regions，lowering 为 431,081 个 contiguous segments；
+- profile 定位旧实现 `_overlap_box` 调用约 1,887 万次；
+- interval index 后 plan 从约 69.4 秒降到 5.1 秒；
+- manifest target spawn-to-ready 69.43 秒，cold checkpoint 108.78 秒，约
+  1.57x 加速；
+- source 在两次 target 启动期间持续推理，0 error、0 mismatch；target 与
+  cold baseline 的文本、token IDs、token 数、finish reason 完全相同，
+  token logprobs 在 1e-4 绝对/相对误差内一致。
+
+这是单轮 smoke，不替代最终多轮提交 SHA benchmark；但它证明 planner 不再
+被 expert candidate 的笛卡尔扫描主导。
+
 ## 11. 验收矩阵
 
 必须覆盖：
@@ -368,6 +442,24 @@ Mooncake 不包含 Qwen、DeepSeek、q_proj、down_proj 或 expert 参数名规�
 13. backend batch 不超过 `max_batch_operations`；
 14. region 超过 `max_region_segments` 时 fail closed；
 15. 最新分支上的真实推理权重复用 correctness、服务连续性和冷启动对比。
+
+当前验证结果（H20，2026-07-22）：
+
+- Mooncake 权重单元/集成：253 passed，12 skipped；
+- native CUDA Store：TP split/merge、四轴组合、8 个独立 expert allocation
+  cross-dim 共 3 passed；
+- RDMA CUDA TE：all-axis Sink、packed Reader、cross-dim Sink/Reader 共
+  4 passed；
+- SGLang manifest、planner adapter、loader lifecycle 和 benchmark harness：
+  114 passed；
+- Qwen3-Next TP4/EP4 -> TP2/EP2 live G2G 单轮 smoke：结果与 cold baseline
+  一致、source 服务持续可用，spawn-to-ready 约 1.57x 加速。
+
+真实 Qwen3-Next 当前 adapter 要求首尾 PP stage 同 rank，因此 PP2 <-> PP4 和
+包含 DP/PP 的四轴组合以 synthetic/native CUDA 数据验证；这属于模型 runtime
+adapter 的当前限制，不是 planner 的 logical-box 或 PP route 限制。量化模型若
+runtime 无法导出满足校验的 canonical manifest，同样 fail closed，不按参数名
+在 Mooncake core 中猜测或修补。
 
 ## 12. 交付边界
 

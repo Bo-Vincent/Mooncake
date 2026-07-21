@@ -42,6 +42,7 @@ _READER_BUFFER_BYTES = 256
 _READER_SOURCE_GUARD = 0x3C
 _READER_TARGET_SENTINEL = 0xD7
 _READER_VIEW_OFFSETS = (64, 128, 192)
+_CROSS_DIM_SHAPE = (4, 4, 6)
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,21 @@ class PackedReaderFixture:
             self.target_buffers, self.target_expected, strict=True
         ):
             assert buffer.read_range(0, _READER_BUFFER_BYTES) == expected
+
+
+@dataclass
+class CrossDimReaderFixture:
+    sources: tuple[RuntimeManifest, ...]
+    targets: tuple[RuntimeManifest, ...]
+    source_buffers: tuple[TransferBuffer, ...]
+    target_buffers: tuple[TransferBuffer, ...]
+    target_expected: tuple[bytes, ...]
+
+    def verify(self) -> None:
+        for buffer, expected in zip(
+            self.target_buffers, self.target_expected, strict=True
+        ):
+            assert buffer.read_range(0, buffer.size) == expected
 
 
 class HostBuffer:
@@ -688,6 +704,151 @@ def _build_packed_reader_fixture(
     )
 
 
+def _build_cross_dim_reader_fixture(
+    *,
+    revision: str,
+    source_endpoint: str,
+    target_endpoint: str,
+    allocate_source: Callable[[int], TransferBuffer],
+    allocate_target: Callable[[int], TransferBuffer],
+) -> CrossDimReaderFixture:
+    tensor_specs = (
+        ("expert-family.axis0-to-axis1", 1, 1, 2),
+        ("expert-family.axis0-to-axis2", 129, 2, 3),
+    )
+    source_descriptors = tuple(
+        TensorDescriptor(
+            tensor_id=tensor_id,
+            global_shape=_CROSS_DIM_SHAPE,
+            dtype="uint8",
+            itemsize=1,
+            partition_dim=None,
+            shard_dims=(0,),
+            layer_id=target_pp,
+            layout_fingerprint="native-reader:cross-dim:uint8:v2",
+        )
+        for tensor_id, _base, target_pp, _target_shards in tensor_specs
+    )
+    descriptor_by_id = {
+        descriptor.tensor_id: descriptor for descriptor in source_descriptors
+    }
+
+    source_buffers = []
+    sources = []
+    expert_extent = _CROSS_DIM_SHAPE[1] * _CROSS_DIM_SHAPE[2]
+    for expert_id in range(_CROSS_DIM_SHAPE[0]):
+        worker_id = f"cross-dim-source-e{expert_id}"
+        fragments = []
+        for tensor_id, base, _target_pp, _target_shards in tensor_specs:
+            payload = bytes(
+                base
+                + expert_id * expert_extent
+                + out_index * _CROSS_DIM_SHAPE[2]
+                + in_index
+                for out_index in range(_CROSS_DIM_SHAPE[1])
+                for in_index in range(_CROSS_DIM_SHAPE[2])
+            )
+            buffer = allocate_source(len(payload))
+            buffer.write(payload)
+            source_buffers.append(buffer)
+            fragments.append(
+                RuntimeFragment(
+                    fragment_id=f"{worker_id}:{tensor_id}",
+                    tensor_id=tensor_id,
+                    global_offset=(expert_id, 0, 0),
+                    local_shape=(1, *_CROSS_DIM_SHAPE[1:]),
+                    address=buffer.pointer,
+                    nbytes=len(payload),
+                    worker_id=worker_id,
+                    endpoint=source_endpoint,
+                    rank=ParallelRank(pp=0, ep=expert_id),
+                    lease_generation=1,
+                )
+            )
+        sources.append(
+            RuntimeManifest(
+                model_id="native-reader-cross-dim-e2e",
+                revision=revision,
+                instance_id=worker_id,
+                tensors=source_descriptors,
+                fragments=tuple(fragments),
+                lease_id=f"cross-dim-source-lease-e{expert_id}",
+                format_version=2,
+            )
+        )
+
+    targets = []
+    target_buffers = []
+    target_expected = []
+    for tensor_id, base, target_pp, target_shards in tensor_specs:
+        target_dim = target_pp
+        target_extent = _CROSS_DIM_SHAPE[target_dim] // target_shards
+        target_descriptor = TensorDescriptor(
+            tensor_id=tensor_id,
+            global_shape=_CROSS_DIM_SHAPE,
+            dtype="uint8",
+            itemsize=1,
+            partition_dim=None,
+            shard_dims=(target_dim,),
+            layer_id=descriptor_by_id[tensor_id].layer_id,
+            layout_fingerprint="native-reader:cross-dim:uint8:v2",
+        )
+        for target_rank in range(target_shards):
+            global_offset = [0, 0, 0]
+            local_shape = list(_CROSS_DIM_SHAPE)
+            global_offset[target_dim] = target_rank * target_extent
+            local_shape[target_dim] = target_extent
+            expected = bytes(
+                base
+                + expert_id * expert_extent
+                + out_index * _CROSS_DIM_SHAPE[2]
+                + in_index
+                for expert_id in range(_CROSS_DIM_SHAPE[0])
+                for out_index in range(
+                    global_offset[1], global_offset[1] + local_shape[1]
+                )
+                for in_index in range(
+                    global_offset[2], global_offset[2] + local_shape[2]
+                )
+            )
+            buffer = allocate_target(len(expected))
+            buffer.write(bytes([_READER_TARGET_SENTINEL]) * len(expected))
+            target_buffers.append(buffer)
+            target_expected.append(expected)
+            worker_id = f"cross-dim-target-p{target_pp}-t{target_rank}"
+            target_fragment = RuntimeFragment(
+                fragment_id=f"{worker_id}:{tensor_id}",
+                tensor_id=tensor_id,
+                global_offset=tuple(global_offset),
+                local_shape=tuple(local_shape),
+                address=buffer.pointer,
+                nbytes=len(expected),
+                worker_id=worker_id,
+                endpoint=target_endpoint,
+                rank=ParallelRank(tp=target_rank, pp=target_pp),
+                lease_generation=1,
+            )
+            targets.append(
+                RuntimeManifest(
+                    model_id="native-reader-cross-dim-e2e",
+                    revision=revision,
+                    instance_id=worker_id,
+                    tensors=(target_descriptor,),
+                    fragments=(target_fragment,),
+                    lease_id=f"cross-dim-target-lease-p{target_pp}-t{target_rank}",
+                    format_version=2,
+                )
+            )
+
+    return CrossDimReaderFixture(
+        sources=tuple(sources),
+        targets=tuple(targets),
+        source_buffers=tuple(source_buffers),
+        target_buffers=tuple(target_buffers),
+        target_expected=tuple(target_expected),
+    )
+
+
 def _execute_reader_fixture(
     fixture: PackedReaderFixture,
     execute_reader: Callable[
@@ -716,6 +877,79 @@ def _execute_reader_fixture(
         total_bytes += receipts[0].nbytes
 
     assert total_bytes == 104
+    fixture.verify()
+
+
+def _execute_cross_dim_reader_fixture(
+    fixture: CrossDimReaderFixture,
+    execute_reader: Callable[
+        [TransferPlan, tuple[RuntimeManifest, ...], RuntimeManifest],
+        tuple[DirectReadReceipt, ...],
+    ],
+) -> None:
+    expected_segments = {
+        "expert-family.axis0-to-axis1": 4,
+        "expert-family.axis0-to-axis2": 16,
+    }
+    for target in fixture.targets:
+        plan = plan_runtime_transfer_to_local_target(fixture.sources, target)
+        assert {
+            (route.source_pp, route.target_pp) for route in plan.pipeline_routes
+        } == {(0, target.fragments[0].rank.pp)}
+        assert len(plan.operations) == _CROSS_DIM_SHAPE[0]
+        assert sum(operation.total_bytes for operation in plan.operations) == (
+            target.fragments[0].nbytes
+        )
+
+        receipts = execute_reader(plan, fixture.sources, target)
+        assert len(receipts) == 1
+        assert receipts[0].source_endpoint == fixture.sources[0].fragments[0].endpoint
+        assert receipts[0].target_worker_id == target.fragments[0].worker_id
+        assert (
+            receipts[0].operation_count
+            == expected_segments[target.fragments[0].tensor_id]
+        )
+        assert receipts[0].nbytes == target.fragments[0].nbytes
+
+    fixture.verify()
+
+
+def _execute_cross_dim_sink_fixture(
+    fixture: CrossDimReaderFixture,
+    source_engine,
+) -> None:
+    plan = plan_runtime_transfer(fixture.sources, fixture.targets)
+    assert {(route.source_pp, route.target_pp) for route in plan.pipeline_routes} == {
+        (0, 1),
+        (0, 2),
+    }
+    source_registrations = tuple(
+        MemoryRegistrationLease.from_fragment(fragment)
+        for source in fixture.sources
+        for fragment in source.fragments
+    )
+    target_registrations = tuple(
+        MemoryRegistrationLease.from_fragment(fragment)
+        for target in fixture.targets
+        for fragment in target.fragments
+    )
+    sink = MooncakeTransferEngineSink(source_engine, max_batch_operations=5)
+    receipts = tuple(
+        receipt
+        for source in fixture.sources
+        for receipt in sink.execute(
+            plan,
+            source,
+            fixture.targets,
+            target_registrations=target_registrations,
+            source_pre_registered=True,
+            source_registrations=source_registrations,
+        )
+    )
+
+    assert sum(receipt.nbytes for receipt in receipts) == sum(
+        target.fragments[0].nbytes for target in fixture.targets
+    )
     fixture.verify()
 
 
@@ -833,6 +1067,60 @@ def test_reader_fixture_pulls_packed_tp1_weights_into_tp2_targets() -> None:
         _execute_reader_fixture(fixture, execute_reader)
 
 
+def test_reader_fixture_reshards_independent_experts_across_dimensions() -> None:
+    engine = HostTransferEngine()
+    fixture = _build_cross_dim_reader_fixture(
+        revision="unit-test",
+        source_endpoint="cross-dim-source:12345",
+        target_endpoint="cross-dim-target:12345",
+        allocate_source=HostBuffer,
+        allocate_target=HostBuffer,
+    )
+
+    def execute_reader(plan, sources, target):
+        return MooncakeTransferEngineReader(engine).execute(
+            plan,
+            sources,
+            target,
+            source_registrations=tuple(
+                MemoryRegistrationLease.from_fragment(
+                    fragment,
+                    runtime_lease_id=source.lease_id,
+                )
+                for source in sources
+                for fragment in source.fragments
+            ),
+            target_pre_registered=True,
+            target_registrations=tuple(
+                MemoryRegistrationLease.from_fragment(fragment)
+                for fragment in target.fragments
+            ),
+        )
+
+    with (
+        _registered_engine_buffers(engine, fixture.source_buffers),
+        _registered_engine_buffers(engine, fixture.target_buffers),
+    ):
+        _execute_cross_dim_reader_fixture(fixture, execute_reader)
+
+
+def test_sink_fixture_reshards_independent_experts_across_dimensions() -> None:
+    engine = HostTransferEngine()
+    fixture = _build_cross_dim_reader_fixture(
+        revision="unit-test",
+        source_endpoint="cross-dim-source:12345",
+        target_endpoint="cross-dim-target:12345",
+        allocate_source=HostBuffer,
+        allocate_target=HostBuffer,
+    )
+
+    with (
+        _registered_engine_buffers(engine, fixture.source_buffers),
+        _registered_engine_buffers(engine, fixture.target_buffers),
+    ):
+        _execute_cross_dim_sink_fixture(fixture, engine)
+
+
 @pytest.mark.skipif(
     os.getenv("MOONCAKE_WEIGHT_GPU_STORE_E2E") != "1",
     reason="set MOONCAKE_WEIGHT_GPU_STORE_E2E=1 to run the CUDA Store test",
@@ -912,6 +1200,104 @@ def test_gpu_store_moves_weights_across_dp_tp_pp_ep_together() -> None:
                 persisted = weight_store.commit(upload_plan, receipts)
                 weight_store.finalize_upload_session(upload_plan)
                 loaded = weight_store.load_manifest(persisted.manifest_key)
+                load_plan = weight_store.plan_load(loaded, fixture.targets)
+                for target in fixture.targets:
+                    weight_store.load(load_plan, target, pre_registered=True)
+                fixture.verify()
+        finally:
+            if upload_plan is not None:
+                _cleanup_store_upload(store, upload_plan)
+            close = getattr(store, "close", None)
+            if callable(close):
+                assert close() == 0
+
+
+@pytest.mark.skipif(
+    os.getenv("MOONCAKE_WEIGHT_GPU_STORE_E2E") != "1",
+    reason="set MOONCAKE_WEIGHT_GPU_STORE_E2E=1 to run the CUDA Store test",
+)
+def test_gpu_store_reshards_independent_experts_across_dimensions() -> None:
+    from mooncake.store import MooncakeDistributedStore
+
+    source_devices = _parse_cuda_devices(
+        os.environ, "MOONCAKE_WEIGHT_SOURCE_CUDA_DEVICES", default="0"
+    )
+    target_devices = _parse_cuda_devices(
+        os.environ, "MOONCAKE_WEIGHT_TARGET_CUDA_DEVICES", default="0"
+    )
+    runtimes = {
+        cuda_device: CudaRuntime(cuda_device)
+        for cuda_device in sorted(set(source_devices) | set(target_devices))
+    }
+    source_index = 0
+    target_index = 0
+    with ExitStack() as stack:
+
+        def allocate_source(size: int):
+            nonlocal source_index
+            device = source_devices[source_index % len(source_devices)]
+            source_index += 1
+            return stack.enter_context(CudaBuffer(runtimes[device], size))
+
+        def allocate_target(size: int):
+            nonlocal target_index
+            device = target_devices[target_index % len(target_devices)]
+            target_index += 1
+            return stack.enter_context(CudaBuffer(runtimes[device], size))
+
+        fixture = _build_cross_dim_reader_fixture(
+            revision=uuid4().hex,
+            source_endpoint="store-source:12345",
+            target_endpoint="store-target:12345",
+            allocate_source=allocate_source,
+            allocate_target=allocate_target,
+        )
+        store = MooncakeDistributedStore()
+        result = store.setup(
+            os.getenv(
+                "MOONCAKE_WEIGHT_LOCAL_HOSTNAME",
+                socket.gethostbyname(socket.gethostname()),
+            ),
+            os.getenv(
+                "MOONCAKE_WEIGHT_METADATA_SERVER",
+                "http://127.0.0.1:8080/metadata",
+            ),
+            128 * 1024 * 1024,
+            64 * 1024 * 1024,
+            os.getenv("MOONCAKE_WEIGHT_PROTOCOL", "tcp"),
+            os.getenv("MOONCAKE_WEIGHT_DEVICE", "eth0"),
+            os.getenv("MOONCAKE_WEIGHT_MASTER", "127.0.0.1:50051"),
+        )
+        assert result == 0
+        upload_plan = None
+        try:
+            all_buffers = [*fixture.source_buffers, *fixture.target_buffers]
+            with _registered_store_buffers(store, all_buffers):
+                weight_store = WeightStore(store)
+                upload_plan = weight_store.prepare_upload(
+                    fixture.sources, namespace="cross-dim-native-e2e"
+                )
+                assert len(upload_plan.operations) == 8
+                assert (
+                    len(
+                        {
+                            operation.target.object_key
+                            for operation in upload_plan.operations
+                        }
+                    )
+                    == 8
+                )
+                receipts = tuple(
+                    receipt
+                    for source in fixture.sources
+                    for receipt in weight_store.upload(
+                        upload_plan, source, pre_registered=True
+                    )
+                )
+                persisted = weight_store.commit(upload_plan, receipts)
+                weight_store.finalize_upload_session(upload_plan)
+                loaded = weight_store.load_manifest(persisted.manifest_key)
+                assert loaded == persisted
                 load_plan = weight_store.plan_load(loaded, fixture.targets)
                 for target in fixture.targets:
                     weight_store.load(load_plan, target, pre_registered=True)
@@ -1138,3 +1524,128 @@ def test_te_reader_cuda_pulls_packed_tp1_weights_into_tp2_targets() -> None:
         )
         with _registered_engine_buffers(source_engine, (fixture.source_buffer,)):
             _execute_reader_fixture(fixture, execute_reader)
+
+
+@pytest.mark.skipif(
+    os.getenv("MOONCAKE_WEIGHT_TE_GPU_E2E") != "1",
+    reason="set MOONCAKE_WEIGHT_TE_GPU_E2E=1 to run the CUDA TE test",
+)
+def test_te_sink_cuda_reshards_independent_experts_across_dimensions() -> None:
+    from mooncake.engine import TransferEngine
+
+    source_devices = _parse_cuda_devices(
+        os.environ, "MOONCAKE_WEIGHT_SOURCE_CUDA_DEVICES", default="0"
+    )
+    target_devices = _parse_cuda_devices(
+        os.environ, "MOONCAKE_WEIGHT_TARGET_CUDA_DEVICES", default="0"
+    )
+    runtimes = {device: CudaRuntime(device) for device in sorted(set(source_devices))}
+    local_hostname = os.getenv(
+        "MOONCAKE_WEIGHT_TE_HOSTNAME",
+        os.getenv(
+            "MOONCAKE_WEIGHT_LOCAL_HOSTNAME",
+            socket.gethostbyname(socket.gethostname()),
+        ),
+    )
+    protocol = os.getenv("MOONCAKE_WEIGHT_TE_PROTOCOL", "rdma")
+    transport_device = os.getenv("MOONCAKE_WEIGHT_TE_DEVICE", "")
+    source_engine = TransferEngine()
+    assert (
+        source_engine.initialize(
+            local_hostname,
+            "P2PHANDSHAKE",
+            protocol,
+            transport_device,
+        )
+        == 0
+    )
+
+    source_index = 0
+    with (
+        ExitStack() as stack,
+        _remote_cuda_target(
+            local_hostname=local_hostname,
+            protocol=protocol,
+            device=transport_device,
+            target_devices=target_devices,
+        ) as (target_endpoint, allocate_target, _execute_reader),
+    ):
+
+        def allocate_source(size: int):
+            nonlocal source_index
+            cuda_device = source_devices[source_index % len(source_devices)]
+            source_index += 1
+            return stack.enter_context(CudaBuffer(runtimes[cuda_device], size))
+
+        fixture = _build_cross_dim_reader_fixture(
+            revision=uuid4().hex,
+            source_endpoint=(f"{local_hostname}:{source_engine.get_rpc_port()}"),
+            target_endpoint=target_endpoint,
+            allocate_source=allocate_source,
+            allocate_target=allocate_target,
+        )
+        with _registered_engine_buffers(source_engine, fixture.source_buffers):
+            _execute_cross_dim_sink_fixture(fixture, source_engine)
+
+
+@pytest.mark.skipif(
+    os.getenv("MOONCAKE_WEIGHT_TE_GPU_E2E") != "1",
+    reason="set MOONCAKE_WEIGHT_TE_GPU_E2E=1 to run the CUDA TE test",
+)
+def test_te_reader_cuda_reshards_independent_experts_across_dimensions() -> None:
+    from mooncake.engine import TransferEngine
+
+    source_devices = _parse_cuda_devices(
+        os.environ, "MOONCAKE_WEIGHT_SOURCE_CUDA_DEVICES", default="0"
+    )
+    target_devices = _parse_cuda_devices(
+        os.environ, "MOONCAKE_WEIGHT_TARGET_CUDA_DEVICES", default="0"
+    )
+    runtimes = {device: CudaRuntime(device) for device in sorted(set(source_devices))}
+    local_hostname = os.getenv(
+        "MOONCAKE_WEIGHT_TE_HOSTNAME",
+        os.getenv(
+            "MOONCAKE_WEIGHT_LOCAL_HOSTNAME",
+            socket.gethostbyname(socket.gethostname()),
+        ),
+    )
+    protocol = os.getenv("MOONCAKE_WEIGHT_TE_PROTOCOL", "rdma")
+    transport_device = os.getenv("MOONCAKE_WEIGHT_TE_DEVICE", "")
+    source_engine = TransferEngine()
+    assert (
+        source_engine.initialize(
+            local_hostname,
+            "P2PHANDSHAKE",
+            protocol,
+            transport_device,
+        )
+        == 0
+    )
+    source_endpoint = f"{local_hostname}:{source_engine.get_rpc_port()}"
+
+    source_index = 0
+    with (
+        ExitStack() as stack,
+        _remote_cuda_target(
+            local_hostname=local_hostname,
+            protocol=protocol,
+            device=transport_device,
+            target_devices=target_devices,
+        ) as (target_endpoint, allocate_target, execute_reader),
+    ):
+
+        def allocate_source(size: int):
+            nonlocal source_index
+            cuda_device = source_devices[source_index % len(source_devices)]
+            source_index += 1
+            return stack.enter_context(CudaBuffer(runtimes[cuda_device], size))
+
+        fixture = _build_cross_dim_reader_fixture(
+            revision=uuid4().hex,
+            source_endpoint=source_endpoint,
+            target_endpoint=target_endpoint,
+            allocate_source=allocate_source,
+            allocate_target=allocate_target,
+        )
+        with _registered_engine_buffers(source_engine, fixture.source_buffers):
+            _execute_cross_dim_reader_fixture(fixture, execute_reader)

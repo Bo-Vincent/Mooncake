@@ -13,6 +13,7 @@ from mooncake.weight_transfer.manifest import (
 )
 from mooncake.weight_transfer.planner import (
     CopyRange,
+    TransferRegion,
     plan_runtime_transfer,
     plan_runtime_transfer_to_local_target,
 )
@@ -770,18 +771,41 @@ def test_te_reader_batches_large_repeats_without_segment_tuple_expansion(
         tensor=tensor,
     )[0]
     plan = plan_runtime_transfer_to_local_target(sources, target)
-    engine = FakeTransferEngine()
+    state = {"yielded": 0, "exhausted": False, "first_batch": None}
+
+    class StreamingProbeTransferEngine(FakeTransferEngine):
+        def batch_transfer_sync_read(
+            self,
+            endpoint,
+            target_addresses,
+            source_addresses,
+            sizes,
+        ):
+            if state["first_batch"] is None:
+                state["first_batch"] = (state["yielded"], state["exhausted"])
+            return super().batch_transfer_sync_read(
+                endpoint,
+                target_addresses,
+                source_addresses,
+                sizes,
+            )
+
+    engine = StreamingProbeTransferEngine()
 
     assert [operation.repeat for operation in plan.operations] == [repeat, repeat]
+    assert all(isinstance(operation, TransferRegion) for operation in plan.operations)
 
-    def reject_segment_tuple_expansion(
-        self: CopyRange,
-    ) -> None:
-        raise AssertionError(
-            f"reader expanded {self.repeat} segments through iter_segments"
-        )
+    original_iter_segments = TransferRegion.iter_segments
 
-    monkeypatch.setattr(CopyRange, "iter_segments", reject_segment_tuple_expansion)
+    def observe_streaming_segments(self: TransferRegion):
+        try:
+            for segment in original_iter_segments(self):
+                state["yielded"] += 1
+                yield segment
+        finally:
+            state["exhausted"] = True
+
+    monkeypatch.setattr(TransferRegion, "iter_segments", observe_streaming_segments)
 
     receipts = MooncakeTransferEngineReader(engine, max_batch_operations=1024).execute(
         plan,
@@ -797,6 +821,7 @@ def test_te_reader_batches_large_repeats_without_segment_tuple_expansion(
     assert all(len(call[3]) == 1024 for call in engine.calls)
     assert [receipt.operation_count for receipt in receipts] == [repeat, repeat]
     assert [receipt.nbytes for receipt in receipts] == [repeat * 4, repeat * 4]
+    assert state["first_batch"] == (1024, False)
     assert engine.calls[0][1][0] == 0x40000
     assert engine.calls[7][1][-1] == 0x40000 + (repeat - 1) * 8
     assert engine.calls[8][1][0] == 0x40004

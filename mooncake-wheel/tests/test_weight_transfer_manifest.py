@@ -272,6 +272,63 @@ def test_weight_manifest_v2_round_trip_preserves_shard_dims() -> None:
     assert json.loads(encoded)["tensors"][0]["shard_dims"] == [0, 1]
 
 
+def test_weight_manifest_v2_round_trip_preserves_legacy_shard_representation() -> None:
+    legacy = tensor_descriptor(tensor_id="layers.0.attn.qkv", expert_id=None)
+    nd_tensor = tensor_descriptor(
+        tensor_id="layers.2.experts.w1",
+        global_shape=(2, 8, 4),
+        partition_dim=None,
+        shard_dims=(0, 1),
+        expert_id=None,
+    )
+    group_id = "weights/default/qwen/rev"
+    manifest = WeightManifest(
+        namespace="default",
+        model_id="qwen",
+        revision="rev",
+        group_id=group_id,
+        manifest_key=f"{group_id}/manifest",
+        tensors=(legacy, nd_tensor),
+        fragments=(
+            StoredFragment(
+                fragment_id="legacy",
+                tensor_id=legacy.tensor_id,
+                global_offset=(0, 0),
+                local_shape=legacy.global_shape,
+                object_key=f"{group_id}/payload/legacy",
+                object_offset=0,
+                nbytes=64,
+            ),
+            *(
+                StoredFragment(
+                    fragment_id=f"nd-e{expert}-o{out_shard}",
+                    tensor_id=nd_tensor.tensor_id,
+                    global_offset=(expert, out_shard * 4, 0),
+                    local_shape=(1, 4, 4),
+                    object_key=f"{group_id}/payload/nd-e{expert}-o{out_shard}",
+                    object_offset=0,
+                    nbytes=32,
+                )
+                for expert in range(2)
+                for out_shard in range(2)
+            ),
+        ),
+        created_at="2026-07-22T00:00:00Z",
+        format_version=2,
+    )
+
+    encoded = manifest.to_json()
+    decoded = WeightManifest.from_json(encoded)
+
+    assert decoded == manifest
+    raw_legacy = next(
+        tensor
+        for tensor in json.loads(encoded)["tensors"]
+        if tensor["tensor_id"] == legacy.tensor_id
+    )
+    assert raw_legacy["shard_dims"] is None
+
+
 def test_weight_manifest_v1_json_schema_does_not_emit_shard_dims() -> None:
     manifest = WeightManifest(
         namespace="default",

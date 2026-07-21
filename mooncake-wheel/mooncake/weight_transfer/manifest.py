@@ -550,7 +550,7 @@ class WeightManifest:
                 "layout_fingerprint": tensor.layout_fingerprint,
             }
             if self.format_version == 2:
-                item["shard_dims"] = tensor.effective_shard_dims
+                item["shard_dims"] = tensor.shard_dims
             tensors.append(item)
         raw = {
             "namespace": self.namespace,

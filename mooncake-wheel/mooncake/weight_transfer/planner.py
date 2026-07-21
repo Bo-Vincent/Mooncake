@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass
 from math import prod
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Sequence
 
 from .manifest import (
     ParallelRank,
@@ -903,6 +904,134 @@ def _source_sort_key(fragment: SourceFragment) -> tuple:
     )
 
 
+@dataclass(frozen=True)
+class _CandidateInterval:
+    begin: int
+    end: int
+    group: tuple[SourceFragment, ...]
+
+
+@dataclass(frozen=True)
+class _CandidateIntervalNode:
+    center: int
+    crossing_by_begin: tuple[_CandidateInterval, ...]
+    crossing_by_end: tuple[_CandidateInterval, ...]
+    left: _CandidateIntervalNode | None = None
+    right: _CandidateIntervalNode | None = None
+
+    @classmethod
+    def build(
+        cls, intervals: Sequence[_CandidateInterval]
+    ) -> _CandidateIntervalNode | None:
+        if not intervals:
+            return None
+        center = sorted((interval.begin + interval.end) // 2 for interval in intervals)[
+            len(intervals) // 2
+        ]
+        left = []
+        right = []
+        crossing = []
+        for interval in intervals:
+            if interval.end <= center:
+                left.append(interval)
+            elif interval.begin > center:
+                right.append(interval)
+            else:
+                crossing.append(interval)
+        return cls(
+            center=center,
+            crossing_by_begin=tuple(
+                sorted(crossing, key=lambda item: (item.begin, item.end))
+            ),
+            crossing_by_end=tuple(
+                sorted(crossing, key=lambda item: (item.end, item.begin))
+            ),
+            left=cls.build(left),
+            right=cls.build(right),
+        )
+
+    def query(
+        self,
+        begin: int,
+        end: int,
+        result: list[tuple[SourceFragment, ...]],
+    ) -> None:
+        if end <= self.center:
+            for interval in self.crossing_by_begin:
+                if interval.begin >= end:
+                    break
+                result.append(interval.group)
+            if self.left is not None:
+                self.left.query(begin, end, result)
+            return
+        if begin > self.center:
+            for interval in reversed(self.crossing_by_end):
+                if interval.end <= begin:
+                    break
+                result.append(interval.group)
+            if self.right is not None:
+                self.right.query(begin, end, result)
+            return
+
+        result.extend(interval.group for interval in self.crossing_by_begin)
+        if begin < self.center and self.left is not None:
+            self.left.query(begin, end, result)
+        if self.right is not None:
+            self.right.query(begin, end, result)
+
+
+@dataclass(frozen=True)
+class _CandidateBoxIndex:
+    dimension: int
+    root: _CandidateIntervalNode
+
+    @classmethod
+    def build(cls, groups: Sequence[tuple[SourceFragment, ...]]) -> _CandidateBoxIndex:
+        if not groups:
+            raise ValueError("candidate box index requires source fragments")
+        ndim = len(groups[0][0].global_offset)
+        dimension = max(
+            range(ndim),
+            key=lambda dim: (
+                len(
+                    {
+                        (
+                            group[0].global_offset[dim],
+                            group[0].global_offset[dim] + group[0].local_shape[dim],
+                        )
+                        for group in groups
+                    }
+                ),
+                -dim,
+            ),
+        )
+        root = _CandidateIntervalNode.build(
+            tuple(
+                _CandidateInterval(
+                    begin=group[0].global_offset[dimension],
+                    end=(
+                        group[0].global_offset[dimension]
+                        + group[0].local_shape[dimension]
+                    ),
+                    group=group,
+                )
+                for group in groups
+            )
+        )
+        assert root is not None
+        return cls(dimension=dimension, root=root)
+
+    def query(self, target: RuntimeFragment) -> tuple[tuple[SourceFragment, ...], ...]:
+        begin = target.global_offset[self.dimension]
+        result = []
+        self.root.query(
+            begin,
+            begin + target.local_shape[self.dimension],
+            result,
+        )
+        return tuple(result)
+
+
 def _overlap_box(
     source: SourceFragment,
     target: RuntimeFragment,
@@ -1085,6 +1214,12 @@ def _plan_transfer(
     for tensor_candidates in candidates.values():
         for group in tensor_candidates.values():
             group.sort(key=_source_sort_key)
+    candidate_indexes = {
+        tensor_id: _CandidateBoxIndex.build(
+            tuple(tuple(group) for group in tensor_candidates.values())
+        )
+        for tensor_id, tensor_candidates in candidates.items()
+    }
 
     operations: list[TransferRegion] = []
     for target in sorted(target_fragments, key=lambda item: item.fragment_id):
@@ -1095,7 +1230,11 @@ def _plan_transfer(
         _validate_tensor_compatibility(source_tensor, target_tensor)
 
         overlaps: list[tuple[tuple[int, ...], tuple[int, ...], SourceFragment]] = []
-        for group in candidates.get(target.tensor_id, {}).values():
+        candidate_index = candidate_indexes.get(target.tensor_id)
+        candidate_groups = (
+            candidate_index.query(target) if candidate_index is not None else ()
+        )
+        for group in candidate_groups:
             if runtime_sources:
                 source_dp = source_dp_by_target_dp[target.rank.dp]
                 source_owner = source_replicas[source_dp][target.tensor_id]
@@ -1363,37 +1502,47 @@ def _absolute_target_segments(
         yield begin, begin + nbytes
 
 
-def _next_target_segment(
-    segments: Iterator[tuple[int, int]],
+def _budgeted_target_segments(
+    operation_index: int,
+    operation: TransferOperation,
     budget: _SegmentScanBudget,
-) -> tuple[int, int] | None:
-    try:
-        segment = next(segments)
-    except StopIteration:
+) -> Iterable[tuple[int, int, int]]:
+    for begin, end in _absolute_target_segments(operation):
+        budget.consume()
+        yield begin, end, operation_index
+
+
+def _target_fragment_scan_key(operation: TransferOperation) -> tuple:
+    target = operation.target
+    return (
+        target.fragment_id,
+        target.tensor_id,
+        target.worker_id,
+        target.endpoint,
+        target.lease_generation,
+        target.address,
+        target.nbytes,
+        target.global_offset,
+        target.local_shape,
+    )
+
+
+def _complete_target_fragment_segment(
+    indexed_operations: Sequence[tuple[int, TransferOperation]],
+) -> tuple[int, int, int] | None:
+    if not indexed_operations or not all(
+        isinstance(operation, TransferRegion) for _, operation in indexed_operations
+    ):
         return None
-    budget.consume()
-    return segment
-
-
-def _target_segments_overlap(
-    left: TransferOperation,
-    right: TransferOperation,
-    budget: _SegmentScanBudget,
-) -> bool:
-    left_segments = iter(_absolute_target_segments(left))
-    right_segments = iter(_absolute_target_segments(right))
-    left_segment = _next_target_segment(left_segments, budget)
-    right_segment = _next_target_segment(right_segments, budget)
-    while left_segment is not None and right_segment is not None:
-        left_begin, left_end = left_segment
-        right_begin, right_end = right_segment
-        if left_end <= right_begin:
-            left_segment = _next_target_segment(left_segments, budget)
-        elif right_end <= left_begin:
-            right_segment = _next_target_segment(right_segments, budget)
-        else:
-            return True
-    return False
+    target = indexed_operations[0][1].target
+    boxes = tuple(
+        (operation.overlap_offset, operation.overlap_shape)
+        for _, operation in indexed_operations
+        if isinstance(operation, TransferRegion)
+    )
+    if not _boxes_exactly_cover(target.global_offset, target.local_shape, boxes):
+        return None
+    return target.address, target.address + target.nbytes, indexed_operations[0][0]
 
 
 def _validate_target_physical_ranges(
@@ -1418,24 +1567,44 @@ def _validate_target_physical_ranges(
         ).append(operation)
 
     for scoped_operations in by_executor.values():
-        budget = _SegmentScanBudget(max_segment_checks)
-        ordered = sorted(scoped_operations, key=_target_physical_bounds)
-        active: list[TransferOperation] = []
-        for operation in ordered:
-            begin, _ = _target_physical_bounds(operation)
-            active = [
-                candidate
-                for candidate in active
-                if _target_physical_bounds(candidate)[1] > begin
-            ]
-            if any(
-                _target_segments_overlap(candidate, operation, budget)
-                for candidate in active
-            ):
-                raise ValueError(
-                    f"conflicting target physical range: {operation.target.fragment_id}"
+        by_fragment: dict[tuple, list[tuple[int, TransferOperation]]] = {}
+        for index, operation in enumerate(scoped_operations):
+            by_fragment.setdefault(_target_fragment_scan_key(operation), []).append(
+                (index, operation)
+            )
+
+        complete_segments = []
+        incomplete_operation_indices = set()
+        for indexed_operations in by_fragment.values():
+            complete_segment = _complete_target_fragment_segment(indexed_operations)
+            if complete_segment is None:
+                incomplete_operation_indices.update(
+                    index for index, _ in indexed_operations
                 )
-            active.append(operation)
+            else:
+                complete_segments.append(complete_segment)
+        complete_segments.sort()
+
+        budget = _SegmentScanBudget(max_segment_checks)
+        segment_streams: list[Iterable[tuple[int, int, int]]] = []
+        if complete_segments:
+            segment_streams.append(iter(complete_segments))
+        segment_streams.extend(
+            (
+                _budgeted_target_segments(index, operation, budget)
+                for index, operation in enumerate(scoped_operations)
+                if index in incomplete_operation_indices
+            )
+        )
+        ordered_segments = heapq.merge(*segment_streams)
+        previous_end = -1
+        for begin, end, operation_index in ordered_segments:
+            if begin < previous_end:
+                raise ValueError(
+                    "conflicting target physical range: "
+                    f"{scoped_operations[operation_index].target.fragment_id}"
+                )
+            previous_end = max(previous_end, end)
 
 
 def _build_pipeline_routes(

@@ -6,6 +6,7 @@ from math import prod
 
 import pytest
 
+import mooncake.weight_transfer.planner as planner_module
 from mooncake.weight_transfer.manifest import (
     ParallelRank,
     RuntimeFragment,
@@ -416,8 +417,9 @@ def strided_column_region(
     target_address: int,
     column: int,
     rows: int = 4,
+    columns: int = 2,
 ) -> TransferRegion:
-    shape = (rows, 2)
+    shape = (rows, columns)
     source = RuntimeFragment(
         fragment_id=f"source-{fragment_suffix}",
         tensor_id=tensor_id,
@@ -452,8 +454,8 @@ def strided_column_region(
         target_base_offset=column * 2,
         inner_bytes=2,
         outer_loop_counts=(rows,),
-        source_strides=(4,),
-        target_strides=(4,),
+        source_strides=(columns * 2,),
+        target_strides=(columns * 2,),
     )
 
 
@@ -536,6 +538,74 @@ def test_target_segment_overlap_scan_budget_fails_closed() -> None:
 
     with pytest.raises(ValueError, match="segment scan budget"):
         _validate_target_physical_ranges((left, right), max_segment_checks=3)
+
+
+def test_target_physical_scan_visits_each_emitted_segment_once() -> None:
+    rows = 16
+    columns = 32
+    regions = tuple(
+        strided_column_region(
+            tensor_id=f"column-{column}",
+            fragment_suffix=f"column-{column}",
+            target_fragment_id=f"target-column-{column}",
+            target_address=0x40000,
+            column=column,
+            rows=rows,
+            columns=columns,
+        )
+        for column in range(columns)
+    )
+
+    _validate_target_physical_ranges(
+        regions,
+        max_segment_checks=rows * columns,
+    )
+
+
+def test_complete_target_fragment_is_not_rejected_by_global_segment_budget() -> None:
+    rows = 500_001
+    regions = tuple(
+        strided_column_region(
+            tensor_id="shared-tensor",
+            fragment_suffix=f"column-{column}",
+            target_fragment_id="shared-target",
+            target_address=0x40000,
+            column=column,
+            rows=rows,
+            columns=2,
+        )
+        for column in range(2)
+    )
+
+    assert sum(region.segment_count for region in regions) > 1_000_000
+    _validate_target_physical_ranges(regions)
+
+
+def test_complete_fragment_and_fallback_region_overlap_is_rejected() -> None:
+    complete_regions = tuple(
+        strided_column_region(
+            tensor_id="complete-tensor",
+            fragment_suffix=f"complete-column-{column}",
+            target_fragment_id="complete-target",
+            target_address=0x40000,
+            column=column,
+            rows=8,
+            columns=2,
+        )
+        for column in range(2)
+    )
+    fallback_region = strided_column_region(
+        tensor_id="fallback-tensor",
+        fragment_suffix="fallback",
+        target_fragment_id="fallback-target",
+        target_address=0x40000 - 2,
+        column=1,
+        rows=8,
+        columns=2,
+    )
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        _validate_target_physical_ranges((*complete_regions, fallback_region))
 
 
 def test_runtime_plan_records_explicit_noop_source_executors() -> None:
@@ -1224,6 +1294,83 @@ def test_large_inner_axis_partition_uses_compact_strided_ranges() -> None:
     assert len(plan.operations) == 4
     assert {operation.repeat for operation in plan.operations} == {8192}
     assert plan.total_bytes == 8192 * 8192 * 2
+
+
+def test_expert_box_index_avoids_scanning_every_source_expert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expert_count = 256
+    tensor = replace(
+        descriptor(),
+        tensor_id="layers.2.experts.w1",
+        global_shape=(expert_count, 4, 4),
+        partition_dim=None,
+        shard_dims=(0,),
+        expert_id=None,
+    )
+    sources = tuple(
+        RuntimeManifest(
+            model_id="qwen-moe",
+            revision="step-42",
+            instance_id=f"source-e{expert_id}",
+            tensors=(tensor,),
+            fragments=(
+                RuntimeFragment(
+                    fragment_id=f"source-e{expert_id}-fragment",
+                    tensor_id=tensor.tensor_id,
+                    global_offset=(expert_id, 0, 0),
+                    local_shape=(1, 4, 4),
+                    address=0x10000 + expert_id * 0x1000,
+                    nbytes=32,
+                    worker_id=f"source-e{expert_id}",
+                    endpoint="source:12345",
+                    rank=ParallelRank(ep=expert_id),
+                    lease_generation=1,
+                ),
+            ),
+            lease_id=f"source-lease-e{expert_id}",
+            format_version=2,
+        )
+        for expert_id in range(expert_count)
+    )
+    target_expert = 127
+    target = RuntimeManifest(
+        model_id="qwen-moe",
+        revision="step-42",
+        instance_id="target",
+        tensors=(tensor,),
+        fragments=(
+            RuntimeFragment(
+                fragment_id="target-fragment",
+                tensor_id=tensor.tensor_id,
+                global_offset=(target_expert, 0, 0),
+                local_shape=(1, 4, 4),
+                address=0x800000,
+                nbytes=32,
+                worker_id="target",
+                endpoint="target:12345",
+                rank=ParallelRank(ep=0),
+                lease_generation=1,
+            ),
+        ),
+        lease_id="target-lease",
+        format_version=2,
+    )
+    overlap_calls = 0
+    original_overlap_box = planner_module._overlap_box
+
+    def counted_overlap_box(source, target):
+        nonlocal overlap_calls
+        overlap_calls += 1
+        return original_overlap_box(source, target)
+
+    monkeypatch.setattr(planner_module, "_overlap_box", counted_overlap_box)
+
+    plan = plan_runtime_transfer_to_local_target(sources, target)
+
+    assert len(plan.operations) == 1
+    assert plan.operations[0].source.global_offset == (target_expert, 0, 0)
+    assert overlap_calls <= 4
 
 
 def test_all_parallel_axes_change_in_one_plan() -> None:

@@ -413,6 +413,57 @@ def test_store_v2_preserves_expert_boxes_and_loads_cross_dim(
         )
 
 
+def test_store_v2_commit_preserves_mixed_legacy_descriptor() -> None:
+    legacy = TensorDescriptor(
+        tensor_id="layers.0.attn.qkv",
+        global_shape=(4,),
+        dtype="uint8",
+        itemsize=1,
+        partition_dim=0,
+        layer_id=0,
+        expert_id=None,
+        layout_fingerprint="framework:legacy-contiguous:v1",
+    )
+    sources = []
+    for rank, manifest in enumerate(nd_store_manifests("source", source=True)):
+        owner = (ctypes.c_ubyte * 1)(rank)
+        legacy_fragment = RuntimeFragment(
+            fragment_id=f"source-{rank}-legacy",
+            tensor_id=legacy.tensor_id,
+            global_offset=(rank,),
+            local_shape=(1,),
+            address=ctypes.addressof(owner),
+            nbytes=1,
+            worker_id=manifest.fragments[0].worker_id,
+            endpoint=manifest.fragments[0].endpoint,
+            rank=manifest.fragments[0].rank,
+            lease_generation=1,
+            owner=owner,
+        )
+        sources.append(
+            replace(
+                manifest,
+                tensors=(*manifest.tensors, legacy),
+                fragments=(*manifest.fragments, legacy_fragment),
+            )
+        )
+
+    _store, weight_store = make_weight_store()
+    upload_plan = weight_store.prepare_upload(tuple(sources))
+    persisted = weight_store.commit(
+        upload_plan,
+        upload_all(weight_store, upload_plan, tuple(sources)),
+    )
+    loaded = weight_store.load_manifest(persisted.manifest_key)
+
+    assert loaded == persisted == upload_plan.manifest
+    loaded_legacy = next(
+        tensor for tensor in loaded.tensors if tensor.tensor_id == legacy.tensor_id
+    )
+    assert loaded_legacy.partition_dim == 0
+    assert loaded_legacy.shard_dims is None
+
+
 def test_store_nd_lowering_limit_fails_before_registration_or_read() -> None:
     store, weight_store = make_weight_store(max_region_segments=5)
     sources = nd_store_manifests("source", source=True)
