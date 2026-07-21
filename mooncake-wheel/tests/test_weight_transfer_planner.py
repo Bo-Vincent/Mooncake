@@ -13,6 +13,7 @@ from mooncake.weight_transfer.manifest import (
 )
 from mooncake.weight_transfer.planner import (
     CopyRange,
+    _complete_runtime_source_replicas,
     plan_runtime_transfer,
     plan_runtime_transfer_to_local_target,
     resolve_executor_plans,
@@ -91,6 +92,38 @@ def operation_for_target(plan, tp_rank: int, dp_rank: int = 0):
         for operation in plan.operations
         if operation.target.rank.tp == tp_rank and operation.target.rank.dp == dp_rank
     ]
+
+
+def distribute_tp_shards_across_ep_ranks(
+    manifests: tuple[RuntimeManifest, ...],
+) -> tuple[RuntimeManifest, ...]:
+    return tuple(
+        replace(
+            manifest,
+            fragments=tuple(
+                replace(
+                    fragment,
+                    rank=replace(fragment.rank, ep=fragment.rank.tp),
+                )
+                for fragment in manifest.fragments
+            ),
+        )
+        for manifest in manifests
+    )
+
+
+class CountingFragment:
+    def __init__(self, fragment: RuntimeFragment, accesses: list[int]) -> None:
+        self._fragment = fragment
+        self._accesses = accesses
+
+    @property
+    def tensor_id(self) -> str:
+        self._accesses[0] += 1
+        return self._fragment.tensor_id
+
+    def __getattr__(self, name: str):
+        return getattr(self._fragment, name)
 
 
 def test_copy_range_rejects_fragment_overflow_and_non_integer_offsets() -> None:
@@ -733,6 +766,128 @@ def test_all_parallel_axes_change_in_one_plan() -> None:
     assert {op.source.rank.dp for op in operation_for_target(plan, 0, 0)} == {0}
     assert {op.source.rank.dp for op in operation_for_target(plan, 0, 1)} == {1}
     assert {op.source.rank.dp for op in operation_for_target(plan, 0, 2)} == {0}
+
+
+def test_dense_source_tp_coverage_can_span_ep_ranks() -> None:
+    tensor = replace(
+        descriptor(),
+        tensor_id="layers.2.self_attn.q_proj.weight",
+        expert_id=None,
+    )
+    source = distribute_tp_shards_across_ep_ranks(
+        tp_manifests(
+            tp=4,
+            pp_rank=0,
+            ep_rank=0,
+            address_base=0x10000,
+            worker_prefix="source",
+            tensor=tensor,
+        )
+    )
+    target = tp_manifests(
+        tp=2,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+        tensor=tensor,
+    )
+
+    plan = plan_runtime_transfer(source, target)
+
+    assert len(plan.operations) == 4
+    assert {operation.source.rank.ep for operation in plan.operations} == {
+        0,
+        1,
+        2,
+        3,
+    }
+
+
+def test_source_replica_validation_indexes_fragments_by_tensor_once() -> None:
+    tensor_count = 64
+    tensors = tuple(
+        replace(
+            descriptor(),
+            tensor_id=f"layers.{index}.self_attn.q_proj.weight",
+            layer_id=index,
+            expert_id=None,
+        )
+        for index in range(tensor_count)
+    )
+    fragments = tuple(
+        tp_manifests(
+            tp=1,
+            pp_rank=0,
+            ep_rank=0,
+            address_base=0x10000 + index * 0x1000,
+            worker_prefix=f"source-{index}",
+            tensor=tensor,
+        )[0].fragments[0]
+        for index, tensor in enumerate(tensors)
+    )
+    accesses = [0]
+
+    replicas = _complete_runtime_source_replicas(
+        {tensor.tensor_id: tensor for tensor in tensors},
+        tuple(CountingFragment(fragment, accesses) for fragment in fragments),
+    )
+
+    assert set(replicas) == {0}
+    assert accesses[0] <= tensor_count * 3
+
+
+def test_dense_target_tp_coverage_can_span_ep_ranks() -> None:
+    tensor = replace(
+        descriptor(),
+        tensor_id="layers.2.self_attn.q_proj.weight",
+        expert_id=None,
+    )
+    source = tp_manifests(
+        tp=4,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+        tensor=tensor,
+    )
+    target = distribute_tp_shards_across_ep_ranks(
+        tp_manifests(
+            tp=2,
+            pp_rank=0,
+            ep_rank=0,
+            address_base=0x40000,
+            worker_prefix="target",
+            tensor=tensor,
+        )
+    )
+
+    plan = plan_runtime_transfer(source, target)
+
+    assert len(plan.operations) == 4
+    assert {operation.target.rank.ep for operation in plan.operations} == {0, 1}
+
+
+def test_expert_tp_coverage_cannot_span_ep_owners() -> None:
+    source = distribute_tp_shards_across_ep_ranks(
+        tp_manifests(
+            tp=2,
+            pp_rank=0,
+            ep_rank=0,
+            address_base=0x10000,
+            worker_prefix="source",
+        )
+    )
+    target = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+
+    with pytest.raises(ValueError, match="no complete DP replica"):
+        plan_runtime_transfer(source, target)
 
 
 def test_local_plan_uses_one_complete_source_dp_replica() -> None:

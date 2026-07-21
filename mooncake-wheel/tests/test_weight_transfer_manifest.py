@@ -154,6 +154,36 @@ def test_runtime_manifest_imports_framework_inventory_without_framework_dependen
     assert manifest.fragments[0].owner == ("owner", "sglang-fragment")
 
 
+@pytest.mark.parametrize("aliases", ["ab", b"ab"])
+def test_runtime_manifest_rejects_scalar_alias_sequences(aliases) -> None:
+    inventory = SimpleNamespace(
+        model_id="qwen3.5-0.8b",
+        revision="step-42",
+        instance_id="sglang-instance",
+        generation=9,
+        tensors=(framework_tensor(aliases=aliases),),
+        format_version=1,
+    )
+
+    with pytest.raises(ValueError, match="aliases must be a sequence"):
+        RuntimeManifest.from_runtime_inventory(inventory)
+
+
+def test_runtime_manifest_accepts_alias_lists() -> None:
+    inventory = SimpleNamespace(
+        model_id="qwen3.5-0.8b",
+        revision="step-42",
+        instance_id="sglang-instance",
+        generation=9,
+        tensors=(framework_tensor(aliases=["model.weight", "model.alias"]),),
+        format_version=1,
+    )
+
+    manifest = RuntimeManifest.from_runtime_inventory(inventory)
+
+    assert manifest.fragments[0].aliases == ("model.alias", "model.weight")
+
+
 @pytest.mark.parametrize("mapping_record", [False, True])
 def test_runtime_manifest_defaults_missing_optional_tensor_semantics(
     mapping_record: bool,

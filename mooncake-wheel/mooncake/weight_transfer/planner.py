@@ -15,6 +15,7 @@ from .manifest import (
 
 
 SourceFragment = RuntimeFragment | StoredFragment
+RuntimeTensorOwner = tuple[int, int | None]
 
 
 @dataclass(frozen=True)
@@ -369,18 +370,20 @@ def _validate_target_coverage(
 ) -> None:
     if not target_fragments:
         raise ValueError("target manifests have no fragments")
-    dp_ranks = sorted({fragment.rank.dp for fragment in target_fragments})
+    fragments_by_dp_and_tensor: dict[int, dict[str, list[RuntimeFragment]]] = {}
+    for fragment in target_fragments:
+        fragments_by_dp_and_tensor.setdefault(fragment.rank.dp, {}).setdefault(
+            fragment.tensor_id, []
+        ).append(fragment)
+    dp_ranks = sorted(fragments_by_dp_and_tensor)
     for dp_rank in dp_ranks:
         for tensor in target_tensors.values():
-            fragments_by_owner: dict[tuple[int, int], list[RuntimeFragment]] = {}
-            for fragment in target_fragments:
-                if (
-                    fragment.rank.dp != dp_rank
-                    or fragment.tensor_id != tensor.tensor_id
-                ):
-                    continue
+            fragments_by_owner: dict[RuntimeTensorOwner, list[RuntimeFragment]] = {}
+            for fragment in fragments_by_dp_and_tensor[dp_rank].get(
+                tensor.tensor_id, ()
+            ):
                 fragments_by_owner.setdefault(
-                    (fragment.rank.pp, fragment.rank.ep), []
+                    _runtime_tensor_owner(tensor, fragment), []
                 ).append(fragment)
             if not fragments_by_owner or any(
                 not _fragments_fully_cover_tensor(tensor, fragments)
@@ -420,28 +423,42 @@ def _fragments_fully_cover_tensor(
     return cursor == tensor.global_shape[dim]
 
 
+def _runtime_tensor_owner(
+    tensor: TensorDescriptor, fragment: RuntimeFragment
+) -> RuntimeTensorOwner:
+    return (
+        fragment.rank.pp,
+        fragment.rank.ep if tensor.expert_id is not None else None,
+    )
+
+
 def _complete_runtime_source_replicas(
     source_tensors: dict[str, TensorDescriptor],
     source_fragments: Sequence[RuntimeFragment],
-) -> dict[int, dict[str, tuple[int, int]]]:
-    replicas: dict[int, dict[str, tuple[int, int]]] = {}
+) -> dict[int, dict[str, RuntimeTensorOwner]]:
+    replicas: dict[int, dict[str, RuntimeTensorOwner]] = {}
     generation_by_dp: dict[int, int] = {}
-    for dp_rank in sorted({fragment.rank.dp for fragment in source_fragments}):
-        replica_fragments = [
-            fragment for fragment in source_fragments if fragment.rank.dp == dp_rank
-        ]
-        generations = {fragment.lease_generation for fragment in replica_fragments}
+    fragments_by_dp_and_tensor: dict[int, dict[str, list[RuntimeFragment]]] = {}
+    generations_by_dp: dict[int, set[int]] = {}
+    for fragment in source_fragments:
+        dp_rank = fragment.rank.dp
+        fragments_by_dp_and_tensor.setdefault(dp_rank, {}).setdefault(
+            fragment.tensor_id, []
+        ).append(fragment)
+        generations_by_dp.setdefault(dp_rank, set()).add(fragment.lease_generation)
+    for dp_rank in sorted(fragments_by_dp_and_tensor):
+        generations = generations_by_dp[dp_rank]
         if len(generations) != 1:
             continue
-        owner_by_tensor: dict[str, tuple[int, int]] = {}
+        owner_by_tensor: dict[str, RuntimeTensorOwner] = {}
         complete = True
         for tensor in source_tensors.values():
-            fragments_by_owner: dict[tuple[int, int], list[RuntimeFragment]] = {}
-            for fragment in replica_fragments:
-                if fragment.tensor_id != tensor.tensor_id:
-                    continue
+            fragments_by_owner: dict[RuntimeTensorOwner, list[RuntimeFragment]] = {}
+            for fragment in fragments_by_dp_and_tensor[dp_rank].get(
+                tensor.tensor_id, ()
+            ):
                 fragments_by_owner.setdefault(
-                    (fragment.rank.pp, fragment.rank.ep), []
+                    _runtime_tensor_owner(tensor, fragment), []
                 ).append(fragment)
             complete_owners = [
                 owner
@@ -643,7 +660,7 @@ def _plan_transfer(
                     for fragment in group
                     if isinstance(fragment, RuntimeFragment)
                     and fragment.rank.dp == source_dp
-                    and (fragment.rank.pp, fragment.rank.ep) == source_owner
+                    and _runtime_tensor_owner(source_tensor, fragment) == source_owner
                 ]
                 if not eligible:
                     continue

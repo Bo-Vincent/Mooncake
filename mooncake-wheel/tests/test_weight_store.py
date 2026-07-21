@@ -14,6 +14,7 @@ from mooncake.weight_transfer.manifest import (
     TensorDescriptor,
     WeightManifest,
 )
+from mooncake.weight_transfer.planner import plan_runtime_transfer
 from mooncake.weight_transfer.store import (
     UploadReceipt,
     WeightStore,
@@ -365,6 +366,109 @@ def test_prepare_upload_rejects_mixed_generations_within_one_dp_replica() -> Non
 
     with pytest.raises(ValueError, match="generation-consistent DP replica"):
         weight_store.prepare_upload(tuple(sources))
+
+
+def test_prepare_upload_matches_te_planner_owner_selection() -> None:
+    higher_owner = tuple(
+        replace(
+            manifest,
+            fragments=(
+                replace(
+                    manifest.fragments[0],
+                    rank=replace(manifest.fragments[0].rank, pp=2, ep=2),
+                ),
+            ),
+        )
+        for manifest in source_manifests(dp=1, tp=2)
+    )
+    lower_owner = tuple(
+        replace(
+            manifest,
+            instance_id=f"{manifest.instance_id}-owner-1",
+            fragments=(
+                replace(
+                    manifest.fragments[0],
+                    fragment_id=f"{manifest.fragments[0].fragment_id}-owner-1",
+                    worker_id=f"{manifest.fragments[0].worker_id}-owner-1",
+                    endpoint=f"{manifest.fragments[0].worker_id}-owner-1:12345",
+                    rank=replace(manifest.fragments[0].rank, pp=1, ep=1),
+                ),
+            ),
+        )
+        for manifest in higher_owner
+    )
+    sources = (*higher_owner, *lower_owner)
+    targets = target_manifests(dp=1, tp=1)
+    _, weight_store = make_weight_store()
+
+    te_plan = plan_runtime_transfer(sources, targets)
+    store_plan = weight_store.prepare_upload(sources)
+
+    assert {
+        (operation.source.rank.pp, operation.source.rank.ep)
+        for operation in te_plan.operations
+    } == {(1, 1)}
+    assert {
+        (operation.source.rank.pp, operation.source.rank.ep)
+        for operation in store_plan.operations
+    } == {(1, 1)}
+
+
+def test_prepare_upload_matches_te_planner_rejecting_cross_owner_coverage() -> None:
+    sources = tuple(
+        replace(
+            manifest,
+            fragments=(
+                replace(
+                    manifest.fragments[0],
+                    rank=replace(
+                        manifest.fragments[0].rank,
+                        pp=manifest.fragments[0].rank.tp,
+                        ep=manifest.fragments[0].rank.tp,
+                    ),
+                ),
+            ),
+        )
+        for manifest in source_manifests(dp=1, tp=2)
+    )
+    targets = target_manifests(dp=1, tp=1)
+    _, weight_store = make_weight_store()
+
+    with pytest.raises(ValueError, match="not fully covered"):
+        plan_runtime_transfer(sources, targets)
+    with pytest.raises(ValueError, match="generation-consistent DP replica"):
+        weight_store.prepare_upload(sources)
+
+
+def test_prepare_upload_collects_dense_tp_shards_across_ep_ranks() -> None:
+    tensor = replace(
+        tensor_descriptor(),
+        tensor_id="layers.2.self_attn.q_proj.weight",
+        expert_id=None,
+    )
+    sources = tuple(
+        replace(
+            manifest,
+            tensors=(tensor,),
+            fragments=(
+                replace(
+                    manifest.fragments[0],
+                    tensor_id=tensor.tensor_id,
+                    rank=replace(
+                        manifest.fragments[0].rank,
+                        ep=manifest.fragments[0].rank.tp,
+                    ),
+                ),
+            ),
+        )
+        for manifest in source_manifests(dp=1, tp=2)
+    )
+    _, weight_store = make_weight_store()
+
+    plan = weight_store.prepare_upload(sources)
+
+    assert len(plan.operations) == 2
+    assert {operation.source.rank.ep for operation in plan.operations} == {0, 1}
 
 
 def test_weight_group_objects_are_hard_pinned_and_typed() -> None:

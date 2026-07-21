@@ -173,6 +173,17 @@ def _read_optional_field(value: Any, name: str) -> Any | None:
     return getattr(value, name, None)
 
 
+def _read_aliases(value: Any) -> tuple[str, ...]:
+    aliases = _read_optional_field(value, "aliases")
+    if aliases is None:
+        return ()
+    if isinstance(aliases, (str, bytes, bytearray)) or not isinstance(
+        aliases, Sequence
+    ):
+        raise ValueError("aliases must be a sequence of non-empty strings")
+    return tuple(aliases)
+
+
 def _canonical_stride(shape: tuple[int, ...]) -> tuple[int, ...]:
     stride = []
     running = 1
@@ -393,7 +404,7 @@ class RuntimeManifest:
                         ep=_read_field(rank, "ep"),
                     ),
                     lease_generation=lease_generation,
-                    aliases=tuple(_read_optional_field(record, "aliases") or ()),
+                    aliases=_read_aliases(record),
                     owner=(
                         owner_resolver(record) if owner_resolver is not None else None
                     ),
