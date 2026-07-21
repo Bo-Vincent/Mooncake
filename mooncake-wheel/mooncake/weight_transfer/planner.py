@@ -76,6 +76,26 @@ class ExecutorTransferPlan:
 
 
 @dataclass(frozen=True)
+class PipelineRouteGroup:
+    source_pp: int | None
+    target_pp: int
+    operation_indices: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "operation_indices", tuple(self.operation_indices))
+        if self.source_pp is not None and (
+            type(self.source_pp) is not int or self.source_pp < 0
+        ):
+            raise ValueError("pipeline route source_pp must be non-negative")
+        if type(self.target_pp) is not int or self.target_pp < 0:
+            raise ValueError("pipeline route target_pp must be non-negative")
+        if any(type(index) is not int or index < 0 for index in self.operation_indices):
+            raise ValueError("pipeline route indices must be non-negative integers")
+        if len(self.operation_indices) != len(set(self.operation_indices)):
+            raise ValueError("pipeline route has duplicate operation indices")
+
+
+@dataclass(frozen=True)
 class CopyRange:
     tensor_id: str
     source: SourceFragment
@@ -308,20 +328,28 @@ class TransferRegion:
         raise ValueError("N-D transfer region has multiple target strides")
 
     def validate_bounds(self) -> None:
-        source_end = self.source_base_offset + sum(
-            (count - 1) * stride
-            for count, stride in zip(
-                self.outer_loop_counts, self.source_strides, strict=True
+        source_end = (
+            self.source_base_offset
+            + sum(
+                (count - 1) * stride
+                for count, stride in zip(
+                    self.outer_loop_counts, self.source_strides, strict=True
+                )
             )
-        ) + self.inner_bytes
+            + self.inner_bytes
+        )
         if source_end > self.source.nbytes:
             raise ValueError("transfer region exceeds source fragment")
-        target_end = self.target_base_offset + sum(
-            (count - 1) * stride
-            for count, stride in zip(
-                self.outer_loop_counts, self.target_strides, strict=True
+        target_end = (
+            self.target_base_offset
+            + sum(
+                (count - 1) * stride
+                for count, stride in zip(
+                    self.outer_loop_counts, self.target_strides, strict=True
+                )
             )
-        ) + self.inner_bytes
+            + self.inner_bytes
+        )
         if target_end > self.target.nbytes:
             raise ValueError("transfer region exceeds target fragment")
 
@@ -335,16 +363,12 @@ class TransferRegion:
                 self.source_base_offset
                 + sum(
                     index * stride
-                    for index, stride in zip(
-                        indices, self.source_strides, strict=True
-                    )
+                    for index, stride in zip(indices, self.source_strides, strict=True)
                 ),
                 self.target_base_offset
                 + sum(
                     index * stride
-                    for index, stride in zip(
-                        indices, self.target_strides, strict=True
-                    )
+                    for index, stride in zip(indices, self.target_strides, strict=True)
                 ),
                 self.inner_bytes,
             )
@@ -427,11 +451,13 @@ class TransferPlan:
     operations: tuple[TransferOperation, ...]
     source_executors: tuple[ExecutorTransferPlan, ...] = ()
     target_executors: tuple[ExecutorTransferPlan, ...] = ()
+    pipeline_routes: tuple[PipelineRouteGroup, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operations", tuple(self.operations))
         object.__setattr__(self, "source_executors", tuple(self.source_executors))
         object.__setattr__(self, "target_executors", tuple(self.target_executors))
+        object.__setattr__(self, "pipeline_routes", tuple(self.pipeline_routes))
         if not self.model_id or not self.revision:
             raise ValueError("transfer plan identifiers must not be empty")
         for executor in (*self.source_executors, *self.target_executors):
@@ -439,6 +465,22 @@ class TransferPlan:
                 index >= len(self.operations) for index in executor.operation_indices
             ):
                 raise ValueError("executor operation index is out of range")
+        route_indices = []
+        route_keys = set()
+        for route in self.pipeline_routes:
+            if not isinstance(route, PipelineRouteGroup):
+                raise ValueError("transfer plan has invalid pipeline route metadata")
+            key = (route.source_pp, route.target_pp)
+            if key in route_keys:
+                raise ValueError("transfer plan has duplicate pipeline route groups")
+            route_keys.add(key)
+            if any(index >= len(self.operations) for index in route.operation_indices):
+                raise ValueError("pipeline route operation index is out of range")
+            route_indices.extend(route.operation_indices)
+        if self.pipeline_routes and sorted(route_indices) != list(
+            range(len(self.operations))
+        ):
+            raise ValueError("pipeline routes must cover every operation exactly once")
 
     @property
     def total_bytes(self) -> int:
@@ -481,7 +523,7 @@ def _collect_manifests(
 
 def _build_executor_plans(
     manifests: Sequence[RuntimeManifest],
-    operations: Sequence[CopyRange],
+    operations: Sequence[TransferOperation],
     side: str,
 ) -> tuple[ExecutorTransferPlan, ...]:
     if side not in ("source", "target"):
@@ -609,7 +651,6 @@ def _validate_tensor_compatibility(
         source.global_shape != target.global_shape
         or source.dtype != target.dtype
         or source.itemsize != target.itemsize
-        or source.partition_dim != target.partition_dim
         or source.layer_id != target.layer_id
         or source.expert_id != target.expert_id
     ):
@@ -683,23 +724,68 @@ def _fragments_fully_cover_tensor(
         for fragment in fragments
         if fragment.tensor_id == tensor.tensor_id
     }
-    unique_fragments = tuple(geometries.values())
-    if tensor.partition_dim is None:
-        return len(unique_fragments) == 1
-    dim = tensor.partition_dim
-    intervals = sorted(
-        (
-            fragment.global_offset[dim],
-            fragment.global_offset[dim] + fragment.local_shape[dim],
-        )
-        for fragment in unique_fragments
+    boxes = tuple(geometries)
+    return _boxes_exactly_cover(
+        (0,) * len(tensor.global_shape), tensor.global_shape, boxes
     )
-    cursor = 0
-    for begin, end in intervals:
-        if begin != cursor:
-            return False
-        cursor = end
-    return cursor == tensor.global_shape[dim]
+
+
+def _boxes_exactly_cover(
+    container_offset: tuple[int, ...],
+    container_shape: tuple[int, ...],
+    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
+) -> bool:
+    unique_boxes = tuple(dict.fromkeys(boxes))
+    if not unique_boxes:
+        return False
+    if any(
+        not _box_contains(container_offset, container_shape, offset, shape)
+        for offset, shape in unique_boxes
+    ):
+        return False
+    if sum(prod(shape) for _, shape in unique_boxes) != prod(container_shape):
+        return False
+    return not _boxes_overlap(unique_boxes)
+
+
+def _boxes_overlap(
+    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
+) -> bool:
+    if len(boxes) < 2:
+        return False
+    ndim = len(boxes[0][0])
+    sweep_dim = max(
+        range(ndim),
+        key=lambda dim: len(
+            {(offset[dim], offset[dim] + shape[dim]) for offset, shape in boxes}
+        ),
+    )
+    ordered = sorted(boxes, key=lambda item: item[0][sweep_dim])
+    active: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+    for offset, shape in ordered:
+        begin = offset[sweep_dim]
+        active = [
+            candidate
+            for candidate in active
+            if candidate[0][sweep_dim] + candidate[1][sweep_dim] > begin
+        ]
+        if any(
+            all(
+                left_begin < right_begin + right_extent
+                and right_begin < left_begin + left_extent
+                for left_begin, left_extent, right_begin, right_extent in zip(
+                    candidate_offset,
+                    candidate_shape,
+                    offset,
+                    shape,
+                    strict=True,
+                )
+            )
+            for candidate_offset, candidate_shape in active
+        ):
+            return True
+        active.append((offset, shape))
+    return False
 
 
 def _runtime_tensor_owner(
@@ -798,79 +884,97 @@ def _source_sort_key(fragment: SourceFragment) -> tuple:
     )
 
 
-def _target_interval(
-    tensor: TensorDescriptor, fragment: SourceFragment
-) -> tuple[int, int]:
-    if tensor.partition_dim is None:
-        return 0, 1
-    dim = tensor.partition_dim
-    start = fragment.global_offset[dim]
-    return start, start + fragment.local_shape[dim]
-
-
-def _overlap(
-    tensor: TensorDescriptor,
+def _overlap_box(
     source: SourceFragment,
     target: RuntimeFragment,
-) -> tuple[int, int] | None:
-    source_start, source_end = _target_interval(tensor, source)
-    target_start, target_end = _target_interval(tensor, target)
-    begin = max(source_start, target_start)
-    end = min(source_end, target_end)
-    if begin >= end:
+) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    overlap_offset = tuple(
+        max(source_begin, target_begin)
+        for source_begin, target_begin in zip(
+            source.global_offset, target.global_offset, strict=True
+        )
+    )
+    overlap_end = tuple(
+        min(
+            source_begin + source_extent,
+            target_begin + target_extent,
+        )
+        for source_begin, source_extent, target_begin, target_extent in zip(
+            source.global_offset,
+            source.local_shape,
+            target.global_offset,
+            target.local_shape,
+            strict=True,
+        )
+    )
+    overlap_shape = tuple(
+        end - begin for begin, end in zip(overlap_offset, overlap_end, strict=True)
+    )
+    if any(extent <= 0 for extent in overlap_shape):
         return None
-    return begin, end
+    return overlap_offset, overlap_shape
 
 
-def _copy_ranges(
+def _canonical_byte_strides(shape: tuple[int, ...], itemsize: int) -> tuple[int, ...]:
+    result = []
+    running = itemsize
+    for extent in reversed(shape):
+        result.append(running)
+        running *= extent
+    return tuple(reversed(result))
+
+
+def _transfer_region(
     tensor: TensorDescriptor,
     source: SourceFragment,
     target: RuntimeFragment,
-    begin: int,
-    end: int,
-) -> Iterable[CopyRange]:
-    dim = tensor.partition_dim
-    if dim is None:
-        yield CopyRange(
-            tensor_id=tensor.tensor_id,
-            source=source,
-            target=target,
-            source_offset=0,
-            target_offset=0,
-            nbytes=source.nbytes,
+    overlap_offset: tuple[int, ...],
+    overlap_shape: tuple[int, ...],
+) -> TransferRegion:
+    source_byte_strides = _canonical_byte_strides(source.local_shape, tensor.itemsize)
+    target_byte_strides = _canonical_byte_strides(target.local_shape, tensor.itemsize)
+    source_base_offset = sum(
+        (overlap_begin - fragment_begin) * stride
+        for overlap_begin, fragment_begin, stride in zip(
+            overlap_offset,
+            source.global_offset,
+            source_byte_strides,
+            strict=True,
         )
-        return
-
-    source_start, _ = _target_interval(tensor, source)
-    target_start, _ = _target_interval(tensor, target)
-    source_extent = source.local_shape[dim]
-    target_extent = target.local_shape[dim]
-    prefix = prod(tensor.global_shape[:dim])
-    suffix = prod(tensor.global_shape[dim + 1 :])
-    row_bytes = (end - begin) * suffix * tensor.itemsize
-
-    source_stride = source_extent * suffix * tensor.itemsize
-    target_stride = target_extent * suffix * tensor.itemsize
-    if source_stride == row_bytes and target_stride == row_bytes:
-        yield CopyRange(
-            tensor_id=tensor.tensor_id,
-            source=source,
-            target=target,
-            source_offset=(begin - source_start) * suffix * tensor.itemsize,
-            target_offset=(begin - target_start) * suffix * tensor.itemsize,
-            nbytes=row_bytes * prefix,
+    )
+    target_base_offset = sum(
+        (overlap_begin - fragment_begin) * stride
+        for overlap_begin, fragment_begin, stride in zip(
+            overlap_offset,
+            target.global_offset,
+            target_byte_strides,
+            strict=True,
         )
-        return
-    yield CopyRange(
+    )
+
+    suffix_begin = len(overlap_shape) - 1
+    inner_bytes = overlap_shape[-1] * tensor.itemsize
+    for dim in range(len(overlap_shape) - 2, -1, -1):
+        if (
+            source_byte_strides[dim] != inner_bytes
+            or target_byte_strides[dim] != inner_bytes
+        ):
+            break
+        inner_bytes *= overlap_shape[dim]
+        suffix_begin = dim
+
+    return TransferRegion(
         tensor_id=tensor.tensor_id,
         source=source,
         target=target,
-        source_offset=(begin - source_start) * suffix * tensor.itemsize,
-        target_offset=(begin - target_start) * suffix * tensor.itemsize,
-        nbytes=row_bytes,
-        repeat=prefix,
-        source_stride=source_stride,
-        target_stride=target_stride,
+        overlap_offset=overlap_offset,
+        overlap_shape=overlap_shape,
+        source_base_offset=source_base_offset,
+        target_base_offset=target_base_offset,
+        inner_bytes=inner_bytes,
+        outer_loop_counts=overlap_shape[:suffix_begin],
+        source_strides=source_byte_strides[:suffix_begin],
+        target_strides=target_byte_strides[:suffix_begin],
     )
 
 
@@ -921,7 +1025,7 @@ def _plan_transfer(
         for group in tensor_candidates.values():
             group.sort(key=_source_sort_key)
 
-    operations: list[CopyRange] = []
+    operations: list[TransferRegion] = []
     for target in sorted(target_fragments, key=lambda item: item.fragment_id):
         target_tensor = target_tensors[target.tensor_id]
         source_tensor = source_tensors.get(target.tensor_id)
@@ -929,7 +1033,7 @@ def _plan_transfer(
             raise ValueError(f"missing source tensor: {target.tensor_id}")
         _validate_tensor_compatibility(source_tensor, target_tensor)
 
-        overlaps: list[tuple[int, int, SourceFragment]] = []
+        overlaps: list[tuple[tuple[int, ...], tuple[int, ...], SourceFragment]] = []
         for group in candidates.get(target.tensor_id, {}).values():
             if runtime_sources:
                 source_dp = source_dp_by_target_dp[target.rank.dp]
@@ -948,32 +1052,37 @@ def _plan_transfer(
             else:
                 representative = group[0]
                 selected = representative
-            interval = _overlap(source_tensor, representative, target)
-            if interval is None:
+            overlap = _overlap_box(representative, target)
+            if overlap is None:
                 continue
-            overlaps.append((*interval, selected))
+            overlaps.append((*overlap, selected))
         overlaps.sort(key=lambda item: (item[0], item[1], item[2].fragment_id))
 
-        target_start, target_end = _target_interval(target_tensor, target)
-        cursor = target_start
-        for begin, end, source in overlaps:
-            if begin != cursor:
-                raise ValueError(
-                    f"target fragment is not fully covered: {target.fragment_id}"
-                )
-            cursor = end
-            operations.extend(_copy_ranges(target_tensor, source, target, begin, end))
-        if cursor != target_end:
+        if not _boxes_exactly_cover(
+            target.global_offset,
+            target.local_shape,
+            tuple((offset, shape) for offset, shape, _ in overlaps),
+        ):
             raise ValueError(
                 f"target fragment is not fully covered: {target.fragment_id}"
             )
+        operations.extend(
+            _transfer_region(
+                target_tensor,
+                source,
+                target,
+                overlap_offset,
+                overlap_shape,
+            )
+            for overlap_offset, overlap_shape, source in overlaps
+        )
 
     operations.sort(
         key=lambda item: (
             item.target.fragment_id,
-            item.target_offset,
+            item.target_base_offset,
             item.source.fragment_id,
-            item.source_offset,
+            item.source_base_offset,
         )
     )
     return TransferPlan(
@@ -983,7 +1092,21 @@ def _plan_transfer(
     )
 
 
-def _operation_sort_key(operation: CopyRange) -> tuple:
+def _operation_loop_geometry(
+    operation: TransferOperation, side: str
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    if isinstance(operation, TransferRegion):
+        strides = (
+            operation.source_strides if side == "source" else operation.target_strides
+        )
+        return operation.outer_loop_counts, strides
+    if operation.repeat == 1:
+        return (), ()
+    stride = operation.source_stride if side == "source" else operation.target_stride
+    return (operation.repeat,), (stride,)
+
+
+def _operation_sort_key(operation: TransferOperation) -> tuple:
     source_location = (
         (
             "runtime",
@@ -1008,7 +1131,8 @@ def _operation_sort_key(operation: CopyRange) -> tuple:
     )
 
 
-def _source_copy_identity(operation: CopyRange) -> tuple:
+def _source_copy_identity(operation: TransferOperation) -> tuple:
+    counts, strides = _operation_loop_geometry(operation, "source")
     if isinstance(operation.source, RuntimeFragment):
         return (
             "runtime",
@@ -1016,23 +1140,30 @@ def _source_copy_identity(operation: CopyRange) -> tuple:
             operation.source.endpoint,
             operation.source.lease_generation,
             operation.source.address + operation.source_offset,
+            operation.nbytes,
+            counts,
+            strides,
         )
     return (
         "stored",
         operation.source.object_key,
         operation.source.object_offset + operation.source_offset,
+        operation.nbytes,
+        counts,
+        strides,
     )
 
 
-def _target_copy_identity(operation: CopyRange) -> tuple:
+def _target_copy_identity(operation: TransferOperation) -> tuple:
+    counts, strides = _operation_loop_geometry(operation, "target")
     return (
         operation.target.worker_id,
         operation.target.endpoint,
         operation.target.lease_generation,
         operation.target.address + operation.target_offset,
         operation.nbytes,
-        operation.repeat,
-        operation.target_stride,
+        counts,
+        strides,
     )
 
 
@@ -1041,7 +1172,7 @@ def _descriptor_alias_key(descriptor: TensorDescriptor) -> tuple:
         descriptor.global_shape,
         descriptor.dtype,
         descriptor.itemsize,
-        descriptor.partition_dim,
+        descriptor.effective_shard_dims,
         descriptor.layer_id,
         descriptor.expert_id,
         descriptor.layout_fingerprint,
@@ -1049,8 +1180,8 @@ def _descriptor_alias_key(descriptor: TensorDescriptor) -> tuple:
 
 
 def _is_declared_target_alias(
-    left: CopyRange,
-    right: CopyRange,
+    left: TransferOperation,
+    right: TransferOperation,
     source_tensors: dict[str, TensorDescriptor],
     target_tensors: dict[str, TensorDescriptor],
 ) -> bool:
@@ -1069,7 +1200,12 @@ def _is_declared_target_alias(
         or left.source.global_offset != right.source.global_offset
         or left.source.local_shape != right.source.local_shape
         or left.source_offset != right.source_offset
-        or left.source_stride != right.source_stride
+        or left.target_offset != right.target_offset
+        or left.nbytes != right.nbytes
+        or _operation_loop_geometry(left, "source")
+        != _operation_loop_geometry(right, "source")
+        or _operation_loop_geometry(left, "target")
+        != _operation_loop_geometry(right, "target")
     ):
         return False
     return (
@@ -1081,26 +1217,23 @@ def _is_declared_target_alias(
 
 
 def _deduplicate_target_copies(
-    operations: Sequence[CopyRange],
+    operations: Sequence[TransferOperation],
     source_tensors: dict[str, TensorDescriptor],
     target_tensors: dict[str, TensorDescriptor],
-) -> tuple[CopyRange, ...]:
+) -> tuple[TransferOperation, ...]:
     result = []
     seen = set()
     for operation in sorted(operations, key=_operation_sort_key):
         identity = (
             _source_copy_identity(operation),
             _target_copy_identity(operation),
-            operation.nbytes,
-            operation.repeat,
-            operation.source_stride,
         )
         if identity in seen:
             continue
         seen.add(identity)
         result.append(operation)
 
-    by_target: dict[tuple, CopyRange] = {}
+    by_target: dict[tuple, TransferOperation] = {}
     deduplicated = []
     for operation in result:
         identity = _target_copy_identity(operation)
@@ -1131,13 +1264,20 @@ def _deduplicate_target_copies(
     return tuple(result)
 
 
-def _target_physical_bounds(operation: CopyRange) -> tuple[int, int]:
+def _target_physical_bounds(operation: TransferOperation) -> tuple[int, int]:
     begin = operation.target.address + operation.target_offset
-    end = begin + (operation.repeat - 1) * operation.target_stride + operation.nbytes
+    counts, strides = _operation_loop_geometry(operation, "target")
+    end = (
+        begin
+        + sum(
+            (count - 1) * stride for count, stride in zip(counts, strides, strict=True)
+        )
+        + operation.nbytes
+    )
     return begin, end
 
 
-def _target_segments_overlap(left: CopyRange, right: CopyRange) -> bool:
+def _copy_range_target_segments_overlap(left: CopyRange, right: CopyRange) -> bool:
     left_begin = left.target.address + left.target_offset
     right_begin = right.target.address + right.target_offset
     left_repeat = 1 if left.target_stride == 0 else left.repeat
@@ -1180,10 +1320,35 @@ def _target_segments_overlap(left: CopyRange, right: CopyRange) -> bool:
     return False
 
 
-def _validate_target_physical_ranges(operations: Sequence[CopyRange]) -> None:
-    by_executor: dict[tuple[str, str], list[CopyRange]] = {}
+def _target_segments_overlap(left: TransferOperation, right: TransferOperation) -> bool:
+    if isinstance(left, CopyRange) and isinstance(right, CopyRange):
+        return _copy_range_target_segments_overlap(left, right)
+    if isinstance(left, TransferRegion) and isinstance(right, TransferRegion):
+        if left.target.fragment_id == right.target.fragment_id:
+            return _boxes_overlap(
+                (
+                    (left.overlap_offset, left.overlap_shape),
+                    (right.overlap_offset, right.overlap_shape),
+                )
+            )
+        left_begin, left_end = _target_physical_bounds(left)
+        right_begin, right_end = _target_physical_bounds(right)
+        return left_begin < right_end and right_begin < left_end
+    left_begin, left_end = _target_physical_bounds(left)
+    right_begin, right_end = _target_physical_bounds(right)
+    return left_begin < right_end and right_begin < left_end
+
+
+def _validate_target_physical_ranges(
+    operations: Sequence[TransferOperation],
+) -> None:
+    by_executor: dict[tuple[str, str], list[TransferOperation]] = {}
     for operation in operations:
-        if operation.repeat > 1 and operation.target_stride < operation.nbytes:
+        if (
+            isinstance(operation, CopyRange)
+            and operation.repeat > 1
+            and operation.target_stride < operation.nbytes
+        ):
             raise ValueError(
                 f"conflicting target physical range: {operation.target.fragment_id}"
             )
@@ -1193,7 +1358,7 @@ def _validate_target_physical_ranges(operations: Sequence[CopyRange]) -> None:
 
     for scoped_operations in by_executor.values():
         ordered = sorted(scoped_operations, key=_target_physical_bounds)
-        active: list[CopyRange] = []
+        active: list[TransferOperation] = []
         for operation in ordered:
             begin, _ = _target_physical_bounds(operation)
             active = [
@@ -1208,6 +1373,35 @@ def _validate_target_physical_ranges(operations: Sequence[CopyRange]) -> None:
                     f"conflicting target physical range: {operation.target.fragment_id}"
                 )
             active.append(operation)
+
+
+def _build_pipeline_routes(
+    operations: Sequence[TransferOperation],
+) -> tuple[PipelineRouteGroup, ...]:
+    indices_by_route: dict[tuple[int | None, int], list[int]] = {}
+    for index, operation in enumerate(operations):
+        source_pp = (
+            operation.source.rank.pp
+            if isinstance(operation.source, RuntimeFragment)
+            else None
+        )
+        indices_by_route.setdefault((source_pp, operation.target.rank.pp), []).append(
+            index
+        )
+    return tuple(
+        PipelineRouteGroup(
+            source_pp=source_pp,
+            target_pp=target_pp,
+            operation_indices=tuple(indices),
+        )
+        for (source_pp, target_pp), indices in sorted(
+            indices_by_route.items(),
+            key=lambda item: (
+                -1 if item[0][0] is None else item[0][0],
+                item[0][1],
+            ),
+        )
+    )
 
 
 def plan_runtime_transfer(
@@ -1239,6 +1433,7 @@ def plan_runtime_transfer(
         operations=operations,
         source_executors=_build_executor_plans(source_manifests, operations, "source"),
         target_executors=_build_executor_plans(target_manifests, operations, "target"),
+        pipeline_routes=_build_pipeline_routes(operations),
     )
 
 
@@ -1283,6 +1478,7 @@ def plan_runtime_transfer_to_local_target(
         operations=operations,
         source_executors=_build_executor_plans(source_manifests, operations, "source"),
         target_executors=target_executors,
+        pipeline_routes=_build_pipeline_routes(operations),
     )
 
 
@@ -1313,4 +1509,5 @@ def plan_stored_transfer(
         revision=transfer.revision,
         operations=operations,
         target_executors=_build_executor_plans(target_manifests, operations, "target"),
+        pipeline_routes=_build_pipeline_routes(operations),
     )

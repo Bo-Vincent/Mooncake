@@ -9,6 +9,7 @@ from .manifest import (
 from .planner import (
     CopyRange,
     ExecutorTransferPlan,
+    PipelineRouteGroup,
     TransferPlan,
     TransferRegion,
     plan_runtime_transfer,
@@ -41,6 +42,7 @@ __all__ = [
     "WeightManifest",
     "CopyRange",
     "ExecutorTransferPlan",
+    "PipelineRouteGroup",
     "TransferPlan",
     "TransferRegion",
     "plan_runtime_transfer",
