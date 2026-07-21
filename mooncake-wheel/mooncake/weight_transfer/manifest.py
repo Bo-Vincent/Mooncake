@@ -50,10 +50,9 @@ class TensorDescriptor:
                 raise ValueError("shard_dims must not contain duplicates")
             if any(dim >= len(shape) for dim in shard_dims):
                 raise ValueError("shard_dims contains an out-of-range dimension")
-            shard_dims = tuple(sorted(shard_dims))
-            if self.partition_dim is not None and shard_dims != (
-                self.partition_dim,
-            ):
+            if tuple(sorted(shard_dims)) != shard_dims:
+                raise ValueError("shard_dims must be sorted")
+            if self.partition_dim is not None and shard_dims != (self.partition_dim,):
                 raise ValueError("partition_dim conflicts with shard_dims")
             object.__setattr__(self, "shard_dims", shard_dims)
         for name in ("layer_id", "expert_id"):
@@ -358,8 +357,7 @@ def _has_overlapping_boxes(fragments: Sequence[StoredFragment]) -> bool:
         active = [
             candidate
             for candidate in active
-            if candidate.global_offset[sweep_dim]
-            + candidate.local_shape[sweep_dim]
+            if candidate.global_offset[sweep_dim] + candidate.local_shape[sweep_dim]
             > begin
         ]
         for candidate in active:

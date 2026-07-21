@@ -17,6 +17,8 @@ from mooncake.weight_transfer.planner import (
     TransferPlan,
     TransferRegion,
     _complete_runtime_source_replicas,
+    _operation_loop_geometry,
+    _validate_target_physical_ranges,
     plan_runtime_transfer,
     plan_runtime_transfer_to_local_target,
     resolve_executor_plans,
@@ -231,10 +233,10 @@ def nd_fragment(
             (2, 3, 8),
             32,
             48,
-            (2, 3),
-            (96, 16),
-            (48, 16),
-            16,
+            (2,),
+            (96,),
+            (48,),
+            48,
         ),
         (
             (0, 0, 4),
@@ -330,23 +332,210 @@ def test_transfer_region_mixed_radix_iteration_and_nd_bounds() -> None:
         overlap_shape=(2, 3, 8),
         source_base_offset=32,
         target_base_offset=48,
-        inner_bytes=16,
-        outer_loop_counts=(2, 3),
-        source_strides=(96, 16),
-        target_strides=(48, 16),
+        inner_bytes=48,
+        outer_loop_counts=(2,),
+        source_strides=(96,),
+        target_strides=(48,),
     )
 
     assert tuple(region.iter_segments()) == (
-        (32, 48, 16),
-        (48, 64, 16),
-        (64, 80, 16),
-        (128, 96, 16),
-        (144, 112, 16),
-        (160, 128, 16),
+        (32, 48, 48),
+        (128, 96, 48),
     )
 
-    with pytest.raises(ValueError, match="source fragment"):
-        replace(region, source_strides=(193, 16))
+    with pytest.raises(ValueError, match="canonical"):
+        replace(region, source_strides=(193,))
+
+
+def test_transfer_region_rejects_noncanonical_same_volume_geometry() -> None:
+    source = nd_fragment(
+        fragment_id="source",
+        global_offset=(1, 0, 0),
+        local_shape=(2, 6, 8),
+        address=0x10000,
+    )
+    target = nd_fragment(
+        fragment_id="target",
+        global_offset=(0, 2, 0),
+        local_shape=(4, 3, 8),
+        address=0x20000,
+    )
+
+    with pytest.raises(ValueError, match="canonical"):
+        TransferRegion(
+            tensor_id=source.tensor_id,
+            source=source,
+            target=target,
+            overlap_offset=(1, 2, 0),
+            overlap_shape=(2, 3, 8),
+            source_base_offset=32,
+            target_base_offset=48,
+            inner_bytes=16,
+            outer_loop_counts=(2, 3),
+            source_strides=(96, 16),
+            target_strides=(80, 16),
+        )
+
+
+def test_copy_range_single_repeat_preserves_legacy_stride_identity() -> None:
+    source = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )[0].fragments[0]
+    target = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x20000,
+        worker_prefix="target",
+    )[0].fragments[0]
+    operation = CopyRange(
+        tensor_id=source.tensor_id,
+        source=source,
+        target=target,
+        source_offset=0,
+        target_offset=0,
+        nbytes=2,
+        repeat=1,
+        source_stride=17,
+        target_stride=19,
+    )
+
+    assert _operation_loop_geometry(operation, "source") == ((1,), (17,))
+    assert _operation_loop_geometry(operation, "target") == ((1,), (19,))
+
+
+def strided_column_region(
+    *,
+    tensor_id: str,
+    fragment_suffix: str,
+    target_fragment_id: str,
+    target_address: int,
+    column: int,
+    rows: int = 4,
+) -> TransferRegion:
+    shape = (rows, 2)
+    source = RuntimeFragment(
+        fragment_id=f"source-{fragment_suffix}",
+        tensor_id=tensor_id,
+        global_offset=(0, 0),
+        local_shape=shape,
+        address=0x30000 + len(fragment_suffix) * 0x100,
+        nbytes=prod(shape) * 2,
+        worker_id=f"source-{fragment_suffix}",
+        endpoint=f"source-{fragment_suffix}:12345",
+        rank=ParallelRank(),
+        lease_generation=1,
+    )
+    target = RuntimeFragment(
+        fragment_id=target_fragment_id,
+        tensor_id=tensor_id,
+        global_offset=(0, 0),
+        local_shape=shape,
+        address=target_address,
+        nbytes=prod(shape) * 2,
+        worker_id="target-worker",
+        endpoint="target-worker:12345",
+        rank=ParallelRank(),
+        lease_generation=1,
+    )
+    return TransferRegion(
+        tensor_id=tensor_id,
+        source=source,
+        target=target,
+        overlap_offset=(0, column),
+        overlap_shape=(rows, 1),
+        source_base_offset=column * 2,
+        target_base_offset=column * 2,
+        inner_bytes=2,
+        outer_loop_counts=(rows,),
+        source_strides=(4,),
+        target_strides=(4,),
+    )
+
+
+def test_physical_overlap_is_detected_for_logically_disjoint_regions() -> None:
+    left = strided_column_region(
+        tensor_id="left",
+        fragment_suffix="left",
+        target_fragment_id="shared-fragment",
+        target_address=0x40000,
+        column=0,
+    )
+    right = strided_column_region(
+        tensor_id="right",
+        fragment_suffix="right",
+        target_fragment_id="shared-fragment",
+        target_address=0x40000 - 2,
+        column=1,
+    )
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        _validate_target_physical_ranges((left, right))
+
+
+def test_interleaved_disjoint_target_segments_are_accepted() -> None:
+    left = strided_column_region(
+        tensor_id="left",
+        fragment_suffix="left",
+        target_fragment_id="target-left",
+        target_address=0x40000,
+        column=0,
+    )
+    right = strided_column_region(
+        tensor_id="right",
+        fragment_suffix="right",
+        target_fragment_id="target-right",
+        target_address=0x40000,
+        column=1,
+    )
+
+    _validate_target_physical_ranges((left, right))
+
+
+def test_last_mixed_radix_target_segment_overlap_is_rejected() -> None:
+    left = strided_column_region(
+        tensor_id="left",
+        fragment_suffix="left",
+        target_fragment_id="target-left",
+        target_address=0x40000,
+        column=0,
+    )
+    right = strided_column_region(
+        tensor_id="right",
+        fragment_suffix="right",
+        target_fragment_id="target-right",
+        target_address=0x40000 + 10,
+        column=1,
+    )
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        _validate_target_physical_ranges((left, right))
+
+
+def test_target_segment_overlap_scan_budget_fails_closed() -> None:
+    left = strided_column_region(
+        tensor_id="left",
+        fragment_suffix="left",
+        target_fragment_id="target-left",
+        target_address=0x40000,
+        column=0,
+        rows=8,
+    )
+    right = strided_column_region(
+        tensor_id="right",
+        fragment_suffix="right",
+        target_fragment_id="target-right",
+        target_address=0x40000,
+        column=1,
+        rows=8,
+    )
+
+    with pytest.raises(ValueError, match="segment scan budget"):
+        _validate_target_physical_ranges((left, right), max_segment_checks=3)
 
 
 def test_runtime_plan_records_explicit_noop_source_executors() -> None:
@@ -551,6 +740,143 @@ def test_runtime_plan_deduplicates_declared_target_alias_across_pp_sources() -> 
     assert len(plan.operations) == 1
     assert plan.operations[0].tensor_id == "embed_tokens.weight"
     assert plan.operations[0].source.worker_id == "source-pp0"
+
+
+def cross_dim_alias_manifests(
+    *,
+    target_alias_generation: int = 1,
+    mismatch_source_geometry: bool = False,
+) -> tuple[RuntimeManifest, RuntimeManifest]:
+    tensor_ids = ("alias.a", "alias.b")
+    aliases = tensor_ids
+    source_tensors = tuple(
+        TensorDescriptor(
+            tensor_id=tensor_id,
+            global_shape=(2, 2),
+            dtype="bfloat16",
+            itemsize=2,
+            partition_dim=None,
+            layer_id=None,
+            expert_id=None,
+            layout_fingerprint="framework:tied-weight:v2",
+            shard_dims=(0,),
+        )
+        for tensor_id in tensor_ids
+    )
+    target_tensors = tuple(
+        replace(tensor, shard_dims=(1,)) for tensor in source_tensors
+    )
+
+    source_fragments = []
+    for tensor_index, tensor in enumerate(source_tensors):
+        if mismatch_source_geometry and tensor.tensor_id == "alias.b":
+            source_fragments.append(
+                RuntimeFragment(
+                    fragment_id="source-alias.b-full",
+                    tensor_id=tensor.tensor_id,
+                    global_offset=(0, 0),
+                    local_shape=(2, 2),
+                    address=0x11000,
+                    nbytes=8,
+                    worker_id="source-worker",
+                    endpoint="source-worker:12345",
+                    rank=ParallelRank(pp=0),
+                    lease_generation=1,
+                )
+            )
+            continue
+        for row in range(2):
+            source_fragments.append(
+                RuntimeFragment(
+                    fragment_id=f"source-{tensor.tensor_id}-row{row}",
+                    tensor_id=tensor.tensor_id,
+                    global_offset=(row, 0),
+                    local_shape=(1, 2),
+                    address=0x10000 + tensor_index * 0x100 + row * 4,
+                    nbytes=4,
+                    worker_id="source-worker",
+                    endpoint="source-worker:12345",
+                    rank=ParallelRank(pp=0),
+                    lease_generation=1,
+                )
+            )
+
+    target_fragments = []
+    for tensor in target_tensors:
+        generation = target_alias_generation if tensor.tensor_id == "alias.b" else 1
+        for column in range(2):
+            target_fragments.append(
+                RuntimeFragment(
+                    fragment_id=f"target-{tensor.tensor_id}-column{column}",
+                    tensor_id=tensor.tensor_id,
+                    global_offset=(0, column),
+                    local_shape=(2, 1),
+                    address=0x20000 + column * 0x100,
+                    nbytes=4,
+                    worker_id="target-worker",
+                    endpoint="target-worker:12345",
+                    rank=ParallelRank(pp=1),
+                    lease_generation=generation,
+                    aliases=aliases,
+                )
+            )
+
+    source = RuntimeManifest(
+        model_id="qwen-family",
+        revision="step-42",
+        instance_id="source-instance",
+        tensors=source_tensors,
+        fragments=tuple(source_fragments),
+        format_version=2,
+    )
+    target = RuntimeManifest(
+        model_id="qwen-family",
+        revision="step-42",
+        instance_id="target-instance",
+        tensors=target_tensors,
+        fragments=tuple(target_fragments),
+        format_version=2,
+    )
+    return source, target
+
+
+def test_runtime_plan_deduplicates_cross_dim_declared_aliases() -> None:
+    source, target = cross_dim_alias_manifests()
+
+    plan = plan_runtime_transfer((source,), (target,))
+
+    assert len(plan.operations) == 4
+    assert {operation.tensor_id for operation in plan.operations} == {"alias.a"}
+    assert plan.source_executors[0].operation_indices == tuple(range(4))
+    assert plan.target_executors[0].operation_indices == tuple(range(4))
+    assert plan.pipeline_routes[0].source_pp == 0
+    assert plan.pipeline_routes[0].target_pp == 1
+    assert plan.pipeline_routes[0].operation_indices == tuple(range(4))
+
+    source_lease_ids = {
+        lease.fragment_id for lease in plan.source_executors[0].fragment_leases
+    }
+    target_lease_ids = {
+        lease.fragment_id for lease in plan.target_executors[0].fragment_leases
+    }
+    assert "source-alias.b-row0" in source_lease_ids
+    assert "source-alias.b-row1" in source_lease_ids
+    assert "target-alias.b-column0" in target_lease_ids
+    assert "target-alias.b-column1" in target_lease_ids
+
+
+def test_runtime_plan_rejects_cross_dim_alias_geometry_mismatch() -> None:
+    source, target = cross_dim_alias_manifests(mismatch_source_geometry=True)
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        plan_runtime_transfer((source,), (target,))
+
+
+def test_runtime_plan_rejects_cross_dim_alias_generation_mismatch() -> None:
+    source, target = cross_dim_alias_manifests(target_alias_generation=2)
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        plan_runtime_transfer((source,), (target,))
 
 
 def test_runtime_plan_rejects_partially_overlapping_target_physical_ranges() -> None:

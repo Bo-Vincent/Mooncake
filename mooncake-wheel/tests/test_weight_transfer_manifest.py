@@ -221,6 +221,7 @@ def test_tensor_descriptor_rejects_conflicting_legacy_and_v2_shard_dims() -> Non
     "shard_dims",
     [
         (0, 0),
+        (1, 0),
         (2,),
         (True,),
         "01",

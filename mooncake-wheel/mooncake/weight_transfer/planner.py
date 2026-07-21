@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import prod
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 
 from .manifest import (
     ParallelRank,
@@ -259,19 +259,38 @@ class TransferRegion:
         target_itemsize = _fragment_itemsize(self.target)
         if source_itemsize != target_itemsize:
             raise ValueError("transfer region source and target itemsize differ")
+        (
+            expected_source_offset,
+            expected_target_offset,
+            expected_inner_bytes,
+            expected_outer_loop_counts,
+            expected_source_strides,
+            expected_target_strides,
+        ) = _derive_region_geometry(
+            self.source,
+            self.target,
+            self.overlap_offset,
+            self.overlap_shape,
+        )
         expected_bytes = prod(self.overlap_shape) * source_itemsize
         if self.total_bytes != expected_bytes:
             raise ValueError("transfer region loop geometry does not match overlap")
-        expected_source_offset = _logical_byte_offset(
-            self.source, self.overlap_offset, source_itemsize
-        )
-        expected_target_offset = _logical_byte_offset(
-            self.target, self.overlap_offset, target_itemsize
-        )
         if self.source_base_offset != expected_source_offset:
             raise ValueError("transfer region source base offset is inconsistent")
         if self.target_base_offset != expected_target_offset:
             raise ValueError("transfer region target base offset is inconsistent")
+        if (
+            self.inner_bytes,
+            self.outer_loop_counts,
+            self.source_strides,
+            self.target_strides,
+        ) != (
+            expected_inner_bytes,
+            expected_outer_loop_counts,
+            expected_source_strides,
+            expected_target_strides,
+        ):
+            raise ValueError("transfer region loop geometry is not canonical")
 
         _validate_outer_strides(
             self.outer_loop_counts,
@@ -924,15 +943,26 @@ def _canonical_byte_strides(shape: tuple[int, ...], itemsize: int) -> tuple[int,
     return tuple(reversed(result))
 
 
-def _transfer_region(
-    tensor: TensorDescriptor,
+def _derive_region_geometry(
     source: SourceFragment,
     target: RuntimeFragment,
     overlap_offset: tuple[int, ...],
     overlap_shape: tuple[int, ...],
-) -> TransferRegion:
-    source_byte_strides = _canonical_byte_strides(source.local_shape, tensor.itemsize)
-    target_byte_strides = _canonical_byte_strides(target.local_shape, tensor.itemsize)
+) -> tuple[
+    int,
+    int,
+    int,
+    tuple[int, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+]:
+    source_itemsize = _fragment_itemsize(source)
+    target_itemsize = _fragment_itemsize(target)
+    if source_itemsize != target_itemsize:
+        raise ValueError("transfer region source and target itemsize differ")
+
+    source_byte_strides = _canonical_byte_strides(source.local_shape, source_itemsize)
+    target_byte_strides = _canonical_byte_strides(target.local_shape, target_itemsize)
     source_base_offset = sum(
         (overlap_begin - fragment_begin) * stride
         for overlap_begin, fragment_begin, stride in zip(
@@ -953,7 +983,7 @@ def _transfer_region(
     )
 
     suffix_begin = len(overlap_shape) - 1
-    inner_bytes = overlap_shape[-1] * tensor.itemsize
+    inner_bytes = overlap_shape[-1] * source_itemsize
     for dim in range(len(overlap_shape) - 2, -1, -1):
         if (
             source_byte_strides[dim] != inner_bytes
@@ -962,6 +992,37 @@ def _transfer_region(
             break
         inner_bytes *= overlap_shape[dim]
         suffix_begin = dim
+
+    return (
+        source_base_offset,
+        target_base_offset,
+        inner_bytes,
+        overlap_shape[:suffix_begin],
+        source_byte_strides[:suffix_begin],
+        target_byte_strides[:suffix_begin],
+    )
+
+
+def _transfer_region(
+    tensor: TensorDescriptor,
+    source: SourceFragment,
+    target: RuntimeFragment,
+    overlap_offset: tuple[int, ...],
+    overlap_shape: tuple[int, ...],
+) -> TransferRegion:
+    if (
+        _fragment_itemsize(source) != tensor.itemsize
+        or _fragment_itemsize(target) != tensor.itemsize
+    ):
+        raise ValueError("transfer region fragment itemsize differs from descriptor")
+    (
+        source_base_offset,
+        target_base_offset,
+        inner_bytes,
+        outer_loop_counts,
+        source_strides,
+        target_strides,
+    ) = _derive_region_geometry(source, target, overlap_offset, overlap_shape)
 
     return TransferRegion(
         tensor_id=tensor.tensor_id,
@@ -972,9 +1033,9 @@ def _transfer_region(
         source_base_offset=source_base_offset,
         target_base_offset=target_base_offset,
         inner_bytes=inner_bytes,
-        outer_loop_counts=overlap_shape[:suffix_begin],
-        source_strides=source_byte_strides[:suffix_begin],
-        target_strides=target_byte_strides[:suffix_begin],
+        outer_loop_counts=outer_loop_counts,
+        source_strides=source_strides,
+        target_strides=target_strides,
     )
 
 
@@ -1100,8 +1161,6 @@ def _operation_loop_geometry(
             operation.source_strides if side == "source" else operation.target_strides
         )
         return operation.outer_loop_counts, strides
-    if operation.repeat == 1:
-        return (), ()
     stride = operation.source_stride if side == "source" else operation.target_stride
     return (operation.repeat,), (stride,)
 
@@ -1172,7 +1231,6 @@ def _descriptor_alias_key(descriptor: TensorDescriptor) -> tuple:
         descriptor.global_shape,
         descriptor.dtype,
         descriptor.itemsize,
-        descriptor.effective_shard_dims,
         descriptor.layer_id,
         descriptor.expert_id,
         descriptor.layout_fingerprint,
@@ -1202,10 +1260,19 @@ def _is_declared_target_alias(
         or left.source_offset != right.source_offset
         or left.target_offset != right.target_offset
         or left.nbytes != right.nbytes
+        or type(left) is not type(right)
         or _operation_loop_geometry(left, "source")
         != _operation_loop_geometry(right, "source")
         or _operation_loop_geometry(left, "target")
         != _operation_loop_geometry(right, "target")
+        or (
+            isinstance(left, TransferRegion)
+            and isinstance(right, TransferRegion)
+            and (
+                left.overlap_offset != right.overlap_offset
+                or left.overlap_shape != right.overlap_shape
+            )
+        )
     ):
         return False
     return (
@@ -1277,71 +1344,65 @@ def _target_physical_bounds(operation: TransferOperation) -> tuple[int, int]:
     return begin, end
 
 
-def _copy_range_target_segments_overlap(left: CopyRange, right: CopyRange) -> bool:
-    left_begin = left.target.address + left.target_offset
-    right_begin = right.target.address + right.target_offset
-    left_repeat = 1 if left.target_stride == 0 else left.repeat
-    right_repeat = 1 if right.target_stride == 0 else right.repeat
+@dataclass
+class _SegmentScanBudget:
+    limit: int
+    checked: int = 0
 
-    if left.target_stride == right.target_stride and left.target_stride > 0:
-        stride = left.target_stride
-        difference = left_begin - right_begin
-        minimum = -(left.nbytes - 1)
-        maximum = right.nbytes - 1
-        lowest_delta = -(right_repeat - 1)
-        highest_delta = left_repeat - 1
-        first = max(lowest_delta, -((-(minimum - difference)) // stride))
-        last = min(highest_delta, (maximum - difference) // stride)
-        return first <= last
+    def consume(self) -> None:
+        self.checked += 1
+        if self.checked > self.limit:
+            raise ValueError("target physical segment scan budget exceeded")
 
-    left_index = 0
-    right_index = 0
-    while left_index < left_repeat and right_index < right_repeat:
-        left_start = left_begin + left_index * left.target_stride
-        right_start = right_begin + right_index * right.target_stride
-        left_end = left_start + left.nbytes
-        right_end = right_start + right.nbytes
-        if left_end <= right_start:
-            if left.target_stride == 0:
-                return False
-            left_index = max(
-                left_index + 1,
-                (right_start - left.nbytes - left_begin) // left.target_stride + 1,
-            )
-        elif right_end <= left_start:
-            if right.target_stride == 0:
-                return False
-            right_index = max(
-                right_index + 1,
-                (left_start - right.nbytes - right_begin) // right.target_stride + 1,
-            )
+
+def _absolute_target_segments(
+    operation: TransferOperation,
+) -> Iterable[tuple[int, int]]:
+    for _, target_offset, nbytes in operation.iter_segments():
+        begin = operation.target.address + target_offset
+        yield begin, begin + nbytes
+
+
+def _next_target_segment(
+    segments: Iterator[tuple[int, int]],
+    budget: _SegmentScanBudget,
+) -> tuple[int, int] | None:
+    try:
+        segment = next(segments)
+    except StopIteration:
+        return None
+    budget.consume()
+    return segment
+
+
+def _target_segments_overlap(
+    left: TransferOperation,
+    right: TransferOperation,
+    budget: _SegmentScanBudget,
+) -> bool:
+    left_segments = iter(_absolute_target_segments(left))
+    right_segments = iter(_absolute_target_segments(right))
+    left_segment = _next_target_segment(left_segments, budget)
+    right_segment = _next_target_segment(right_segments, budget)
+    while left_segment is not None and right_segment is not None:
+        left_begin, left_end = left_segment
+        right_begin, right_end = right_segment
+        if left_end <= right_begin:
+            left_segment = _next_target_segment(left_segments, budget)
+        elif right_end <= left_begin:
+            right_segment = _next_target_segment(right_segments, budget)
         else:
             return True
     return False
 
 
-def _target_segments_overlap(left: TransferOperation, right: TransferOperation) -> bool:
-    if isinstance(left, CopyRange) and isinstance(right, CopyRange):
-        return _copy_range_target_segments_overlap(left, right)
-    if isinstance(left, TransferRegion) and isinstance(right, TransferRegion):
-        if left.target.fragment_id == right.target.fragment_id:
-            return _boxes_overlap(
-                (
-                    (left.overlap_offset, left.overlap_shape),
-                    (right.overlap_offset, right.overlap_shape),
-                )
-            )
-        left_begin, left_end = _target_physical_bounds(left)
-        right_begin, right_end = _target_physical_bounds(right)
-        return left_begin < right_end and right_begin < left_end
-    left_begin, left_end = _target_physical_bounds(left)
-    right_begin, right_end = _target_physical_bounds(right)
-    return left_begin < right_end and right_begin < left_end
-
-
 def _validate_target_physical_ranges(
     operations: Sequence[TransferOperation],
+    *,
+    max_segment_checks: int = 1_000_000,
 ) -> None:
+    if type(max_segment_checks) is not int or max_segment_checks <= 0:
+        raise ValueError("max_segment_checks must be a positive integer")
     by_executor: dict[tuple[str, str], list[TransferOperation]] = {}
     for operation in operations:
         if (
@@ -1357,6 +1418,7 @@ def _validate_target_physical_ranges(
         ).append(operation)
 
     for scoped_operations in by_executor.values():
+        budget = _SegmentScanBudget(max_segment_checks)
         ordered = sorted(scoped_operations, key=_target_physical_bounds)
         active: list[TransferOperation] = []
         for operation in ordered:
@@ -1367,7 +1429,8 @@ def _validate_target_physical_ranges(
                 if _target_physical_bounds(candidate)[1] > begin
             ]
             if any(
-                _target_segments_overlap(candidate, operation) for candidate in active
+                _target_segments_overlap(candidate, operation, budget)
+                for candidate in active
             ):
                 raise ValueError(
                     f"conflicting target physical range: {operation.target.fragment_id}"
