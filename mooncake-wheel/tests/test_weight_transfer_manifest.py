@@ -154,6 +154,29 @@ def test_runtime_manifest_imports_framework_inventory_without_framework_dependen
     assert manifest.fragments[0].owner == ("owner", "sglang-fragment")
 
 
+@pytest.mark.parametrize("mapping_record", [False, True])
+def test_runtime_manifest_defaults_missing_optional_tensor_semantics(
+    mapping_record: bool,
+) -> None:
+    values = vars(framework_tensor()).copy()
+    values.pop("layer_id")
+    values.pop("expert_id")
+    tensor = values if mapping_record else SimpleNamespace(**values)
+    inventory = SimpleNamespace(
+        model_id="qwen3.5-0.8b",
+        revision="step-42",
+        instance_id="sglang-instance",
+        generation=9,
+        tensors=(tensor,),
+        format_version=1,
+    )
+
+    manifest = RuntimeManifest.from_runtime_inventory(inventory)
+
+    assert manifest.tensors[0].layer_id is None
+    assert manifest.tensors[0].expert_id is None
+
+
 def test_runtime_manifest_accepts_contiguous_singleton_stride() -> None:
     tensor = framework_tensor(
         global_shape=(8, 1, 4),

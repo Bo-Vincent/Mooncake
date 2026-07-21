@@ -26,6 +26,12 @@ class WeightStoreError(RuntimeError):
     pass
 
 
+def _require_result_sequence(value: Any, operation: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise WeightStoreError(f"{operation} failed: {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class UploadOperation:
     source: RuntimeFragment
@@ -378,13 +384,16 @@ class WeightStore:
         sources = [current for _, current in local_operations]
         object_keys = [operation.target.object_key for operation, _ in local_operations]
         with self._registered(sources, pre_registered=pre_registered):
-            results = self.store.batch_put_from(
-                object_keys,
-                [current.address for _, current in local_operations],
-                [current.nbytes for _, current in local_operations],
-                self.config_factory(
-                    [plan.manifest.group_id] * len(local_operations), "payload"
+            results = _require_result_sequence(
+                self.store.batch_put_from(
+                    object_keys,
+                    [current.address for _, current in local_operations],
+                    [current.nbytes for _, current in local_operations],
+                    self.config_factory(
+                        [plan.manifest.group_id] * len(local_operations), "payload"
+                    ),
                 ),
+                "batch_put_from",
             )
             if len(results) != len(local_operations) or any(
                 result != 0 for result in results
@@ -770,12 +779,17 @@ class WeightStore:
         all_sizes: Sequence[Sequence[Sequence[int]]],
         results: Any,
     ) -> None:
+        results = _require_result_sequence(results, "get_into_ranges")
         if len(results) != len(all_keys):
             raise WeightStoreError("get_into_ranges returned invalid buffer count")
         for keys, expected_groups, actual_groups in zip(all_keys, all_sizes, results):
+            actual_groups = _require_result_sequence(
+                actual_groups, "get_into_ranges"
+            )
             if len(actual_groups) != len(keys):
                 raise WeightStoreError("get_into_ranges returned invalid object count")
             for key, expected, actual in zip(keys, expected_groups, actual_groups):
+                actual = _require_result_sequence(actual, "get_into_ranges")
                 if list(actual) != list(expected):
                     raise WeightStoreError(
                         f"get_into_ranges failed for {key}: "
@@ -793,6 +807,7 @@ class WeightStore:
                 results = batch_is_exist(chunk)
             else:
                 results = [self.store.is_exist(key) for key in chunk]
+            results = _require_result_sequence(results, "payload existence check")
             if len(results) != len(chunk):
                 raise WeightStoreError("payload existence check returned invalid count")
             for key, result in zip(chunk, results):
