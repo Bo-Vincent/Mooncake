@@ -16,7 +16,13 @@ from .manifest import (
     TensorDescriptor,
     WeightManifest,
 )
-from .planner import TransferPlan, plan_stored_transfer, resolve_executor_plans
+from .planner import (
+    TransferPlan,
+    _complete_runtime_source_replicas,
+    _runtime_tensor_owner,
+    plan_stored_transfer,
+    resolve_executor_plans,
+)
 
 
 OBJECT_NOT_FOUND = -704
@@ -108,7 +114,7 @@ def _collect_upload_sources(
     model_id = manifests[0].model_id
     revision = manifests[0].revision
     tensor_by_id: dict[str, TensorDescriptor] = {}
-    fragments_by_dp: dict[int, list[RuntimeFragment]] = {}
+    fragments: list[RuntimeFragment] = []
     fragment_ids: set[str] = set()
     for manifest in manifests:
         if manifest.model_id != model_id or manifest.revision != revision:
@@ -123,75 +129,50 @@ def _collect_upload_sources(
                     f"duplicate source fragment_id: {fragment.fragment_id}"
                 )
             fragment_ids.add(fragment.fragment_id)
-            fragments_by_dp.setdefault(fragment.rank.dp, []).append(fragment)
+            fragments.append(fragment)
 
     tensors = tuple(sorted(tensor_by_id.values(), key=lambda item: item.tensor_id))
-    complete_replicas: list[tuple[int, int, list[RuntimeFragment]]] = []
-    for dp_rank, fragments in sorted(fragments_by_dp.items()):
-        generations = {fragment.lease_generation for fragment in fragments}
-        if len(generations) != 1:
-            continue
-        candidates: dict[tuple, list[RuntimeFragment]] = {}
-        for fragment in fragments:
-            candidates.setdefault(_geometry_key(fragment), []).append(fragment)
-        selected = []
-        for group in candidates.values():
-            group.sort(key=_runtime_sort_key)
-            selected.append(group[0])
-        selected.sort(
-            key=lambda fragment: (
-                fragment.tensor_id,
-                fragment.global_offset,
-                fragment.local_shape,
-            )
-        )
-        try:
-            _validate_upload_coverage(tensors, selected)
-        except ValueError:
-            continue
-        complete_replicas.append((dp_rank, next(iter(generations)), selected))
+    try:
+        complete_replicas = _complete_runtime_source_replicas(tensor_by_id, fragments)
+    except ValueError as error:
+        if str(error) == (
+            "source manifests have no complete DP replica; "
+            "tensors are not fully covered"
+        ):
+            raise ValueError(
+                "source manifests have no complete generation-consistent DP replica"
+            ) from error
+        if str(error) == "source DP replicas have inconsistent lease generations":
+            raise ValueError(
+                "complete source DP replicas have inconsistent lease generations"
+            ) from error
+        raise
 
-    if not complete_replicas:
-        raise ValueError(
-            "source manifests have no complete generation-consistent DP replica"
-        )
-    generations = {generation for _, generation, _ in complete_replicas}
-    if len(generations) != 1:
-        raise ValueError(
-            "complete source DP replicas have inconsistent lease generations"
-        )
-    _, _, selected = complete_replicas[0]
-    return model_id, revision, tensors, selected
-
-
-def _validate_upload_coverage(
-    tensors: Sequence[TensorDescriptor], fragments: Sequence[RuntimeFragment]
-) -> None:
-    fragments_by_tensor: dict[str, list[RuntimeFragment]] = {}
+    selected_dp = min(complete_replicas)
+    owner_by_tensor = complete_replicas[selected_dp]
+    candidates: dict[tuple, list[RuntimeFragment]] = {}
     for fragment in fragments:
-        fragments_by_tensor.setdefault(fragment.tensor_id, []).append(fragment)
-
-    for tensor in tensors:
-        tensor_fragments = fragments_by_tensor.get(tensor.tensor_id, [])
-        if tensor.partition_dim is None:
-            if len(tensor_fragments) != 1:
-                raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
+        tensor = tensor_by_id[fragment.tensor_id]
+        if (
+            fragment.rank.dp != selected_dp
+            or _runtime_tensor_owner(tensor, fragment)
+            != owner_by_tensor[fragment.tensor_id]
+        ):
             continue
-        dim = tensor.partition_dim
-        intervals = sorted(
-            (
-                fragment.global_offset[dim],
-                fragment.global_offset[dim] + fragment.local_shape[dim],
-            )
-            for fragment in tensor_fragments
+        candidates.setdefault(_geometry_key(fragment), []).append(fragment)
+
+    selected = []
+    for group in candidates.values():
+        group.sort(key=_runtime_sort_key)
+        selected.append(group[0])
+    selected.sort(
+        key=lambda fragment: (
+            fragment.tensor_id,
+            fragment.global_offset,
+            fragment.local_shape,
         )
-        cursor = 0
-        for begin, end in intervals:
-            if begin != cursor:
-                raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
-            cursor = end
-        if cursor != tensor.global_shape[dim]:
-            raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
+    )
+    return model_id, revision, tensors, selected
 
 
 def _safe_segment(value: str) -> str:
@@ -783,9 +764,7 @@ class WeightStore:
         if len(results) != len(all_keys):
             raise WeightStoreError("get_into_ranges returned invalid buffer count")
         for keys, expected_groups, actual_groups in zip(all_keys, all_sizes, results):
-            actual_groups = _require_result_sequence(
-                actual_groups, "get_into_ranges"
-            )
+            actual_groups = _require_result_sequence(actual_groups, "get_into_ranges")
             if len(actual_groups) != len(keys):
                 raise WeightStoreError("get_into_ranges returned invalid object count")
             for key, expected, actual in zip(keys, expected_groups, actual_groups):
