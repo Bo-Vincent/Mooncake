@@ -142,6 +142,8 @@ operation 数可能因物理 alias 去重而减少。outer loops 在 lowering �
 
 - 当前增量：C++ `transfer_engine_bench` Release 重建通过。
 - 当前增量：`test_weight_store_gpu_e2e.py` 为 `45 passed, 4 skipped`。
+- 精确 legacy TP 回归：TP4 -> TP8、TP8 -> TP4 均通过；planner 测试文件
+  `49 passed`。
 - 当前增量：ruff check/format check 通过，`git diff --check` 通过。
 - N-D 基线：Mooncake `253 passed, 12 skipped`；SGLang `114 passed`；CUDA
   RDMA TE 4 项和 CUDA Store 3 项通过。

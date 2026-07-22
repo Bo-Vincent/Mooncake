@@ -1238,6 +1238,43 @@ def test_tp4_to_tp2_merges_into_non_overlapping_target_offsets() -> None:
     ]
 
 
+@pytest.mark.parametrize(("source_tp", "target_tp"), [(4, 8), (8, 4)])
+def test_legacy_manifest_tp4_tp8_same_dim_reshard(
+    source_tp: int, target_tp: int
+) -> None:
+    sources = tp_manifests(
+        tp=source_tp,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    targets = tp_manifests(
+        tp=target_tp,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x20000,
+        worker_prefix="target",
+    )
+
+    plan = plan_runtime_transfer(sources, targets)
+
+    assert all(manifest.format_version == 1 for manifest in (*sources, *targets))
+    assert len(plan.operations) == 8
+    assert all(operation.segment_count == 1 for operation in plan.operations)
+    for target in targets:
+        fragment = target.fragments[0]
+        operations = sorted(
+            operation_for_target(plan, fragment.rank.tp),
+            key=lambda operation: operation.target_offset,
+        )
+        cursor = 0
+        for operation in operations:
+            assert operation.target_offset == cursor
+            cursor += operation.nbytes
+        assert cursor == fragment.nbytes
+
+
 def test_partition_dim_one_generates_row_ranges() -> None:
     tensor = descriptor(global_shape=(2, 8), partition_dim=1)
     source = tp_manifests(
