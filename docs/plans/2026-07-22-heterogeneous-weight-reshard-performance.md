@@ -66,6 +66,17 @@ SGLang adapter 基线：`2db0c78425eb7952651149dc0c662fd3ea6f6108`
 | NCCL strict one-way | 4 pair，1/4 GiB | `1247.063/1249.601 GiB/s` | 大单操作点 |
 | Mooncake RDMA | 0 -> 4，双 eRDMA | `20.389 GiB/s` | 3 轮：20.346/20.493/20.327 |
 
+### 3.1 同口径 G2G 对比
+
+| 单向 workload | Mooncake | NCCL | Mooncake/NCCL | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| 1 pair，64 MiB | `369.062 GiB/s` | `314.629 GiB/s` | `1.1730x` | 高 `17.301%` |
+| 4 pair，64 MiB 唯一 payload 合计 | `1474.255 GiB/s` | `1254.082 GiB/s` | `1.1756x` | 高 `17.557%` |
+
+因此在当前 H20/NV18、64 MiB 权重 region、单向 G2G 口径下，Mooncake 已经
+对齐并超过 NCCL。该结论只适用于本表环境和 workload，不外推为所有 GPU、
+消息大小或双向 collective 下都更快。
+
 Mooncake 与 NCCL 的 64 MiB 点最接近当前 Store 数据路径：本次 raw TE
 benchmark 使用 64 MiB block，WeightStore 的 `max_range_bytes` 默认值也为
 64 MiB。TE 的 N-D lowering 限制 batch operation 和 region segment 数量，
@@ -75,7 +86,7 @@ benchmark 使用 64 MiB block，WeightStore 的 `max_range_bytes` 默认值也�
 官方 `sendrecv_perf` 的 4 GiB 点为 `341.08 GB/s/方向`，但测试同时发送和
 接收，物理 aggregate 约为两倍；本报告不使用它证明 Mooncake 超过 NCCL。
 
-### 3.1 NCCL M2N 状态
+### 3.2 NCCL M2N 状态
 
 当前 `nccl_m2n` 是 NVIDIA `contrib/` 下的 experimental standalone preview，
 不是 NCCL core runtime。本机已构建 `libnccl_m2n.so` 和 `reshard_bench`，但
@@ -144,6 +155,7 @@ operation 数可能因物理 alias 去重而减少。outer loops 在 lowering �
 - 当前增量：`test_weight_store_gpu_e2e.py` 为 `45 passed, 4 skipped`。
 - 精确 legacy TP 回归：TP4 -> TP8、TP8 -> TP4 均通过；planner 测试文件
   `49 passed`。
+- 当前 HEAD 六个相关测试文件重新执行：`252 passed, 4 skipped`。
 - 当前增量：ruff check/format check 通过，`git diff --check` 通过。
 - N-D 基线：Mooncake `253 passed, 12 skipped`；SGLang `114 passed`；CUDA
   RDMA TE 4 项和 CUDA Store 3 项通过。
