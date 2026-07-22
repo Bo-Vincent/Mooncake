@@ -10,22 +10,27 @@ SGLang adapter 基线：`2db0c78425eb7952651149dc0c662fd3ea6f6108`
 1. manifest v2、N-D logical-box planner、PP route、EP leading coordinate、
    DP replica 选择、Store/TE 有界 lowering 已经实现；旧 manifest 和旧 TP
    路径保持兼容。
-2. H20 同机 live G2G 的主路径应使用 `nvlink_intra`。在吞吐饱和模式下，
-   64 MiB region 的 Mooncake 单路为 `369.062 GiB/s`，严格单向 NCCL
-   send/recv 为 `314.629 GiB/s`，Mooncake 高 `17.3%`。
-3. 单 region warm E2E 不能用饱和吞吐直接倒推。按每次提交后等待完成的
-   同步口径，64 MiB/256 MiB/1 GiB/4 GiB 的 Mooncake E2E 分别为
-   `0.181/0.689/2.718/10.835 ms`；NCCL 为
-   `0.225/0.771/3.235/12.832 ms`。Mooncake 延迟低 `10.7%-19.7%`。
-4. Qwen3-Next 框架级 E2E 中，从目标进程拉起到首次确定性推理完成，
+2. Mooncake 异构 reshard 的主对照必须是 NVIDIA `nccl_m2n` 的
+   `ncclReshardWithWindow`，不能用普通 NCCL `send/recv` 代替。此前基于普通
+   P2P 得出的“Mooncake 超过 NCCL”结论已撤回；相关数字只保留为裸链路诊断。
+3. 固定 NCCL `5067397c`（2.30.7）的 M2N 已在 H20 构建成功，但当前 eRDMA
+   环境没有产出任何有效 M2N 性能样本。普通 NCCL eRDMA collective 在兼容
+   `max_recv_wr=0` 后可通过；M2N 最小 1 -> 1 和 TP4 -> TP2 仍在 GIN `IPut`
+   上返回 verbs `status=21`，随后 QP `local work queue catastrophic error`，
+   `DIRECT`/`RING` 均无法完成 validated iteration。
+4. 正确性能结论必须同时包含有效吞吐和 E2E：warm reshard API E2E、cold
+   communicator/window/setup E2E，以及框架 target 首次可用 E2E。当前只有
+   Mooncake 的 raw TE、Store 和 Qwen3-Next E2E 数据；同机 M2N 列为 `N/A`，
+   因而暂时不能给出 Mooncake 与 M2N 的快慢比。
+5. Qwen3-Next 框架级 E2E 中，从目标进程拉起到首次确定性推理完成，
    checkpoint cold p50 为 `107.101 s`，live manifest reuse p50 为
    `68.998 s`，节省 `38.104 s`，缩短 `35.6%`，加速 `1.55x`。
-5. 当前 RDMA fallback 单路平均 `20.389 GiB/s`。它适合跨节点，不应和
+6. 当前 RDMA fallback 单路平均 `20.389 GiB/s`。它适合跨节点，不应和
    同机 NVLink 数字混用。
-6. WeightStore 的六个核心 API 和 CUDA 数据路径已实现，可以作为 POC/library
+7. WeightStore 的六个核心 API 和 CUDA 数据路径已实现，可以作为 POC/library
    使用；但生产控制面、revision barrier、target activation、故障恢复、完整
    lease 消费仍未接通，因此不能宣称生产服务已经完整。
-7. Store CUDA ranged load 当前经过 host 临时 buffer，再 H2D。H20 实测
+8. Store CUDA ranged load 当前经过 host 临时 buffer，再 H2D。H20 实测
    upload 约 `9.5-10.3 GB/s`，load 约 `5.0-5.3 GB/s`；下一阶段最高 ROI
    是让 MEMORY ranged GET 直接写入已注册 GPU range。
 
@@ -43,22 +48,29 @@ SGLang adapter 基线：`2db0c78425eb7952651149dc0c662fd3ea6f6108`
 
 ### 2.2 公平口径
 
-- 饱和吞吐模式：Mooncake 使用 64 MiB block、batch 8、8 worker threads、
-  8 GiB circular buffer，持续单向 write 15 秒；NCCL 先异步提交多次
-  `ncclSend/ncclRecv`，末尾统一同步。两者都排除初始化和注册时间。
-- warm region E2E：Mooncake 使用 batch 1、1 worker，串行执行
-  `allocateBatchID -> submitTransfer -> poll completion -> freeBatchID`；每轮
-  运行 5 秒，取 5 个独立进程的 operation mean 中位数。NCCL 每个 operation
-  提交一组 send/recv 后同步 source/target 两条 stream，直接记录每次 wall
-  time；每种大小先搬约 64 GiB，再取 5 个独立进程 mean 的中位数。
-- warm region E2E 不包含 engine/communicator 初始化、显存分配、memory
-  registration、segment open 和 manifest/planner。它回答“运行中的 source 与
-  target 已建立后，一次 region 提交到完成多久”，不是冷启动时间。
-- NCCL strict one-way：每个 GPU pair 使用独立 2-rank communicator，
-  `ncclCommRegister`，只执行 source 到 target 的 `ncclSend/ncclRecv`；分母
-  只计算唯一 payload，末尾校验 target 首尾内容。
-- 官方 `sendrecv_perf` 是双向同时传输，只作为 full-duplex reference，不能
-  直接当作单向权重迁移。
+- 主对照必须调用 M2N `reshard_bench` 的 `ncclReshardWithWindow`。source 和
+  target 使用不重叠 rank、相同 global tensor/dtype、相同 source/target mesh、
+  相同 shard dimensions，并且每组结果必须通过 `--validate`。普通 NCCL
+  `ncclSend/ncclRecv` 不是 reshard executor，只能表示裸 P2P transport ceiling。
+- warm reshard E2E：在 communicator、symmetric allocation、window、manifest
+  和 tensor descriptor 已就绪后，测一次 API 提交到所有 target 数据可见。
+  M2N 口径是 `ncclReshardWithWindow -> cudaStreamSynchronize -> MPI_Barrier`，
+  使用所有 rank 的最大 iteration time；Mooncake 口径应是
+  `plan/lowering -> submit -> completion -> target barrier`。两边都报告 p50、
+  p95 和 max，不能只用异步提交吞吐代替完成时间。
+- warm 有效吞吐统一定义为 `global logical tensor bytes / max-rank E2E`。
+  这里计算唯一逻辑 payload，不把 source replica、destination replica、ring
+  forwarding 或 PP route 中的重复物理流量重复记入分子。
+- cold reshard E2E：从 source/target topology 已知开始，包含 communicator 或
+  TE session 建立、memory allocation/registration、window/segment 建立、manifest
+  获取、planning/lowering、首次 validated transfer 和 target barrier。官方
+  `reshard_bench` 的结果只计 warm loop，cold setup 必须由外层 harness 单独计时。
+- framework E2E：从 target process/pod 拉起开始，包含 runtime 初始化、权重
+  获取与转换、revision activation，截止首次确定性推理响应完成；source 已在
+  运行且持续 serving。该指标和单 tensor reshard E2E 分开报告。
+- 辅助 raw TE/P2P 数据仍按原口径保存：Mooncake 使用 64 MiB block 和 CUDA
+  registered buffer；普通 NCCL 每个 GPU pair 使用独立 communicator 和
+  `ncclCommRegister`。这些数据不进入 Mooncake/M2N 胜负结论。
 - `GB/s` 为十进制；`GiB/s` 为二进制。主对比统一使用 `GiB/s`。
 - Store 测试使用一个进程内的 source GPU0-3、target GPU4-7，3 次 warmup、
   10 次正式采样。Store E2E 从 `prepare_upload` 开始，包含 upload、commit、
@@ -72,83 +84,112 @@ SGLang adapter 基线：`2db0c78425eb7952651149dc0c662fd3ea6f6108`
   是“target process spawn 到首次确定性推理响应完成”；source 已在运行，其
   启动时间不计入，期间持续探活并校验响应一致性。
 
-## 3. Raw G2G 吞吐与 E2E
+## 3. NCCL M2N 主对照
 
-### 3.1 饱和吞吐
+### 3.1 当前可比性结论
 
-| 路径 | 拓扑/region | 结果 | 备注 |
-| --- | --- | ---: | --- |
-| Mooncake `nvlink_intra` | 0 -> 4，64 MiB | `369.062 GiB/s` | 3 轮：369.034/369.025/369.127 |
-| NCCL strict one-way | 0 -> 4，64 MiB | `314.629 GiB/s` | 200 iterations，validation OK |
-| Mooncake `nvlink_intra` | 0-3 -> 4-7，64 MiB | `1474.255 GiB/s` | 4 路：368.406/368.330/368.436/369.083 |
-| NCCL strict one-way | 4 pair，64 MiB | `1254.082 GiB/s` | 4 个独立 communicator，validation OK |
-| NCCL strict one-way | 1 pair，256 MiB | `336.087 GiB/s` | 50 iterations |
-| NCCL strict one-way | 4 pair，256 MiB | `1342.477 GiB/s` | 唯一 payload 合计 |
-| NCCL strict one-way | 1 pair，1/4 GiB | `311.911/312.439 GiB/s` | 大单操作点 |
-| NCCL strict one-way | 4 pair，1/4 GiB | `1247.063/1249.601 GiB/s` | 大单操作点 |
-| Mooncake RDMA | 0 -> 4，双 eRDMA | `20.389 GiB/s` | 3 轮：20.346/20.493/20.327 |
+| 指标 | Mooncake 当前样本 | NCCL M2N 当前 H20 样本 | 可否比较 |
+| --- | --- | --- | --- |
+| validated N-D reshard 吞吐 | 尚未按 M2N 相同 mesh/shape 重跑 | `N/A`，GIN iteration 未完成 | 否 |
+| warm reshard API E2E | 尚未按 `plan -> barrier` 统一口径重跑 | `N/A` | 否 |
+| cold reshard setup E2E | Store full lifecycle 有独立数据 | `N/A`，官方 bench 不计 setup | 否 |
+| framework target 首次可用 E2E | Qwen3-Next p50 `68.998 s` | `N/A` | 否 |
+| raw 单 region transport | Mooncake TE 有效 | 普通 NCCL P2P 有效，但不是 M2N | 仅诊断 |
 
-#### 同口径 G2G 对比
+因此，当前能确认的是 Mooncake 功能链和自身性能边界，不能确认 Mooncake 比
+M2N 快或慢。后续只有在同一台支持 GIN 的机器上完成相同 topology、logical
+bytes、validation 和 E2E 边界后，才允许计算 speedup。
 
-| 单向 workload | Mooncake | NCCL | Mooncake/NCCL | 结论 |
-| --- | ---: | ---: | ---: | --- |
-| 1 pair，64 MiB | `369.062 GiB/s` | `314.629 GiB/s` | `1.1730x` | 高 `17.301%` |
-| 4 pair，64 MiB 唯一 payload 合计 | `1474.255 GiB/s` | `1254.082 GiB/s` | `1.1756x` | 高 `17.557%` |
+### 3.2 H20 上的真实 M2N 结果
 
-因此在当前 H20/NV18、64 MiB 权重 region、单向 G2G 口径下，Mooncake 已经
-对齐并超过 NCCL。该结论只适用于本表环境和 workload，不外推为所有 GPU、
-消息大小或双向 collective 下都更快。
+M2N 使用固定 NCCL `5067397c`、版本 2.30.7，成功构建
+`libnccl_m2n.so` 和 `reshard_bench`。本地运行经历了以下阶段：
 
-Mooncake 与 NCCL 的 64 MiB 点最接近当前 Store 数据路径：本次 raw TE
-benchmark 使用 64 MiB block，WeightStore 的 `max_range_bytes` 默认值也为
-64 MiB。TE 的 N-D lowering 限制 batch operation 和 region segment 数量，
-但不会强制把每个 region 切成 64 MiB。Mooncake 四路的十进制吞吐约为
-`1.583 TB/s`。
+1. 上游 NCCL 创建部分 RC QP 时设置 `max_recv_wr=0`，H20 的 eRDMA verbs
+   provider 返回 `EINVAL`。独立 verbs 探针验证 `recv_wr=0` 失败、`recv_wr=1`
+   成功。
+2. 只在 benchmark NCCL 源码的通用 `ncclIbQpCreate` 入口将 0 提升为 1 后，
+   强制 `NCCL_NET=IB` 且禁用 P2P/SHM 的 2-rank all-reduce 从 1 MiB 到
+   16 MiB 全部通过，`#wrong=0`。该补丁不属于 Mooncake，也没有提交上游。
+3. M2N `DIRECT` 最小 1 source -> 1 destination 在第一轮 warmup 仍不能完成。
+   GIN proxy 的 `IPut` completion 返回
+   `status=21 (IBV_WC_GENERAL_ERR)`，随后 eRDMA QP 报
+   `local work queue catastrophic error`；20 秒后由外层 timeout 终止。NCCL
+   `ncclRmaIbProxyIPutSignal` 的 WR chain 是 payload `IBV_WR_RDMA_WRITE` 加
+   signal `IBV_WR_ATOMIC_FETCH_AND_ADD`；失败 completion 的 `opcode=4` 对应
+   后者，因此故障点是 M2N GIN atomic signal 路径，不是 logical-box planner。
+4. M2N `RING` TP4 -> TP2 已越过 `ncclDevCommCreate`，但在 warmup 内等待
+   GIN signal，20 秒受控复测仍未完成。禁用 IB 时 communicator 没有任何
+   可用 GIN，
+   `ncclDevCommCreate` 明确拒绝创建。
 
-官方 `sendrecv_perf` 的 4 GiB 点为 `341.08 GB/s/方向`，但测试同时发送和
-接收，物理 aggregate 约为两倍；本报告不使用它证明 Mooncake 超过 NCCL。
+这说明普通 NCCL eRDMA transport 可运行，不代表 M2N 所需的 Device API GIN
+数据面可运行。上述 timeout 不是延迟样本，失败前的字节也不能计算吞吐；本报告
+不生成“超时下限吞吐”或使用未校验数据。
 
-### 3.2 单 region warm E2E
+### 3.3 正确的复测矩阵
 
-| Payload | Mooncake E2E | NCCL E2E | Mooncake 延迟降低 | Mooncake 串行速率 | NCCL 同步速率 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 64 MiB | `0.181021 ms` | `0.225312 ms` | `19.66%` | `345.263 GiB/s` | `277.394 GiB/s` |
-| 256 MiB | `0.689038 ms` | `0.771438 ms` | `10.68%` | `362.825 GiB/s` | `324.070 GiB/s` |
-| 1 GiB | `2.718195 ms` | `3.234601 ms` | `15.97%` | `367.891 GiB/s` | `309.157 GiB/s` |
-| 4 GiB | `10.835100 ms` | `12.832107 ms` | `15.56%` | `369.171 GiB/s` | `311.718 GiB/s` |
+支持 GIN 的平台需要让 Mooncake 和 M2N 执行同一组 case：
 
-表中 E2E 都是 5 个独立进程的 operation mean 中位数。Mooncake 各轮 mean
-范围依次为 `0.180910-0.182117 ms`、`0.688565-0.690094 ms`、
-`2.718043-2.718454 ms`、`10.834301-10.836680 ms`。NCCL 对应范围为
-`0.225242-0.226106 ms`、`0.770142-0.771688 ms`、
-`3.232938-3.235064 ms`、`12.830775-12.835337 ms`；各进程 p95 的中位数
-分别为 `0.227633/0.778682/3.243100/12.850401 ms`。当前 Mooncake benchmark
-只记录进程内 operation mean，没有保存逐 operation histogram，因此不能伪造
-Mooncake p95；后续若把 latency histogram 加入 benchmark，再补严格 tail 对比。
-Mooncake 的 operation mean 来自 batch1/thread1 串行循环的 wall duration /
-completed batch count；日志中的 duration 只显示两位小数，因此表内使用与该比值
-等价的 `block GiB / 六位精度 GiB/s` 恢复数值。这和从 batch8/thread8 饱和
-吞吐推算单次延迟不是同一个口径。
+| Case | source -> target | logical tensor | 目的 |
+| --- | --- | --- | --- |
+| TP shrink | TP4 -> TP2，dim0 -> dim0 | 64 MiB/256 MiB/1 GiB | split shard merge |
+| TP expand | TP2 -> TP4，dim0 -> dim0 | 64 MiB/256 MiB/1 GiB | shard fan-out |
+| cross-dim | TP4 -> TP2，dim0 -> dim1 | `[experts,out,in]` | N-D strided reshard |
+| cross-dim | TP4 -> TP2，dim0 -> dim2 | `[experts,out,in]` | innermost-axis change |
+| multi-tensor | 显式 PP route + expert tensor batch | 同一 manifest tensor 集 | 真实权重 revision |
 
-第一次只 warmup 10 次的 NCCL 采样出现过进程级双峰：64 MiB 一轮为
-`2.553 ms`，1 GiB 也出现过约 `7.95 ms`，而其他进程明显更快。INFO 日志确认
-1 GiB debug 对照的 6 个进程都使用 32 个 channel、`P2P/direct pointer` 和
-512 KiB P2P chunk，没有切到网络 transport。将每种大小的 warmup 统一为约
-64 GiB 后，5 轮数据落入上述窄区间。旧数据仍保存在 `nccl-e2e-*`，正式数据使用
-`nccl-warm-e2e-*`；这里只能确认它属于进程冷态/瞬态，尚不能把根因严格归结
-为 GPU 时钟或某个 NCCL protocol。
+每个 case 至少报告以下指标：
 
-这一节补齐了单个 region 的完成时间，但还不是完整权重 revision 的总耗时。
-完整 revision 会受 tensor 数量、N-D region 数、并发窗口、PP route 分组和
-控制面 barrier 影响；不能简单用“模型字节数 / 本表速率”替代实际 E2E。
+- warm `E2E p50/p95/max`：API 调用、设备完成和所有 target barrier；
+- cold `E2E p50/p95`：runtime/session、allocation/registration、metadata、plan、
+  首次 validated transfer；
+- `validated logical GiB/s`：global unique bytes 除以 max-rank warm E2E；
+- physical bytes、operation/region 数、峰值额外显存和 source serving 影响。
 
-### 3.3 NCCL M2N 状态
+M2N 的 synthetic benchmark 使用 2D mesh 表示 replicate/shard，并不理解模型的
+PP、EP、DP 语义。公平比较 multi-tensor case 时，由 Mooncake manifest 和测试
+harness 显式提供 layer/expert ownership，再把每个 logical tensor descriptor
+交给各 executor；不能让 M2N benchmark 的模型名推断或 dedup 代替真实语义。
 
-当前 `nccl_m2n` 是 NVIDIA `contrib/` 下的 experimental standalone preview，
-不是 NCCL core runtime。本机已构建 `libnccl_m2n.so` 和 `reshard_bench`，但
-运行时在 eRDMA 上的 `ncclDevCommCreate`/GIN 能力检查失败；禁用 IB 后仍因
-缺少 GIN 失败。因此本报告将 M2N 标为“构建成功，环境不支持运行”，不拿
-普通 NCCL P2P 结果冒充 M2N reshard 结果。
+### 3.4 官方 M2N E2E 参考
+
+NVIDIA M2N README 给出的 GB200 NVL72 `reshard_model_bench` 结果是当前唯一可用
+的真实 M2N E2E 参考，但硬件、模型、GPU 数和 workload 都与本次 H20 不同，
+只能证明 M2N 的目标量级，不能和本地 Mooncake 数字计算比值：
+
+| 模型 | GPU 配置 | M2N RING max E2E | M2N DIRECT max E2E |
+| --- | --- | ---: | ---: |
+| DeepSeek-V3 | 128T + 128G | `1447.44 ms` | `3837.74 ms` |
+| Qwen3-235B | 64T + 64G | `988.75 ms` | `2175.16 ms` |
+
+这组结果使用 `--validate --no-dedup`，统计所有 layer pattern；RING 相对 DIRECT
+分别为 `2.65x` 和 `2.20x`。它是 NVIDIA 环境内两种 M2N algorithm 的对比，
+不是 Mooncake 与 M2N 的对比。
+
+### 3.5 辅助诊断：裸 G2G，不是 M2N
+
+以下旧数据只用于判断 H20/NVLink 的 transport ceiling 和 Mooncake TE 自身
+开销，不进入异构 reshard 主结论：
+
+| 路径 | 拓扑/region | 饱和吞吐 |
+| --- | --- | ---: |
+| Mooncake `nvlink_intra` | 0 -> 4，64 MiB | `369.062 GiB/s` |
+| 普通 NCCL strict one-way P2P | 0 -> 4，64 MiB | `314.629 GiB/s` |
+| Mooncake `nvlink_intra` | 0-3 -> 4-7，64 MiB | `1474.255 GiB/s` |
+| 普通 NCCL strict one-way P2P | 4 pair，64 MiB | `1254.082 GiB/s` |
+| Mooncake RDMA | 0 -> 4，双 eRDMA | `20.389 GiB/s` |
+
+| Payload | Mooncake 单 region completion | 普通 NCCL P2P completion |
+| --- | ---: | ---: |
+| 64 MiB | `0.181021 ms` | `0.225312 ms` |
+| 256 MiB | `0.689038 ms` | `0.771438 ms` |
+| 1 GiB | `2.718195 ms` | `3.234601 ms` |
+| 4 GiB | `10.835100 ms` | `12.832107 ms` |
+
+这些 completion 数据不包含 manifest、N-D planning、多个 source/destination
+协调、GIN/ring forwarding、PP route 或 target activation。它们既不是完整
+revision E2E，也不能用于估算 M2N 的 reshard 吞吐。
 
 ## 4. Store 权重 save/load E2E
 
@@ -241,6 +282,11 @@ operation 数可能因物理 alias 去重而减少。outer loops 在 lowering �
 - Qwen3-Next 真实启动：spawn-to-ready p50 为 `106.139/68.040 s`；
   spawn-to-first-response p50 为 `107.101/68.998 s`；source serving
   continuity 和响应一致性通过。该项是框架级 E2E，不等同于 raw TE 吞吐。
+- NCCL `5067397c` 和 `nccl_m2n` 构建通过。benchmark-only eRDMA QP 兼容后，
+  强制走 IB 的 2-rank all-reduce 1-16 MiB 全部 `#wrong=0`。
+- M2N 负向验证：1 -> 1 DIRECT 和 TP4 -> TP2 RING 均进入 warmup，但 GIN
+  `IPut`/QP 失败并由 20 秒 timeout 终止；没有 `VALIDATION PASSED`，因此没有
+  纳入任何吞吐或 E2E 样本。
 - 当前环境没有 `clang-format` 可执行文件；本轮 C++ 变更只有一行并已编译，
   但未执行独立 clang-format check。
 
@@ -253,7 +299,8 @@ operation 数可能因物理 alias 去重而减少。outer loops 在 lowering �
 ```
 
 其中 `mooncake-nvlink-*`、`mooncake-rdma-*`、`nccl-one-way-*` 和
-`store-cuda-*` 分别支撑第 3、4 节吞吐数据。Qwen3-Next 启动结果位于：
+`store-cuda-*` 分别支撑第 3.5、4 节数据。普通 NCCL 日志只支持 raw P2P
+辅助诊断，不支持 M2N 结论。Qwen3-Next 启动结果位于：
 
 ```text
 /Users/gaobo/Documents/mooncake/.vin_stage/qwen3-next-final-9e850de1-2db0c7842-benchmark-result.json
@@ -270,10 +317,25 @@ operation 数可能因物理 alias 去重而减少。outer loops 在 lowering �
 `nccl-e2e-*` 保留初始短 warmup 及其双峰，不作为正式中位数输入；
 `nccl-debug-1g/*` 记录 direct-pointer、channel 和 chunk 配置证据。
 
+NCCL M2N 构建和运行证据位于：
+
+```text
+/Users/gaobo/Documents/mooncake/.vin_stage/results-20260722-m2n/
+```
+
+`nccl-erdma-after-qp-compat.log` 记录普通 collective 的通过结果；
+`m2n-direct-1to1-info.log` 记录最小 GIN `IPut status=21`；
+`m2n-ring-tp4-to-tp2-after-qp-compat.log` 记录真实 TP4 -> TP2 RING 在 warmup
+中的 QP fatal event。benchmark-only 补丁保存在：
+
+```text
+/Users/gaobo/Documents/mooncake/.vin_stage/nccl-erdma-max-recv-wr.patch
+```
+
 证据边界：Release build、当前 pytest/ruff 以及 N-D 基线 pass count 是本轮和
-实现阶段的命令输出摘要，未混入吞吐日志目录；M2N 失败日志也未归档，因此
-M2N 结论只表示本机环境探测结果，不作为性能对比证据。第三方独立复核时应在
-上述固定 commit 上重新执行构建和测试。
+实现阶段的命令输出摘要，未混入吞吐日志目录。M2N 负向日志已经归档，只能
+证明当前 H20/eRDMA 环境没有有效 M2N iteration，不能证明其他 GIN 平台上的
+M2N 性能。第三方独立复核时应在上述固定 commit 上重新执行构建和测试。
 
 推荐下一阶段按优先级推进：
 
@@ -287,5 +349,5 @@ M2N 结论只表示本机环境探测结果，不作为性能对比证据。第�
 公开参考：
 
 - [NVIDIA NCCL M2N README（固定到 5067397c）](https://github.com/NVIDIA/nccl/blob/5067397c2676d5aed50042fc39e5c8ee96eb0027/contrib/nccl_m2n/README.md)
-- [NVIDIA nccl-tests sendrecv 实现（固定到 a0b82b22）](https://github.com/NVIDIA/nccl-tests/blob/a0b82b2260cf5152b9f8c061bbf7eaf0ba096432/src/sendrecv.cu)
+- [NVIDIA M2N reshard benchmark（固定到 5067397c）](https://github.com/NVIDIA/nccl/blob/5067397c2676d5aed50042fc39e5c8ee96eb0027/contrib/nccl_m2n/benchmarks/reshard_bench.cc)
 - [Mooncake group semantics RFC #2282](https://github.com/kvcache-ai/Mooncake/issues/2282)
