@@ -347,6 +347,7 @@ def _perf_result_payload(
     samples: Mapping[str, tuple[float, ...]],
     logical_bytes: Mapping[str, int],
     placement: Mapping[str, object] | None = None,
+    transport: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if set(samples) != set(logical_bytes):
         raise ValueError("performance phase byte accounting is incomplete")
@@ -369,7 +370,49 @@ def _perf_result_payload(
     }
     if placement is not None:
         payload["placement"] = dict(placement)
+    if transport is not None:
+        payload["transport"] = dict(transport)
     return payload
+
+
+def _store_perf_result_payload(
+    *,
+    protocol: str,
+    multi_gpu: bool,
+    environ: Mapping[str, str],
+    total_bytes: int,
+    source_tp: int,
+    target_tp: int,
+    warmups: int,
+    iterations: int,
+    samples: Mapping[str, tuple[float, ...]],
+    logical_bytes: Mapping[str, int],
+    placement: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    normalized_protocol = protocol.strip().lower()
+    if not normalized_protocol:
+        raise ValueError("Store performance protocol must not be empty")
+    memcpy_override = environ.get("MC_STORE_MEMCPY")
+    memcpy_policy = (
+        "auto" if memcpy_override is None else memcpy_override.strip().lower()
+    )
+    suffix = "-multi-gpu" if multi_gpu else ""
+    return _perf_result_payload(
+        backend=f"store-cuda-preregistered{suffix}",
+        total_bytes=total_bytes,
+        source_tp=source_tp,
+        target_tp=target_tp,
+        warmups=warmups,
+        iterations=iterations,
+        samples=samples,
+        logical_bytes=logical_bytes,
+        placement=placement,
+        transport={
+            "requested_protocol": normalized_protocol,
+            "strategy": "runtime-selected",
+            "mc_store_memcpy": memcpy_policy,
+        },
+    )
 
 
 def _emit_perf_result(payload: Mapping[str, object]) -> None:
@@ -1016,6 +1059,7 @@ def test_gpu_store_heterogeneous_tp_performance() -> None:
         device: CudaRuntime(device)
         for device in sorted(set(source_devices) | set(target_devices))
     }
+    protocol = os.getenv("MOONCAKE_WEIGHT_PROTOCOL", "tcp")
     store = MooncakeDistributedStore()
     result = store.setup(
         os.getenv(
@@ -1027,7 +1071,7 @@ def test_gpu_store_heterogeneous_tp_performance() -> None:
         ),
         max(128 * 1024 * 1024, config.total_bytes * 2),
         64 * 1024 * 1024,
-        os.getenv("MOONCAKE_WEIGHT_PROTOCOL", "tcp"),
+        protocol,
         os.getenv("MOONCAKE_WEIGHT_DEVICE", "eth0"),
         os.getenv("MOONCAKE_WEIGHT_MASTER", "127.0.0.1:50051"),
     )
@@ -1082,12 +1126,12 @@ def test_gpu_store_heterogeneous_tp_performance() -> None:
                         "e2e": config.total_bytes * 2,
                     }
                 )
-                payload = _perf_result_payload(
-                    backend=(
-                        "store-cuda-tcp-preregistered-multi-gpu"
-                        if len(set(source_rank_devices) | set(target_rank_devices)) > 1
-                        else "store-cuda-tcp-preregistered"
+                payload = _store_perf_result_payload(
+                    protocol=protocol,
+                    multi_gpu=(
+                        len(set(source_rank_devices) | set(target_rank_devices)) > 1
                     ),
+                    environ=os.environ,
                     total_bytes=config.total_bytes,
                     source_tp=source_tp,
                     target_tp=target_tp,
@@ -1298,6 +1342,69 @@ def test_perf_result_payload_is_machine_readable() -> None:
         "source_cuda_devices": [0, 1],
         "target_cuda_devices": [2, 3],
     }
+
+
+@pytest.mark.parametrize(
+    "protocol,multi_gpu,environ,expected_backend,expected_transport",
+    [
+        (
+            "tcp",
+            False,
+            {},
+            "store-cuda-preregistered",
+            {
+                "requested_protocol": "tcp",
+                "strategy": "runtime-selected",
+                "mc_store_memcpy": "auto",
+            },
+        ),
+        (
+            "tcp",
+            True,
+            {"MC_STORE_MEMCPY": "1"},
+            "store-cuda-preregistered-multi-gpu",
+            {
+                "requested_protocol": "tcp",
+                "strategy": "runtime-selected",
+                "mc_store_memcpy": "1",
+            },
+        ),
+        (
+            "rdma",
+            True,
+            {"MC_STORE_MEMCPY": "0"},
+            "store-cuda-preregistered-multi-gpu",
+            {
+                "requested_protocol": "rdma",
+                "strategy": "runtime-selected",
+                "mc_store_memcpy": "0",
+            },
+        ),
+    ],
+)
+def test_store_perf_payload_separates_protocol_from_runtime_strategy(
+    protocol: str,
+    multi_gpu: bool,
+    environ: Mapping[str, str],
+    expected_backend: str,
+    expected_transport: Mapping[str, object],
+) -> None:
+    payload = _store_perf_result_payload(
+        protocol=protocol,
+        multi_gpu=multi_gpu,
+        environ=environ,
+        total_bytes=1_000,
+        source_tp=2,
+        target_tp=4,
+        warmups=1,
+        iterations=2,
+        samples={"load": (0.1, 0.2)},
+        logical_bytes={"load": 1_000},
+        placement={"source_cuda_devices": [0, 1]},
+    )
+
+    assert payload["backend"] == expected_backend
+    assert payload["transport"] == expected_transport
 
 
 def test_perf_config_parses_explicit_environment() -> None:
