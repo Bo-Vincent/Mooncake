@@ -79,3 +79,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 `tests/python_ab.py` 可用当前 Python 插件作为 oracle，逐字节比较随机异构
 布局下的输出计划。
+
+Qwen3、Qwen3-MoE、Qwen3.5 和 Qwen3-VL 的真实 tensor 名称、shape、packed
+fragment 与 TP/EP/PP/DP 转换用例见
+[`docs/qwen3-scr-test-cases.md`](docs/qwen3-scr-test-cases.md)。可以通过
+`cargo run --example qwen3_scr_cases -- --list` 生成 sCR 测试输入或预期 plan。
