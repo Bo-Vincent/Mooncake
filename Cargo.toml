@@ -1,0 +1,21 @@
+[package]
+name = "heterogeneous-weight-conversion"
+version = "0.1.0"
+edition = "2021"
+description = "Framework-neutral Rust planner for heterogeneous model-weight resharding"
+license = "Apache-2.0"
+
+[lib]
+name = "heterogeneous_weight_conversion"
+
+[[bin]]
+name = "hweight-plan"
+path = "src/bin/hweight_plan.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
