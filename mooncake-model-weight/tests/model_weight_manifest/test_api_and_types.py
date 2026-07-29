@@ -50,6 +50,13 @@ def test_public_api_is_minimal_and_explicit() -> None:
         "plan_runtime_transfer_to_target_placements",
         "plan_stored_transfer",
         "plan_stored_transfer_to_target_placements",
+        "DirectReadReceipt",
+        "DirectTransferReceipt",
+        "MemoryRegistrationLease",
+        "MooncakeTransferEngineReader",
+        "MooncakeTransferEngineSink",
+        "TransferCompletionUnknownError",
+        "TransferEngineError",
     ]
 
 
