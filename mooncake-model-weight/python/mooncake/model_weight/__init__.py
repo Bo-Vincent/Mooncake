@@ -35,6 +35,14 @@ from .planner import (
     plan_stored_transfer,
     plan_stored_transfer_to_target_placements,
 )
+from .store import (
+    UploadOperation,
+    UploadReceipt,
+    WeightLoadPlan,
+    WeightStore,
+    WeightStoreError,
+    WeightUploadPlan,
+)
 from .te import (
     DirectReadReceipt,
     DirectTransferReceipt,
@@ -93,6 +101,12 @@ __all__ = [
     "plan_runtime_transfer_to_target_placements",
     "plan_stored_transfer",
     "plan_stored_transfer_to_target_placements",
+    "UploadOperation",
+    "UploadReceipt",
+    "WeightLoadPlan",
+    "WeightStore",
+    "WeightStoreError",
+    "WeightUploadPlan",
     "DirectReadReceipt",
     "DirectTransferReceipt",
     "MemoryRegistrationLease",
