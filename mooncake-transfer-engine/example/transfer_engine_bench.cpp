@@ -376,6 +376,7 @@ static std::string getLocationName(int buffer_id) {
 Status initiatorWorker(TransferEngine* engine, SegmentID segment_id,
                        int thread_id, void* addr) {
     bindToSocket(thread_id % NR_SOCKETS);
+    setWorkerDeviceIfNeeded();
     TransferRequest::OpCode opcode;
     if (FLAGS_operation == "read")
         opcode = TransferRequest::READ;
