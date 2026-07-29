@@ -133,6 +133,7 @@ design/hicache-design
 design/engram
 design/unified-parallel-tensor-io
 design/model-weight-manifest
+design/weight-group-manifest-rfc
 design/tent/overview
 design/tent/tebench
 design/conductor/conductor-architecture-design
