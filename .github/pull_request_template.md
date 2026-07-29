@@ -6,6 +6,7 @@
 
 - [ ] Transfer Engine (`mooncake-transfer-engine`)
 - [ ] Mooncake Store (`mooncake-store`)
+- [ ] Model Weight (`mooncake-model-weight`)
 - [ ] Mooncake EP (`mooncake-ep`)
 - [ ] Mooncake PG (`mooncake-pg`)
 - [ ] Integration (`mooncake-integration`)

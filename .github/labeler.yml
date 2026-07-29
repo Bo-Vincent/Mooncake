@@ -54,6 +54,7 @@ Tests:
     - any-glob-to-any-file:
       - 'scripts/test_*'
       - 'mooncake-wheel/tests/**/*'
+      - 'mooncake-model-weight/tests/**/*'
       - 'scripts/tone_tests/**/*'
 
 Ascend/NPU:
