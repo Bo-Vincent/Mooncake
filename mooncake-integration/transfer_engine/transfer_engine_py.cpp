@@ -15,8 +15,8 @@
 #include "transfer_engine_py.h"
 
 #include <cassert>
-#include <numeric>
 #include <fstream>
+#include <numeric>
 
 #include <pybind11/stl.h>
 #include "transport/rpc_communicator/rpc_interface.h"
@@ -48,6 +48,140 @@
 static void* (*allocateMemory)(size_t) = nullptr;
 static void (*freeMemory)(void*) = nullptr;
 static std::string g_protocol;
+
+namespace {
+
+constexpr uint64_t kDestructorDrainTimeoutMs = 100;
+
+class QuarantinedTransferResources {
+   public:
+    QuarantinedTransferResources(
+        std::shared_ptr<TransferEngine> engine,
+        std::unordered_map<std::string, Transport::SegmentHandle> handles,
+        std::vector<char*> buffers,
+        std::unordered_set<char*> large_buffers,
+        void (*free_memory)(void*))
+        : engine_(std::move(engine)),
+          handles_(std::move(handles)),
+          buffers_(std::move(buffers)),
+          large_buffers_(std::move(large_buffers)),
+          free_memory_(free_memory) {}
+
+    ~QuarantinedTransferResources() {
+        if (engine_) {
+            for (const auto& handle : handles_) {
+                engine_->closeSegment(handle.second);
+            }
+        }
+        handles_.clear();
+        engine_.reset();
+
+        if (free_memory_) {
+            for (auto* buffer : buffers_) free_memory_(buffer);
+            for (auto* buffer : large_buffers_) free_memory_(buffer);
+        }
+    }
+
+   private:
+    std::shared_ptr<TransferEngine> engine_;
+    std::unordered_map<std::string, Transport::SegmentHandle> handles_;
+    std::vector<char*> buffers_;
+    std::unordered_set<char*> large_buffers_;
+    void (*free_memory_)(void*);
+};
+
+std::mutex& quarantinedTicketsMutex() {
+    static auto* mutex = new std::mutex();
+    return *mutex;
+}
+
+std::vector<std::shared_ptr<BatchTransferTicket>>& quarantinedTickets() {
+    // Intentionally process-lifetime: without a transport-wide cancel API,
+    // dropping the last unknown ticket would make safe destruction impossible.
+    static auto* tickets =
+        new std::vector<std::shared_ptr<BatchTransferTicket>>();
+    return *tickets;
+}
+
+void quarantinePendingTransfers(
+    std::vector<std::shared_ptr<BatchTransferTicket>> tickets,
+    std::shared_ptr<TransferEngine> engine,
+    std::unordered_map<std::string, Transport::SegmentHandle> handles,
+    std::vector<char*> buffers, std::unordered_set<char*> large_buffers,
+    void (*free_memory)(void*)) {
+    auto resources = std::make_shared<QuarantinedTransferResources>(
+        std::move(engine), std::move(handles), std::move(buffers),
+        std::move(large_buffers), free_memory);
+    for (const auto& ticket : tickets) {
+        ticket->addDrainedCallback([resources] {});
+    }
+
+    std::lock_guard<std::mutex> guard(quarantinedTicketsMutex());
+    auto& quarantined = quarantinedTickets();
+    quarantined.erase(
+        std::remove_if(quarantined.begin(), quarantined.end(),
+                       [](const auto& ticket) { return ticket->drained(); }),
+        quarantined.end());
+    quarantined.insert(quarantined.end(),
+                       std::make_move_iterator(tickets.begin()),
+                       std::make_move_iterator(tickets.end()));
+}
+
+uint64_t nanosToCeilingMillis(int64_t timeout_ns) {
+    if (timeout_ns <= 0) return 0;
+    constexpr uint64_t kNanosPerMillis = 1000 * 1000;
+    return (static_cast<uint64_t>(timeout_ns) + kNanosPerMillis - 1) /
+           kNanosPerMillis;
+}
+
+std::shared_ptr<BatchTransferTicket> makeBatchTransferTicket(
+    const std::shared_ptr<TransferEngine>& engine, batch_id_t batch_id,
+    std::shared_ptr<std::vector<TransferRequest>> entries,
+    size_t task_count, bool submit_failed) {
+    auto task_tracker =
+        std::make_shared<BatchTransferTaskTracker>(task_count);
+    auto poller = [engine, batch_id, submit_failed, task_tracker] {
+        // submitTransfer has no rollback contract. On an error, only a
+        // successful freeBatchID proves that no task still owns request state.
+        if (submit_failed) return BatchTransferBackendStatus::FAILED;
+
+        for (size_t task_id = 0; task_id < task_tracker->size(); ++task_id) {
+            if (!task_tracker->shouldPoll(task_id)) continue;
+
+            TransferStatus status;
+            Status result =
+                engine->getTransferStatus(batch_id, task_id, status);
+            if (!result.ok()) {
+                LOG(ERROR) << "Failed to poll batch " << batch_id << " task "
+                           << task_id << ": " << result.ToString();
+                continue;
+            }
+
+            task_tracker->observe(
+                task_id, classifyBatchTransferTaskStatus(
+                             status.s, TransferStatusEnum::COMPLETED,
+                             TransferStatusEnum::FAILED,
+                             TransferStatusEnum::CANCELED,
+                             TransferStatusEnum::TIMEOUT,
+                             TransferStatusEnum::INVALID));
+        }
+        return task_tracker->aggregate();
+    };
+    auto releaser = [engine, batch_id] {
+        Status result = engine->freeBatchID(batch_id);
+        if (result.ok()) return true;
+        if (!result.IsBatchBusy()) {
+            LOG(ERROR) << "Failed to release batch " << batch_id << ": "
+                       << result.ToString();
+        }
+        return false;
+    };
+    return std::make_shared<BatchTransferTicket>(
+        batch_id, std::move(entries), std::move(poller),
+        std::move(releaser));
+}
+
+}  // namespace
 
 //  Handle allocateMemory function pointer based on protocol
 void initMemoryAllocator(const char* protocol) {
@@ -112,6 +246,20 @@ TransferEnginePy::TransferEnginePy() {
 }
 
 TransferEnginePy::~TransferEnginePy() {
+    auto completion =
+        pending_batch_transfers_.drain(kDestructorDrainTimeoutMs);
+    if (completion == BatchTransferCompletionStatus::COMPLETION_UNKNOWN) {
+        auto tickets = pending_batch_transfers_.takeAll();
+        LOG(ERROR) << "TransferEngine destruction has " << tickets.size()
+                   << " undrained batch transfer(s); preserving engine, "
+                      "requests, batches, and managed buffers";
+        quarantinePendingTransfers(
+            std::move(tickets), std::move(engine_), std::move(handle_map_),
+            std::move(buffer_list_), std::move(large_buffer_list_), freeMemory);
+        free_list_.clear();
+        return;
+    }
+
     for (auto& handle : handle_map_) engine_->closeSegment(handle.second);
     handle_map_.clear();
     engine_.reset();
@@ -401,6 +549,17 @@ int TransferEnginePy::batchTransferSyncWrite(
                              transport_hint);
 }
 
+std::shared_ptr<BatchTransferTicket>
+TransferEnginePy::batchTransferSyncWriteWithTicket(
+    const char* target_hostname, std::vector<uintptr_t> buffers,
+    std::vector<uintptr_t> peer_buffer_addresses, std::vector<size_t> lengths,
+    const std::string& transport_hint) {
+    return batchTransferSyncWithTicket(
+        target_hostname, std::move(buffers),
+        std::move(peer_buffer_addresses), std::move(lengths),
+        TransferOpcode::WRITE, nullptr, transport_hint);
+}
+
 int TransferEnginePy::batchTransferSyncRead(
     const char* target_hostname, std::vector<uintptr_t> buffers,
     std::vector<uintptr_t> peer_buffer_addresses, std::vector<size_t> lengths,
@@ -408,6 +567,17 @@ int TransferEnginePy::batchTransferSyncRead(
     return batchTransferSync(target_hostname, buffers, peer_buffer_addresses,
                              lengths, TransferOpcode::READ, nullptr,
                              transport_hint);
+}
+
+std::shared_ptr<BatchTransferTicket>
+TransferEnginePy::batchTransferSyncReadWithTicket(
+    const char* target_hostname, std::vector<uintptr_t> buffers,
+    std::vector<uintptr_t> peer_buffer_addresses, std::vector<size_t> lengths,
+    const std::string& transport_hint) {
+    return batchTransferSyncWithTicket(
+        target_hostname, std::move(buffers),
+        std::move(peer_buffer_addresses), std::move(lengths),
+        TransferOpcode::READ, nullptr, transport_hint);
 }
 
 batch_id_t TransferEnginePy::batchTransferAsyncWrite(
@@ -526,6 +696,19 @@ int TransferEnginePy::batchTransferSync(
     std::vector<uintptr_t> peer_buffer_addresses, std::vector<size_t> lengths,
     TransferOpcode opcode, TransferNotify* notify,
     const std::string& transport_hint) {
+    auto ticket = batchTransferSyncWithTicket(
+        target_hostname, std::move(buffers),
+        std::move(peer_buffer_addresses), std::move(lengths), opcode, notify,
+        transport_hint);
+    return static_cast<int>(ticket->status());
+}
+
+std::shared_ptr<BatchTransferTicket>
+TransferEnginePy::batchTransferSyncWithTicket(
+    const char* target_hostname, std::vector<uintptr_t> buffers,
+    std::vector<uintptr_t> peer_buffer_addresses, std::vector<size_t> lengths,
+    TransferOpcode opcode, TransferNotify* notify,
+    const std::string& transport_hint) {
     pybind11::gil_scoped_release release;
     Transport::SegmentHandle handle;
     {
@@ -534,7 +717,10 @@ int TransferEnginePy::batchTransferSync(
             handle = handle_map_[target_hostname];
         } else {
             handle = engine_->openSegment(target_hostname);
-            if (handle == (Transport::SegmentHandle)-1) return -1;
+            if (handle == (Transport::SegmentHandle)-1) {
+                return BatchTransferTicket::terminal(
+                    BatchTransferCompletionStatus::FAILED_DRAINED);
+            }
             handle_map_[target_hostname] = handle;
         }
     }
@@ -543,87 +729,99 @@ int TransferEnginePy::batchTransferSync(
         buffers.size() != lengths.size()) {
         LOG(ERROR)
             << "buffers, peer_buffer_addresses and lengths have different size";
-        return -1;
+        return BatchTransferTicket::terminal(
+            BatchTransferCompletionStatus::FAILED_DRAINED);
     }
 
     const int max_retry = engine_->numContexts() + 1;
     auto start_ts = getCurrentTimeInNano();
     auto total_length = std::accumulate(lengths.begin(), lengths.end(), 0ull);
     auto batch_size = buffers.size();
-    std::vector<TransferRequest> entries;
-    for (size_t i = 0; i < batch_size; ++i) {
-        TransferRequest entry;
-        if (opcode == TransferOpcode::WRITE) {
-            entry.opcode = TransferRequest::WRITE;
-        } else {
-            entry.opcode = TransferRequest::READ;
-        }
-        entry.length = lengths[i];
-        entry.source = (void*)buffers[i];
-        entry.target_id = handle;
-        entry.target_offset = peer_buffer_addresses[i];
-        entry.advise_retry_cnt = 0;
-        entry.transport_hint = parseTransportHint(transport_hint);
-        entries.push_back(entry);
-    }
 
     for (int retry = 0; retry < max_retry; ++retry) {
+        auto entries = std::make_shared<std::vector<TransferRequest>>();
+        entries->reserve(batch_size);
+        for (size_t i = 0; i < batch_size; ++i) {
+            TransferRequest entry;
+            if (opcode == TransferOpcode::WRITE) {
+                entry.opcode = TransferRequest::WRITE;
+            } else {
+                entry.opcode = TransferRequest::READ;
+            }
+            entry.length = lengths[i];
+            entry.source = (void*)buffers[i];
+            entry.target_id = handle;
+            entry.target_offset = peer_buffer_addresses[i];
+            entry.advise_retry_cnt = 0;
+            entry.transport_hint = parseTransportHint(transport_hint);
+            entries->push_back(entry);
+        }
+
         auto batch_id = engine_->allocateBatchID(batch_size);
         Status s =
             notify
                 ? engine_->submitTransferWithNotify(
-                      batch_id, entries,
+                      batch_id, *entries,
                       TransferMetadata::NotifyDesc{notify->name, notify->msg})
-                : engine_->submitTransfer(batch_id, entries);
+                : engine_->submitTransfer(batch_id, *entries);
         if (!s.ok()) {
-            engine_->freeBatchID(batch_id);
-            Status segment_status = engine_->CheckSegmentStatus(handle);
-            if (!segment_status.ok()) {
-                LOG(WARNING)
-                    << "submitTransfer failed with target " << target_hostname
-                    << ", CheckSegmentStatus not ok, ready to closeSegment";
-                std::lock_guard<std::mutex> guard(mutex_);
-                engine_->closeSegment(handle);
-                engine_->getMetadata()->removeSegmentDesc(target_hostname);
-                handle_map_.erase(target_hostname);
+            auto ticket = makeBatchTransferTicket(engine_, batch_id, entries,
+                                                  batch_size, true);
+            auto completion = ticket->poll();
+            if (completion ==
+                BatchTransferCompletionStatus::COMPLETION_UNKNOWN) {
+                pending_batch_transfers_.retain(ticket);
+                LOG(ERROR) << "submitTransfer failed but batch " << batch_id
+                           << " is still busy; completion is unknown";
+            } else {
+                Status segment_status = engine_->CheckSegmentStatus(handle);
+                if (!segment_status.ok()) {
+                    LOG(WARNING)
+                        << "submitTransfer failed with target "
+                        << target_hostname
+                        << ", CheckSegmentStatus not ok, ready to closeSegment";
+                    std::lock_guard<std::mutex> guard(mutex_);
+                    engine_->closeSegment(handle);
+                    engine_->getMetadata()->removeSegmentDesc(target_hostname);
+                    handle_map_.erase(target_hostname);
+                }
             }
-            return -1;
+            return ticket;
         }
 
-        TransferStatus status;
-        bool completed = false;
-        bool already_freed = false;
-        while (!completed) {
-            Status s = engine_->getBatchTransferStatus(batch_id, status);
-            LOG_ASSERT(s.ok());
-            if (status.s == TransferStatusEnum::COMPLETED) {
-                engine_->freeBatchID(batch_id);
-                return 0;
-            } else if (status.s == TransferStatusEnum::FAILED) {
-                engine_->freeBatchID(batch_id);
-                already_freed = true;
-                completed = true;
-            } else if (status.s == TransferStatusEnum::TIMEOUT) {
-                LOG(INFO) << "Sync data transfer timeout";
-                completed = true;
-            }
-            auto current_ts = getCurrentTimeInNano();
-            const int64_t timeout =
-                transfer_timeout_nsec_ + total_length;  // 1GiB per second
-            if (current_ts - start_ts > timeout) {
-                LOG(INFO) << "Sync batch data transfer timeout after "
-                          << current_ts - start_ts << "ns";
-                // TODO: as @doujiang24 mentioned, early free(while there are
-                // still waiting tasks) the batch_id may fail and cause memory
-                // leak(a known issue).
-                if (!already_freed) {
-                    engine_->freeBatchID(batch_id);
-                }
-                return -1;
-            }
+        auto ticket =
+            makeBatchTransferTicket(engine_, batch_id, entries, batch_size,
+                                    false);
+        const int64_t timeout_ns =
+            static_cast<int64_t>(transfer_timeout_nsec_ + total_length);
+        const int64_t elapsed_ns =
+            static_cast<int64_t>(getCurrentTimeInNano() - start_ts);
+        auto completion =
+            ticket->drain(nanosToCeilingMillis(timeout_ns - elapsed_ns));
+
+        if (completion ==
+            BatchTransferCompletionStatus::COMPLETION_UNKNOWN) {
+            pending_batch_transfers_.retain(ticket);
+            LOG(INFO) << "Sync batch data transfer completion unknown after "
+                      << getCurrentTimeInNano() - start_ts << "ns";
+            return ticket;
+        }
+        if (completion == BatchTransferCompletionStatus::COMPLETED) {
+            return ticket;
+        }
+        if (!shouldRetryBatchTransfer(completion) ||
+            retry + 1 == max_retry) {
+            return ticket;
         }
     }
-    return -1;
+
+    return BatchTransferTicket::terminal(
+        BatchTransferCompletionStatus::FAILED_DRAINED);
+}
+
+BatchTransferCompletionStatus
+TransferEnginePy::drainPendingBatchTransfers(uint64_t timeout_ms) {
+    return pending_batch_transfers_.drain(timeout_ms);
 }
 
 batch_id_t TransferEnginePy::batchTransferAsync(
@@ -1152,6 +1350,31 @@ PYBIND11_MODULE(engine, m) {
         .value("Write", TransferEnginePy::TransferOpcode::WRITE)
         .export_values();
 
+    py::enum_<BatchTransferCompletionStatus>(m,
+                                             "BatchTransferCompletionStatus")
+        .value("COMPLETED", BatchTransferCompletionStatus::COMPLETED)
+        .value("FAILED_DRAINED",
+               BatchTransferCompletionStatus::FAILED_DRAINED)
+        .value("COMPLETION_UNKNOWN",
+               BatchTransferCompletionStatus::COMPLETION_UNKNOWN);
+
+    py::class_<BatchTransferTicket, std::shared_ptr<BatchTransferTicket>>(
+        m, "BatchTransferTicket",
+        "Keeps native request, batch, and engine state alive. Caller buffers "
+        "and memory registrations must remain valid until drained is true.")
+        .def_property_readonly("status", &BatchTransferTicket::status)
+        .def_property_readonly("batch_id", &BatchTransferTicket::batchId)
+        .def_property_readonly("drained", &BatchTransferTicket::drained)
+        .def("poll",
+             [](BatchTransferTicket& ticket) {
+                 py::gil_scoped_release release;
+                 return ticket.poll();
+             })
+        .def("drain", [](BatchTransferTicket& ticket, uint64_t timeout_ms) {
+            py::gil_scoped_release release;
+            return ticket.drain(timeout_ms);
+        });
+
     py::class_<TransferEnginePy::TransferNotify>(m, "TransferNotify")
         .def(py::init<>())
         .def(py::init<const std::string&, const std::string&>(),
@@ -1181,8 +1404,18 @@ PYBIND11_MODULE(engine, m) {
                  py::arg("target_hostname"), py::arg("buffers"),
                  py::arg("peer_buffer_addresses"), py::arg("lengths"),
                  py::arg("transport_hint") = "")
+            .def("batch_transfer_sync_write_with_ticket",
+                 &TransferEnginePy::batchTransferSyncWriteWithTicket,
+                 py::arg("target_hostname"), py::arg("buffers"),
+                 py::arg("peer_buffer_addresses"), py::arg("lengths"),
+                 py::arg("transport_hint") = "")
             .def("batch_transfer_sync_read",
                  &TransferEnginePy::batchTransferSyncRead,
+                 py::arg("target_hostname"), py::arg("buffers"),
+                 py::arg("peer_buffer_addresses"), py::arg("lengths"),
+                 py::arg("transport_hint") = "")
+            .def("batch_transfer_sync_read_with_ticket",
+                 &TransferEnginePy::batchTransferSyncReadWithTicket,
                  py::arg("target_hostname"), py::arg("buffers"),
                  py::arg("peer_buffer_addresses"), py::arg("lengths"),
                  py::arg("transport_hint") = "")
@@ -1206,6 +1439,22 @@ PYBIND11_MODULE(engine, m) {
                  py::arg("peer_buffer_addresses"), py::arg("lengths"),
                  py::arg("opcode"), py::arg("notify") = nullptr,
                  py::arg("transport_hint") = "")
+            .def("batch_transfer_sync_with_ticket",
+                 &TransferEnginePy::batchTransferSyncWithTicket,
+                 py::arg("target_hostname"), py::arg("buffers"),
+                 py::arg("peer_buffer_addresses"), py::arg("lengths"),
+                 py::arg("opcode"), py::arg("notify") = nullptr,
+                 py::arg("transport_hint") = "")
+            .def(
+                "drain_pending_batch_transfers",
+                [](TransferEnginePy& engine, uint64_t timeout_ms) {
+                    py::gil_scoped_release release;
+                    return engine.drainPendingBatchTransfers(timeout_ms);
+                },
+                py::arg("timeout_ms"))
+            .def_property_readonly(
+                "pending_batch_transfer_count",
+                &TransferEnginePy::pendingBatchTransferCount)
             .def("batch_transfer_async", &TransferEnginePy::batchTransferAsync,
                  py::arg("target_hostname"), py::arg("buffers"),
                  py::arg("peer_buffer_addresses"), py::arg("lengths"),
