@@ -157,6 +157,17 @@ if [ "$NPU_BUILD" = "1" ]; then
 fi
 
 echo "Building wheel package..."
+# Stage the model-weight Python package for the combined Mooncake wheel. The
+# tracked source of truth remains in the top-level module.
+MODEL_WEIGHT_SOURCE_DIR="mooncake-model-weight/python/mooncake/model_weight"
+MODEL_WEIGHT_STAGING_DIR="$(pwd)/mooncake-wheel/mooncake/model_weight"
+cleanup_model_weight_staging() {
+    rm -rf "${MODEL_WEIGHT_STAGING_DIR}"
+}
+trap cleanup_model_weight_staging EXIT
+rm -rf "${MODEL_WEIGHT_STAGING_DIR}"
+cp -R "${MODEL_WEIGHT_SOURCE_DIR}" "${MODEL_WEIGHT_STAGING_DIR}"
+
 # Build the wheel package
 cd mooncake-wheel
 
@@ -170,6 +181,7 @@ WHEEL_DIR="$(pwd)"
 cleanup_wheel_metadata_state() {
     [[ -f "${WHEEL_DIR}/pyproject.toml.backup" ]] && mv "${WHEEL_DIR}/pyproject.toml.backup" "${WHEEL_DIR}/pyproject.toml"
     rm -f "${WHEEL_DIR}/README.md"
+    cleanup_model_weight_staging
 }
 trap cleanup_wheel_metadata_state EXIT
 

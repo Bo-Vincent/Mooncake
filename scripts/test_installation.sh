@@ -32,16 +32,22 @@ sudo apt-get install -y $SYSTEM_PACKAGES
 
 echo "Verifying that import succeeds after installation..."
 python -c "import mooncake.engine" && echo "Success: Import succeeded after installation" || { echo "ERROR: Import failed after installation!"; exit 1; }
+python -c "import mooncake.model_weight" && echo "Success: Model weight import succeeded after installation" || { echo "ERROR: Model weight import failed after installation!"; exit 1; }
 
 echo "Running import structure test..."
 # Run the import structure test
 cp -r mooncake-wheel/tests test_env/
+cp -r mooncake-model-weight/tests test_env/model_weight_tests
 cd test_env
 pip install torch==2.11.0 numpy
 python tests/test_import_structure.py
 
 echo "Running mooncake config test..."
 python tests/test_mooncake_config.py
+
+echo "Running model weight tests..."
+python -m pip install pytest
+python -m pytest model_weight_tests/test_model_weight_manifest.py -q
 
 echo "Verifying mooncake_master entry point..."
 # Check if the mooncake_master entry point is installed and executable
