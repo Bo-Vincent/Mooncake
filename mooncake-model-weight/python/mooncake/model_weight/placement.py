@@ -296,3 +296,7 @@ def _load_json_object(value: str, label: str) -> Mapping[str, Any]:
     if not isinstance(raw, Mapping):
         raise ValueError(f"{label} must be a JSON object")
     return raw
+
+
+SourcePlacementManifest = PlacementManifest
+TargetPlacementManifest = PlacementManifest

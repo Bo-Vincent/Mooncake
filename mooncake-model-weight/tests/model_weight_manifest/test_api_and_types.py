@@ -17,6 +17,8 @@ from .helpers import (
 
 def test_public_api_is_minimal_and_explicit() -> None:
     assert model_weight.__all__ == [
+        "MODEL_WEIGHT_CAPABILITIES",
+        "supports_model_weight_capability",
         "ParallelRank",
         "PlacementFragment",
         "PlacementManifest",
@@ -24,17 +26,42 @@ def test_public_api_is_minimal_and_explicit() -> None:
         "RuntimeBindingManifest",
         "RuntimeFragment",
         "RuntimeManifest",
+        "SourcePlacementManifest",
+        "StoredFragment",
+        "TargetPlacementManifest",
         "TensorDescriptor",
+        "WeightManifest",
         "bind_runtime_manifest",
         "placement_manifest_from_runtime_manifest",
         "runtime_binding_from_runtime_manifest",
+        "CopyRange",
+        "ExecutorTransferPlan",
+        "LogicalTransferPlan",
+        "PipelineRouteGroup",
+        "PlacementExecutorPlan",
+        "TransferPlan",
+        "TransferRegion",
+        "bind_logical_transfer_plan",
+        "plan_placement_transfer",
+        "plan_placement_transfer_to_local_target",
+        "plan_runtime_transfer",
+        "plan_runtime_transfer_to_local_target",
+        "plan_runtime_transfer_to_local_target_placement",
+        "plan_runtime_transfer_to_target_placements",
+        "plan_stored_transfer",
+        "plan_stored_transfer_to_target_placements",
     ]
 
 
 def test_public_type_hints_resolve() -> None:
     for name in model_weight.__all__:
         value = getattr(model_weight, name)
-        targets = (value, value.__init__) if inspect.isclass(value) else (value,)
+        if inspect.isclass(value):
+            targets = (value, value.__init__)
+        elif inspect.isfunction(value):
+            targets = (value,)
+        else:
+            continue
         for target in targets:
             typing.get_type_hints(target)
 

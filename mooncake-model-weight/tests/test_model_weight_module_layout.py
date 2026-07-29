@@ -21,6 +21,10 @@ from mooncake.model_weight.runtime import (
     RuntimeBindingManifest as RuntimeBindingContract,
 )
 from mooncake.model_weight.runtime import RuntimeManifest as RuntimeContract
+from mooncake.model_weight.storage_manifest import (
+    StoredFragment as StoredFragmentContract,
+)
+from mooncake.model_weight.storage_manifest import WeightManifest as WeightContract
 from mooncake.model_weight.types import (
     ParallelRank as ParallelRankContract,
 )
@@ -48,6 +52,8 @@ def test_responsibility_modules_preserve_public_contract_identity() -> None:
     )
     assert model_weight.PlacementManifest is PlacementManifest is PlacementContract
     assert model_weight.RuntimeManifest is RuntimeManifest is RuntimeContract
+    assert model_weight.StoredFragment is StoredFragmentContract
+    assert model_weight.WeightManifest is WeightContract
     assert (
         model_weight.RuntimeBindingManifest
         is RuntimeBindingManifest
