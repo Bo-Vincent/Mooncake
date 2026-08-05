@@ -6,6 +6,7 @@ from mooncake.reshard.transfer_engine import (
     BufferRegistrationLease,
     MooncakeTransferEngineExecutor,
     TransferBatch,
+    TransferBatchRange,
     TransferDirection,
     TransferCompletionUnknownError,
     TransferEngineError,
@@ -42,6 +43,32 @@ def batch() -> TransferBatch:
     )
 
 
+def scatter_batch() -> TransferBatch:
+    return TransferBatch.from_ranges(
+        endpoint="worker-1:12345",
+        ranges=(
+            TransferBatchRange(
+                source_base_address=0x1000,
+                source_capacity=0x400,
+                target_base_address=0x3000,
+                target_capacity=0x800,
+                source_offsets=(0x20, 0x100),
+                target_offsets=(0x40, 0x200),
+                sizes=(64, 128),
+            ),
+            TransferBatchRange(
+                source_base_address=0x5000,
+                source_capacity=0x100,
+                target_base_address=0x7000,
+                target_capacity=0x100,
+                source_offsets=(0,),
+                target_offsets=(0x20,),
+                sizes=(32,),
+            ),
+        ),
+    )
+
+
 def test_resource_neutral_executor_submits_read_and_write_batches() -> None:
     engine = FakeEngine()
     executor = MooncakeTransferEngineExecutor(engine)
@@ -69,6 +96,90 @@ def test_transfer_batch_rejects_mismatched_or_invalid_ranges() -> None:
         except ValueError:
             continue
         raise AssertionError("invalid transfer batch was accepted")
+
+
+def test_transfer_batch_ranges_preserve_allocation_bounds_and_flattening() -> None:
+    value = scatter_batch()
+
+    assert value.source_addresses == (0x1020, 0x1100, 0x5000)
+    assert value.target_addresses == (0x3040, 0x3200, 0x7020)
+    assert value.sizes == (64, 128, 32)
+    assert value.operation_count == 3
+
+    with pytest.raises(ValueError, match="source allocation bounds"):
+        TransferBatchRange(
+            source_base_address=0x1000,
+            source_capacity=64,
+            target_base_address=0x2000,
+            target_capacity=128,
+            source_offsets=(32,),
+            target_offsets=(0,),
+            sizes=(64,),
+        )
+
+
+class ScatterEngine(FakeEngine):
+    def scatter_transfer_sync_read_with_ticket(self, *arguments):
+        self.calls.append(("scatter-read", arguments))
+        return CompletedTicket()
+
+    def scatter_transfer_sync_write_with_ticket(self, *arguments):
+        self.calls.append(("scatter-write", arguments))
+        return CompletedTicket()
+
+
+def test_executor_uses_scatter_ranges_with_directional_local_remote_mapping() -> None:
+    engine = ScatterEngine()
+    executor = MooncakeTransferEngineExecutor(engine)
+    value = scatter_batch()
+
+    executor.execute_batch(value, TransferDirection.READ)
+    executor.execute_batch(value, TransferDirection.WRITE)
+
+    read = engine.calls[0]
+    assert read[0] == "scatter-read"
+    assert read[1] == (
+        "worker-1:12345",
+        [0x3000, 0x7000],
+        [0x800, 0x100],
+        [0x1000, 0x5000],
+        [0x400, 0x100],
+        [[0x40, 0x200], [0x20]],
+        [[0x20, 0x100], [0]],
+        [[64, 128], [32]],
+    )
+
+    write = engine.calls[1]
+    assert write[0] == "scatter-write"
+    assert write[1] == (
+        "worker-1:12345",
+        [0x1000, 0x5000],
+        [0x400, 0x100],
+        [0x3000, 0x7000],
+        [0x800, 0x100],
+        [[0x20, 0x100], [0]],
+        [[0x40, 0x200], [0x20]],
+        [[64, 128], [32]],
+    )
+
+
+def test_executor_falls_back_when_scatter_binding_is_unavailable() -> None:
+    engine = FakeEngine()
+    executor = MooncakeTransferEngineExecutor(engine)
+
+    executor.execute_batch(scatter_batch(), TransferDirection.READ)
+
+    assert engine.calls == [
+        (
+            "read",
+            (
+                "worker-1:12345",
+                [0x3040, 0x3200, 0x7020],
+                [0x1020, 0x1100, 0x5000],
+                [64, 128, 32],
+            ),
+        )
+    ]
 
 
 def test_weight_registration_name_reexports_common_buffer_lease() -> None:

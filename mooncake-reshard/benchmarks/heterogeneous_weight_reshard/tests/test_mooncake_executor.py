@@ -253,6 +253,34 @@ class FakeEngine:
         return type("CompletedTicket", (), {"status": "COMPLETED"})()
 
 
+class ScatterFakeEngine(FakeEngine):
+    def scatter_transfer_sync_write_with_ticket(
+        self,
+        endpoint,
+        local_bases,
+        local_capacities,
+        remote_bases,
+        remote_capacities,
+        local_offsets,
+        remote_offsets,
+        lengths,
+    ):
+        self.calls.append(
+            (
+                endpoint,
+                local_bases,
+                local_capacities,
+                remote_bases,
+                remote_capacities,
+                local_offsets,
+                remote_offsets,
+                lengths,
+            )
+        )
+        self.clock.advance(0.025)
+        return type("CompletedTicket", (), {"status": "COMPLETED"})()
+
+
 class LegacyFakeEngine:
     def __init__(self, clock: FakeClock) -> None:
         self.clock = clock
@@ -322,6 +350,50 @@ def test_timed_transfer_engine_preserves_legacy_api_detection() -> None:
     assert sample.operation_count == 1
     assert sample.batch_count == 1
     assert sample.native_transfer_seconds == pytest.approx(0.025)
+
+
+def test_execute_update_accounts_for_scatter_ticket_batches() -> None:
+    case = _case(source_dim=0, target_dim=1, source_shards=2, target_shards=2)
+    sources = build_runtime_topology(
+        case,
+        side="source",
+        buffers=[
+            FakeBuffer(pointer=0x100000 + rank * 0x1000, size=32) for rank in range(2)
+        ],
+        endpoint="172.16.1.107:12000",
+        revision="revision-1",
+    )
+    targets = build_runtime_topology(
+        case,
+        side="target",
+        buffers=[
+            FakeBuffer(pointer=0x200000 + rank * 0x1000, size=32) for rank in range(2)
+        ],
+        endpoint="172.16.1.108:13000",
+        revision="revision-1",
+    )
+    clock = FakeClock()
+    engine = ScatterFakeEngine(clock)
+    timed = TimedTransferEngine(engine, clock=clock)
+
+    sample = execute_update(
+        sink=MooncakeTransferEngineSink(timed),
+        timed_engine=timed,
+        plan=_bound_plan(sources, targets),
+        source_placement=sources.placement,
+        source_bindings=sources.bindings,
+        target_placement=targets.placement,
+        target_bindings=targets.bindings,
+        source_registrations=registration_leases(sources.bindings),
+        target_registrations=registration_leases(targets.bindings),
+        clock=clock,
+    )
+
+    expected_operations = sum(len(group) for call in engine.calls for group in call[-1])
+    assert sample.wire_bytes == case.logical_bytes
+    assert sample.operation_count == expected_operations
+    assert sample.batch_count == len(engine.calls)
+    assert sample.native_transfer_seconds == pytest.approx(0.025 * len(engine.calls))
 
 
 def test_execute_update_uses_live_plan_leases_and_reports_full_update_time() -> None:

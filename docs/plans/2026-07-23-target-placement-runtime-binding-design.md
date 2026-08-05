@@ -154,14 +154,16 @@ capability，SGLang 同时据此选择 source 请求格式和 target builder：
 
 - 支持 `placement_binding`：source/target 都使用 placement + binding；
 - placement/binding 不能只在 source 侧启用，否则 target 会在 planning 后晚失败；
-- capability 不包含 `transfer_scatter`，当前实现不依赖 Mooncake PR #3000；
+- capability 不暴露 backend 专用的 `transfer_scatter`；executor 在运行时探测
+  scatter binding，不可用时回退到原有 batch read/write；
 - 当前接口不接受版本参数，也不提供旧 schema 自动回退。
 
 ## TE Lowering
 
-默认执行器继续使用现有 bounded batch read/write。`transferScatter` 只有在 backend
-显式声明能力，并且满足 completion、lease、generation、注册范围和 address bounds
-契约后，才可作为同一个 `TransferRegion` 的可选 lowering。
+默认执行器保留现有 bounded batch read/write。绑定了 Mooncake PR #3000 接口时，
+lowering 会保留 manifest fragment 的 allocation base/capacity，将同一 allocation
+pair 内的 segment 压缩为 scatter range，并使用 completion-fenced scatter ticket。
+接口不可用时，同一 batch 确定性展开为原有绝对地址数组。
 
 它主要适合 target-initiated、多 source fan-in 的 TP/EP merge；对单 source split 或
 连续 region 不保证更快。planner、manifest 和 Store schema 都不依赖该 API，未满足
