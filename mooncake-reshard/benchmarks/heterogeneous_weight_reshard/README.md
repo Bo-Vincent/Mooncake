@@ -10,8 +10,9 @@ NCCL M2N 与 Mooncake CUDA/TE 双机测试。canonical 配置默认禁止真实�
 - 严格校验 2-D/3-D tensor、source/target replica、shard 数、shard dimension、
   rank 数和双机容量。
 - 为 NCCL M2N 生成显式 source/target host 放置的 OpenMPI MPMD argv。
-- 独立构造 Mooncake `WeightPlacementManifest` 和带非零 fake address 的
-  `WeightRuntimeBindingManifest`，再调用 N-D planner 生成静态摘要。
+- source/target 各构造一个完整的 Mooncake `WeightPlacementManifest`，每个
+  participant 单独提供带非零 fake address 的 `WeightRuntimeBindingManifest`，
+  再调用 N-D planner 生成静态摘要。
 - 统计 region 数、segment 数、inner bytes、每个 target 的 lowering batch 数和
   `max_region_segments` 拒绝原因，不按 row 或 element 展开操作。
 - PP/EP/四轴语义 case 可以作为 planner-only 项保留；不会根据模型权重名字
@@ -218,9 +219,9 @@ M2N 每个 cold/steady 子进程结束后立即持久化 stdout/stderr，再做�
 
 ## 设计边界
 
-- `WeightPlacementManifest` 是 shape、dtype、layer/expert 和 ownership 的事实来源；
-  `WeightRuntimeBindingManifest` 独立提供物理地址、worker、endpoint、generation
-  和 lease，不合成为第三种 manifest。
+- `WeightPlacementManifest` 是完整 topology、shape、dtype、layer/expert 和
+  ownership 的事实来源；`WeightRuntimeBindingManifest` 按 participant 独立提供
+  物理地址、worker、endpoint、generation 和 lease，不合成为第三种 manifest。
 - benchmark adapter 不进入 Mooncake core，也不引入 NCCL M2N runtime、
   `ncclMemAlloc` 或模型命名依赖。
 - PP 是 tensor ownership routing；EP 是独立 logical expert tensor 的 coordinate；
