@@ -91,6 +91,9 @@ def test_weight_manifest_round_trip_is_stable_and_has_no_runtime_address() -> No
     encoded = manifest.to_json()
 
     assert WeightManifest.from_json(encoded) == manifest
+    assert manifest.manifest_identity.group_id == manifest.group_id
+    assert manifest.manifest_identity.manifest_key == manifest.manifest_key
+    assert manifest.manifest_identity.content_sha256 == manifest.manifest_digest
     assert encoded == manifest.to_json()
     assert "4096" not in encoded
     assert "address" not in json.loads(encoded)["fragments"][0]
@@ -176,9 +179,7 @@ def test_weight_manifest_round_trip_preserves_single_and_multi_axis_shards() -> 
                     tensor_id=multi_axis_tensor.tensor_id,
                     global_offset=(expert, out_shard * 4, 0),
                     local_shape=(1, 4, 4),
-                    object_key=(
-                        f"{group_id}/payload/multi-e{expert}-o{out_shard}"
-                    ),
+                    object_key=f"{group_id}/payload/multi-e{expert}-o{out_shard}",
                     object_offset=0,
                     nbytes=32,
                 )
