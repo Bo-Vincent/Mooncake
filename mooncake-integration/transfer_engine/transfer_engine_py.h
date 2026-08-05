@@ -38,6 +38,13 @@ enum class BatchTransferBackendStatus {
     FAILED,
 };
 
+constexpr BatchTransferBackendStatus classifyScatterTransferWaitStatus(
+    bool ok, bool clock) {
+    if (ok) return BatchTransferBackendStatus::COMPLETED;
+    return clock ? BatchTransferBackendStatus::IN_PROGRESS
+                 : BatchTransferBackendStatus::FAILED;
+}
+
 enum class BatchTransferTaskStatus {
     IN_PROGRESS,
     COMPLETED,
@@ -430,6 +437,24 @@ class TransferEnginePy {
         std::vector<uintptr_t> peer_buffer_addresses,
         std::vector<size_t> lengths, const std::string &transport_hint = "");
 
+    std::shared_ptr<BatchTransferTicket> scatterTransferSyncWriteWithTicket(
+        const std::string &endpoint, const std::vector<uintptr_t> &local_bases,
+        const std::vector<size_t> &local_capacities,
+        const std::vector<uint64_t> &remote_bases,
+        const std::vector<size_t> &remote_sizes,
+        const std::vector<std::vector<size_t>> &local_offsets,
+        const std::vector<std::vector<size_t>> &remote_offsets,
+        const std::vector<std::vector<size_t>> &lengths);
+
+    std::shared_ptr<BatchTransferTicket> scatterTransferSyncReadWithTicket(
+        const std::string &endpoint, const std::vector<uintptr_t> &local_bases,
+        const std::vector<size_t> &local_capacities,
+        const std::vector<uint64_t> &remote_bases,
+        const std::vector<size_t> &remote_sizes,
+        const std::vector<std::vector<size_t>> &local_offsets,
+        const std::vector<std::vector<size_t>> &remote_offsets,
+        const std::vector<std::vector<size_t>> &lengths);
+
     batch_id_t batchTransferAsyncWrite(
         const char *target_hostname, const std::vector<uintptr_t> &buffers,
         const std::vector<uintptr_t> &peer_buffer_addresses,
@@ -553,6 +578,15 @@ class TransferEnginePy {
     uintptr_t getEnginePtr() const { return (uintptr_t)engine_.get(); }
 
    private:
+    std::shared_ptr<BatchTransferTicket> scatterTransferSyncWithTicket(
+        const std::string &endpoint, const std::vector<uintptr_t> &local_bases,
+        const std::vector<size_t> &local_capacities,
+        const std::vector<uint64_t> &remote_bases,
+        const std::vector<size_t> &remote_sizes,
+        const std::vector<std::vector<size_t>> &local_offsets,
+        const std::vector<std::vector<size_t>> &remote_offsets,
+        const std::vector<std::vector<size_t>> &lengths, TransferOpcode opcode);
+
     char *allocateRawBuffer(size_t capacity);
 
     int findClassId(size_t size);

@@ -32,6 +32,15 @@ bool require(bool condition, const char* message) {
 
 struct OwnerProbe {};
 
+struct ScatterOperationProbe {
+    explicit ScatterOperationProbe(std::atomic<int>* destructor_waits)
+        : destructor_waits(destructor_waits) {}
+
+    ~ScatterOperationProbe() { destructor_waits->fetch_add(1); }
+
+    std::atomic<int>* destructor_waits;
+};
+
 }  // namespace
 
 int main() {
@@ -45,6 +54,49 @@ int main() {
     ok &= require(static_cast<int>(
                       BatchTransferCompletionStatus::COMPLETION_UNKNOWN) == -2,
                   "unknown completion needs a distinct status code");
+
+    ok &= require(classifyScatterTransferWaitStatus(true, false) ==
+                      BatchTransferBackendStatus::COMPLETED,
+                  "successful scatter wait must map to completed");
+    ok &= require(classifyScatterTransferWaitStatus(false, true) ==
+                      BatchTransferBackendStatus::IN_PROGRESS,
+                  "scatter Clock status must remain completion-unknown");
+    ok &= require(classifyScatterTransferWaitStatus(false, false) ==
+                      BatchTransferBackendStatus::FAILED,
+                  "terminal scatter errors must map to failed-drained");
+
+    auto scatter_clock = std::make_shared<std::atomic<bool>>(true);
+    auto scatter_failure_ticket = std::make_shared<BatchTransferTicket>(
+        0, std::make_shared<OwnerProbe>(),
+        [scatter_clock] {
+            return classifyScatterTransferWaitStatus(false,
+                                                     scatter_clock->load());
+        },
+        [] { return true; });
+    ok &= require(scatter_failure_ticket->poll() ==
+                      BatchTransferCompletionStatus::COMPLETION_UNKNOWN,
+                  "scatter Clock status must preserve completion quarantine");
+    scatter_clock->store(false);
+    ok &= require(scatter_failure_ticket->poll() ==
+                      BatchTransferCompletionStatus::FAILED_DRAINED,
+                  "terminal scatter failure must be reported only after drain");
+
+    std::atomic<int> scatter_destructor_waits{0};
+    {
+        auto scatter_operation =
+            std::make_shared<ScatterOperationProbe>(&scatter_destructor_waits);
+        auto scatter_ticket = std::make_shared<BatchTransferTicket>(
+            0, scatter_operation,
+            [] { return BatchTransferBackendStatus::IN_PROGRESS; },
+            [] { return true; });
+        scatter_operation.reset();
+        ok &= require(scatter_destructor_waits.load() == 0,
+                      "unknown scatter operation must remain ticket-owned");
+        scatter_ticket.reset();
+    }
+    ok &= require(scatter_destructor_waits.load() == 1,
+                  "dropping an unknown scatter ticket must destroy its "
+                  "wait-on-destruction operation");
 
     auto backend_status =
         std::make_shared<std::atomic<BatchTransferBackendStatus>>(
