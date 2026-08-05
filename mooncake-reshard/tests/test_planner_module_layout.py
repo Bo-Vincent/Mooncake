@@ -13,6 +13,7 @@ from mooncake.reshard.weight import (
 from mooncake.reshard.weight._planner.api import (
     plan_placement_transfer,
     plan_placement_transfer_to_local_target,
+    plan_stored_transfer_to_target_placement,
 )
 from mooncake.reshard.weight._planner.binding import (
     bind_logical_transfer_plan,
@@ -143,6 +144,10 @@ def test_planner_responsibility_modules_preserve_public_identity() -> None:
         planner.plan_placement_transfer_to_local_target
         is plan_placement_transfer_to_local_target
     )
+    assert (
+        planner.plan_stored_transfer_to_target_placement
+        is plan_stored_transfer_to_target_placement
+    )
 
 
 def test_planner_does_not_export_combined_runtime_convenience_apis() -> None:
@@ -155,7 +160,6 @@ def test_planner_does_not_export_combined_runtime_convenience_apis() -> None:
     )
     assert not hasattr(planner, "plan_runtime_transfer_to_target_placements")
     assert not hasattr(planner, "plan_stored_transfer_to_target_placements")
-    assert not hasattr(planner, "plan_stored_transfer_to_target_placement")
     assert not hasattr(planner, "plan_stored_transfer")
 
 

@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from ..._compat import _strict_zip
-from ..manifest import TensorDescriptor
+from ..manifest import (
+    PlacementFragment,
+    TensorDescriptor,
+)
+from ..storage_manifest import StoredFragment
 from .contracts import (
+    BoundWeightFragment,
     CopyRange,
     TransferOperation,
     TransferRegion,
@@ -70,11 +75,20 @@ def _operation_loop_geometry(
 
 def _operation_sort_key(operation: TransferOperation) -> tuple:
     source_location = (
-        operation.source.instance_id,
-        operation.source.worker_id,
-        operation.source.device,
-        operation.source.lease_generation,
-        operation.source.address + operation.source_offset,
+        (
+            "runtime",
+            operation.source.instance_id,
+            operation.source.worker_id,
+            operation.source.device,
+            operation.source.lease_generation,
+            operation.source.address + operation.source_offset,
+        )
+        if isinstance(operation.source, BoundWeightFragment)
+        else (
+            "stored",
+            operation.source.object_key,
+            operation.source.object_offset + operation.source_offset,
+        )
     )
     return (
         operation.tensor_id,
@@ -88,12 +102,22 @@ def _operation_sort_key(operation: TransferOperation) -> tuple:
 
 def _source_copy_identity(operation: TransferOperation) -> tuple:
     counts, strides = _operation_loop_geometry(operation, "source")
+    if isinstance(operation.source, BoundWeightFragment):
+        return (
+            "runtime",
+            operation.source.instance_id,
+            operation.source.worker_id,
+            operation.source.device,
+            operation.source.lease_generation,
+            operation.source.address + operation.source_offset,
+            operation.nbytes,
+            counts,
+            strides,
+        )
     return (
-        operation.source.instance_id,
-        operation.source.worker_id,
-        operation.source.device,
-        operation.source.lease_generation,
-        operation.source.address + operation.source_offset,
+        "stored",
+        operation.source.object_key,
+        operation.source.object_offset + operation.source_offset,
         operation.nbytes,
         counts,
         strides,
@@ -134,10 +158,20 @@ def _is_declared_target_alias(
     left_target = left.target
     right_target = right.target
     if (
-        len(left_target.aliases) < 2
+        isinstance(left.source, StoredFragment)
+        or isinstance(right.source, StoredFragment)
+        or len(left_target.aliases) < 2
         or left_target.aliases != right_target.aliases
-        or len(left.source.aliases) < 2
-        or left.source.aliases != right.source.aliases
+        or (
+            isinstance(
+                left.source,
+                (BoundWeightFragment, PlacementFragment),
+            )
+            and (
+                len(left.source.aliases) < 2
+                or left.source.aliases != right.source.aliases
+            )
+        )
         or left_target.instance_id != right_target.instance_id
         or left_target.worker_id != right_target.worker_id
         or left_target.device != right_target.device

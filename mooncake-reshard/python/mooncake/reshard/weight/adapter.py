@@ -11,13 +11,14 @@ from ..contracts import (
 from .binding import validate_runtime_binding
 from .placement import WeightPlacementManifest
 from .runtime import WeightRuntimeBindingManifest
+from .storage_manifest import WeightManifest
 
 
 class WeightReshardAdapter(ResourceAdapter):
     resource_kind = ResourceKind.MODEL_WEIGHT
     placement_type = WeightPlacementManifest
     binding_type = WeightRuntimeBindingManifest
-    stored_manifest_type = None
+    stored_manifest_type = WeightManifest
 
     def validate_binding(
         self,

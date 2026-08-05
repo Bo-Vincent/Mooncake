@@ -1,6 +1,7 @@
 from .api import (
     plan_placement_transfer,
     plan_placement_transfer_to_local_target,
+    plan_stored_transfer_to_target_placement,
 )
 from .binding import bind_logical_transfer_plan
 from .contracts import (
@@ -40,6 +41,7 @@ __all__ = [
     "parallel_tensor_owner",
     "plan_placement_transfer",
     "plan_placement_transfer_to_local_target",
+    "plan_stored_transfer_to_target_placement",
     "resolve_executor_plan",
     "resolve_executor_plans",
 ]

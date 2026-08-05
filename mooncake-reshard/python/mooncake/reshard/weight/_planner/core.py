@@ -11,6 +11,7 @@ from ..manifest import (
     WeightRuntimeBindingManifest,
     validate_runtime_binding,
 )
+from ..storage_manifest import StoredFragment
 from . import geometry
 from .contracts import (
     BoundWeightFragment,
@@ -309,18 +310,29 @@ def _plan_transfer(
     else:
         _validate_tensor_sets(source_tensors, target_tensors)
         _validate_target_coverage(target_tensors, target_fragments)
-    if not all(
+    placement_sources = all(
         isinstance(fragment, PlacementFragment) for fragment in source_fragments
-    ):
-        raise ValueError("source fragments must be logical placements")
-    source_replicas = complete_parallel_source_replicas(
-        source_tensors, source_fragments
+    )
+    stored_sources = all(
+        isinstance(fragment, StoredFragment) for fragment in source_fragments
+    )
+    if sum((placement_sources, stored_sources)) != 1:
+        raise ValueError("source fragments mix placement and stored locations")
+    parallel_sources = placement_sources
+    source_replicas = (
+        complete_parallel_source_replicas(source_tensors, source_fragments)
+        if parallel_sources
+        else {}
     )
     source_dp_ranks = sorted(source_replicas)
-    source_dp_by_target_dp = {
-        target_dp: source_dp_ranks[target_dp % len(source_dp_ranks)]
-        for target_dp in {fragment.rank.dp for fragment in target_fragments}
-    }
+    source_dp_by_target_dp = (
+        {
+            target_dp: source_dp_ranks[target_dp % len(source_dp_ranks)]
+            for target_dp in {fragment.rank.dp for fragment in target_fragments}
+        }
+        if parallel_sources
+        else {}
+    )
     candidates: dict[str, dict[tuple, list[SourceFragment]]] = {}
     for fragment in source_fragments:
         candidates.setdefault(fragment.tensor_id, {}).setdefault(
@@ -350,18 +362,23 @@ def _plan_transfer(
             candidate_index.query(target) if candidate_index is not None else ()
         )
         for group in candidate_groups:
-            source_dp = source_dp_by_target_dp[target.rank.dp]
-            source_owner = source_replicas[source_dp][target.tensor_id]
-            eligible = [
-                fragment
-                for fragment in group
-                if fragment.rank.dp == source_dp
-                and parallel_tensor_owner(source_tensor, fragment) == source_owner
-            ]
-            if not eligible:
-                continue
-            representative = eligible[0]
-            selected = representative
+            if parallel_sources:
+                source_dp = source_dp_by_target_dp[target.rank.dp]
+                source_owner = source_replicas[source_dp][target.tensor_id]
+                eligible = [
+                    fragment
+                    for fragment in group
+                    if isinstance(fragment, PlacementFragment)
+                    and fragment.rank.dp == source_dp
+                    and parallel_tensor_owner(source_tensor, fragment) == source_owner
+                ]
+                if not eligible:
+                    continue
+                representative = eligible[0]
+                selected = representative
+            else:
+                representative = group[0]
+                selected = representative
             overlap = geometry._overlap_box(representative, target)
             if overlap is None:
                 continue
@@ -407,7 +424,14 @@ def _build_pipeline_routes(
 ) -> tuple[PipelineRouteGroup, ...]:
     indices_by_route: dict[tuple[int | None, int], list[int]] = {}
     for index, operation in enumerate(operations):
-        source_pp = operation.source.rank.pp
+        source_pp = (
+            operation.source.rank.pp
+            if isinstance(
+                operation.source,
+                (BoundWeightFragment, PlacementFragment),
+            )
+            else None
+        )
         indices_by_route.setdefault((source_pp, operation.target.rank.pp), []).append(
             index
         )

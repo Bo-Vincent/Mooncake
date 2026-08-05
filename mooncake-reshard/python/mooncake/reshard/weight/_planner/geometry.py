@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import prod
-from typing import Sequence
+from typing import Sequence, Union
 
 from ..._compat import _strict_zip
 from ..manifest import (
     PlacementFragment,
     TensorDescriptor,
 )
+from ..storage_manifest import StoredFragment
 
-SourceFragment = PlacementFragment
+
+SourceFragment = Union[StoredFragment, PlacementFragment]
 TargetFragment = PlacementFragment
 
 
@@ -77,6 +79,8 @@ def _geometry_key(fragment: SourceFragment) -> tuple:
 
 
 def _source_sort_key(fragment: SourceFragment) -> tuple:
+    if isinstance(fragment, StoredFragment):
+        return (0, 0, 0, 0, fragment.object_key, fragment.fragment_id)
     return (
         fragment.rank.dp,
         fragment.rank.pp,
