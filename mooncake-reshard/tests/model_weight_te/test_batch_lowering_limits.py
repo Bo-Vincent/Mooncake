@@ -30,6 +30,7 @@ from .helpers import (
     plan_transfer,
     plan_transfer_to_local_target,
     registration_leases,
+    runtime_fragment,
 )
 
 
@@ -409,3 +410,54 @@ def test_te_reader_batches_large_repeats_without_segment_tuple_expansion(
     assert engine.calls[7][1][-1] == 0x40000 + (repeat - 1) * 8
     assert engine.calls[8][1][0] == 0x40004
     assert engine.calls[15][1][-1] == 0x40004 + (repeat - 1) * 8
+
+
+def test_te_scatter_ranges_use_allocation_bases_and_view_relative_offsets() -> None:
+    class Operation:
+        @staticmethod
+        def iter_segments():
+            yield 1, 2, 3
+            yield 4, 8, 2
+
+    source = runtime_fragment(
+        placement_fragment_id="source-placement",
+        fragment_id="source-fragment",
+        address=0x1100,
+        nbytes=16,
+        worker_id="source",
+        endpoint="source:12345",
+        local_shape=(16,),
+        itemsize=1,
+        storage_address=0x1000,
+        storage_nbytes=0x1000,
+    )
+    target = runtime_fragment(
+        placement_fragment_id="target-placement",
+        fragment_id="target-fragment",
+        address=0x2280,
+        nbytes=16,
+        worker_id="target",
+        endpoint="target:12345",
+        local_shape=(16,),
+        itemsize=1,
+        storage_address=0x2000,
+        storage_nbytes=0x1000,
+    )
+
+    (batch,) = tuple(
+        iter_transfer_batches(
+            target.endpoint,
+            ((Operation(), source, target),),
+            max_batch_operations=8,
+        )
+    )
+    (transfer_range,) = batch.ranges
+
+    assert transfer_range.source_base_address == source.storage_address
+    assert transfer_range.source_capacity == source.storage_nbytes
+    assert transfer_range.target_base_address == target.storage_address
+    assert transfer_range.target_capacity == target.storage_nbytes
+    assert transfer_range.source_offsets == (0x101, 0x104)
+    assert transfer_range.target_offsets == (0x282, 0x288)
+    assert batch.source_addresses == (source.address + 1, source.address + 4)
+    assert batch.target_addresses == (target.address + 2, target.address + 8)

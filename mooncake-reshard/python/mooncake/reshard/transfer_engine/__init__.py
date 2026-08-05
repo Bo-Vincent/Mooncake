@@ -5,7 +5,12 @@ from .completion import (
     TransferCompletionUnknownError,
     TransferEngineError,
 )
-from .contracts import TransferBatch, TransferBatchReceipt, TransferDirection
+from .contracts import (
+    TransferBatch,
+    TransferBatchRange,
+    TransferBatchReceipt,
+    TransferDirection,
+)
 from .executor import MooncakeTransferEngineExecutor
 from .registration import BufferRegistrationLease
 
@@ -14,6 +19,7 @@ __all__ = [
     "MooncakeTransferEngineExecutor",
     "PendingTransferManager",
     "TransferBatch",
+    "TransferBatchRange",
     "TransferBatchReceipt",
     "TransferCompletionUnknownError",
     "TransferDirection",
