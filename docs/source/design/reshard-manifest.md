@@ -161,7 +161,10 @@ Owner objects may keep framework allocations alive but are never serialized.
 4. The adapter constructs a typed `WeightRuntimeBindingManifest` for each live
    participant against the resulting placement ID and digest.
 5. Planning consumes one source and one target `WeightPlacementManifest`.
-6. Binding and execution use only the participant bindings referenced by the
+6. The logical plan proves that every selected target fragment is covered
+   exactly once. N-D regions are checked as boxes; legacy byte ranges use a
+   bounded scan and fail closed when its limit is exceeded.
+7. Binding and execution use only the participant bindings referenced by the
    logical plan, while preserving their generation and lease fences.
 
 `weight_placement_to_json` and `weight_placement_from_json` are the explicit
