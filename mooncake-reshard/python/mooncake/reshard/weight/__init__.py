@@ -1,5 +1,6 @@
-"""Public contracts for framework-neutral model-weight resharding."""
+"""Framework-neutral model-weight reshard contracts and execution adapters."""
 
+from .adapter import WEIGHT_RESHARD_ADAPTER, WeightReshardAdapter
 from .manifest import (
     OwnershipAxis,
     ParallelRank,
@@ -31,28 +32,68 @@ from .planner import (
     bind_logical_transfer_plan,
     plan_placement_transfer,
     plan_placement_transfer_to_local_target,
+    plan_stored_transfer_to_target_placement,
     resolve_executor_plan,
     resolve_executor_plans,
 )
+from .storage_manifest import StoredFragment, WeightManifest
+from .store import (
+    UploadOperation,
+    UploadReceipt,
+    WeightLoadPlan,
+    WeightStore,
+    WeightStoreError,
+    WeightUploadPlan,
+)
+from .te import (
+    DirectReadReceipt,
+    DirectTransferReceipt,
+    MemoryRegistrationLease,
+    MooncakeTransferEngineReader,
+    MooncakeTransferEngineSink,
+    TransferCompletionUnknownError,
+    TransferEngineError,
+)
+
+
+WEIGHT_RESHARD_CAPABILITIES = frozenset(
+    {
+        "nd_logical_box",
+        "placement_binding",
+        "dependent_axis_projection",
+        "store_weight_manifest",
+        "te_execution",
+    }
+)
+
+
+def supports_weight_reshard_capability(capability: str) -> bool:
+    return capability in WEIGHT_RESHARD_CAPABILITIES
 
 
 __all__ = [
+    "WEIGHT_RESHARD_CAPABILITIES",
+    "WEIGHT_RESHARD_ADAPTER",
+    "WeightReshardAdapter",
+    "supports_weight_reshard_capability",
     "ParallelRank",
     "ParallelTopology",
     "PlacementFragment",
-    "WeightPlacementManifest",
-    "WeightPlacementPart",
     "RuntimeBindingFragment",
-    "WeightRuntimeBindingManifest",
     "SplitAxis",
     "ReplicatedAxis",
     "OwnershipAxis",
     "TensorDescriptor",
     "TopologyParticipant",
+    "WeightPlacementManifest",
+    "WeightPlacementPart",
+    "WeightRuntimeBindingManifest",
     "validate_runtime_binding",
     "validate_runtime_bindings",
     "weight_placement_from_json",
     "weight_placement_to_json",
+    "StoredFragment",
+    "WeightManifest",
     "BoundWeightFragment",
     "CopyRange",
     "ExecutorTransferPlan",
@@ -66,6 +107,20 @@ __all__ = [
     "bind_logical_transfer_plan",
     "plan_placement_transfer",
     "plan_placement_transfer_to_local_target",
+    "plan_stored_transfer_to_target_placement",
     "resolve_executor_plan",
     "resolve_executor_plans",
+    "UploadOperation",
+    "UploadReceipt",
+    "WeightLoadPlan",
+    "WeightStore",
+    "WeightStoreError",
+    "WeightUploadPlan",
+    "DirectReadReceipt",
+    "DirectTransferReceipt",
+    "MemoryRegistrationLease",
+    "MooncakeTransferEngineReader",
+    "MooncakeTransferEngineSink",
+    "TransferCompletionUnknownError",
+    "TransferEngineError",
 ]
