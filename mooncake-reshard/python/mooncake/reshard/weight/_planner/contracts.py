@@ -12,6 +12,7 @@ from ..manifest import (
     TensorDescriptor,
     WeightPlacementManifest,
 )
+from ..storage_manifest import StoredFragment
 from .geometry import (
     _box_contains,
     _derive_region_geometry,
@@ -120,6 +121,7 @@ class BoundWeightFragment:
 
 SourceFragment = Union[
     BoundWeightFragment,
+    StoredFragment,
     PlacementFragment,
 ]
 TargetFragment = Union[BoundWeightFragment, PlacementFragment]
@@ -213,13 +215,15 @@ class ExecutorTransferPlan:
 
 @dataclass(frozen=True)
 class PipelineRouteGroup:
-    source_pp: int
+    source_pp: int | None
     target_pp: int
     operation_indices: tuple[int, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operation_indices", tuple(self.operation_indices))
-        if type(self.source_pp) is not int or self.source_pp < 0:
+        if self.source_pp is not None and (
+            type(self.source_pp) is not int or self.source_pp < 0
+        ):
             raise ValueError("pipeline route source_pp must be non-negative")
         if type(self.target_pp) is not int or self.target_pp < 0:
             raise ValueError("pipeline route target_pp must be non-negative")
@@ -716,7 +720,7 @@ class TransferPlan:
         ):
             raise ValueError("executable transfer plan target must be runtime-bound")
         if any(
-            not isinstance(operation.source, BoundWeightFragment)
+            not isinstance(operation.source, (BoundWeightFragment, StoredFragment))
             for operation in self.operations
         ):
             raise ValueError("executable transfer plan source must be runtime-bound")
@@ -811,7 +815,7 @@ class PlacementExecutorPlan:
 class LogicalTransferPlan:
     resource_id: str
     revision: str
-    source_placement: WeightPlacementManifest
+    source_placement: WeightPlacementManifest | None
     target_placement: WeightPlacementManifest
     source_tensors: tuple[TensorDescriptor, ...]
     target_tensors: tuple[TensorDescriptor, ...]
@@ -834,24 +838,31 @@ class LogicalTransferPlan:
             raise ValueError("logical transfer plan identifiers must not be empty")
         if not isinstance(self.target_placement, WeightPlacementManifest):
             raise ValueError("logical transfer plan target placement is invalid")
-        if not isinstance(self.source_placement, WeightPlacementManifest):
+        if self.source_placement is not None and not isinstance(
+            self.source_placement, WeightPlacementManifest
+        ):
             raise ValueError("logical transfer plan source placement is invalid")
         for side, placement in (
             ("source", self.source_placement),
             ("target", self.target_placement),
         ):
-            if (
+            if placement is not None and (
                 placement.resource_id != self.resource_id
                 or placement.revision != self.revision
             ):
                 raise ValueError(
                     f"logical transfer plan {side} placement identity differs"
                 )
-        if any(
+        if self.source_placement is not None and any(
             not isinstance(operation.source, PlacementFragment)
             for operation in self.operations
         ):
             raise ValueError("logical transfer plan source must be a placement")
+        if self.source_placement is None and any(
+            not isinstance(operation.source, StoredFragment)
+            for operation in self.operations
+        ):
+            raise ValueError("logical transfer plan source has no placement")
         if any(
             not isinstance(operation.target, PlacementFragment)
             for operation in self.operations

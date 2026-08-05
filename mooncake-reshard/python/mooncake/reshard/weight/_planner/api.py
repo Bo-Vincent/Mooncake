@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..manifest import WeightPlacementManifest
+from ..storage_manifest import WeightManifest
 from .contracts import LogicalTransferPlan
 from .core import (
     _collect_placements,
@@ -106,7 +107,43 @@ def plan_placement_transfer_to_local_target(
     return result
 
 
+def plan_stored_transfer_to_target_placement(
+    source_manifest: WeightManifest,
+    target_placement: WeightPlacementManifest,
+) -> LogicalTransferPlan:
+    """Plan a Store-backed transfer into address-free target placements."""
+
+    target_tensors, target_fragments = _collect_placements(
+        (target_placement,),
+        "target",
+    )
+    target = target_placement
+    if source_manifest.resource_id != target.resource_id:
+        raise ValueError("source and target resource_id differ")
+    if source_manifest.revision != target.revision:
+        raise ValueError("source and target revision differ")
+    if source_manifest.weight_generation != target.weight_generation:
+        raise ValueError("source and target weight_generation differ")
+    source_tensors = {tensor.tensor_id: tensor for tensor in source_manifest.tensors}
+    transfer = _plan_transfer(
+        source_manifest.resource_id,
+        source_manifest.revision,
+        source_tensors,
+        source_manifest.fragments,
+        target_tensors,
+        target_fragments,
+    )
+    return _logical_transfer_plan(
+        transfer,
+        source_tensors=source_tensors,
+        target_tensors=target_tensors,
+        source_placement=None,
+        target_placement=target_placement,
+    )
+
+
 __all__ = [
     "plan_placement_transfer",
     "plan_placement_transfer_to_local_target",
+    "plan_stored_transfer_to_target_placement",
 ]

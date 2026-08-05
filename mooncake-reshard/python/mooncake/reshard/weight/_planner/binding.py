@@ -11,6 +11,7 @@ from ..manifest import (
     WeightPlacementManifest,
     WeightRuntimeBindingManifest,
 )
+from ..storage_manifest import StoredFragment
 from .contracts import (
     BoundWeightFragment,
     LogicalTransferPlan,
@@ -244,6 +245,8 @@ def bind_logical_transfer_plan(
                     "missing source runtime binding for placement fragment: "
                     f"{placement_source.placement_fragment_id}"
                 )
+        elif isinstance(placement_source, StoredFragment):
+            runtime_source = placement_source
         else:
             raise ValueError("logical transfer operation source is runtime-bound")
         operations.append(
