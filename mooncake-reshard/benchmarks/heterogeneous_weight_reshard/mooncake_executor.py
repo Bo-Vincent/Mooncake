@@ -433,6 +433,11 @@ class TimedTransferEngine:
             if not callable(method):
                 raise AttributeError(name)
             return self._batch_transfer_sync_write_with_ticket
+        if name == "scatter_transfer_sync_write_with_ticket":
+            method = getattr(self._engine, name, None)
+            if not callable(method):
+                raise AttributeError(name)
+            return self._scatter_transfer_sync_write_with_ticket
         return getattr(self._engine, name)
 
     def reset_measurements(self) -> None:
@@ -482,6 +487,35 @@ class TimedTransferEngine:
             self.batch_count += 1
             self.operation_count += len(sizes)
             self.wire_bytes += sum(sizes)
+
+    def _scatter_transfer_sync_write_with_ticket(
+        self,
+        endpoint: str,
+        local_bases: Sequence[int],
+        local_capacities: Sequence[int],
+        remote_bases: Sequence[int],
+        remote_capacities: Sequence[int],
+        local_offsets: Sequence[Sequence[int]],
+        remote_offsets: Sequence[Sequence[int]],
+        lengths: Sequence[Sequence[int]],
+    ) -> object:
+        started = self._clock()
+        try:
+            return self._engine.scatter_transfer_sync_write_with_ticket(
+                endpoint,
+                local_bases,
+                local_capacities,
+                remote_bases,
+                remote_capacities,
+                local_offsets,
+                remote_offsets,
+                lengths,
+            )
+        finally:
+            self.native_transfer_seconds += self._clock() - started
+            self.batch_count += 1
+            self.operation_count += sum(len(group) for group in lengths)
+            self.wire_bytes += sum(sum(group) for group in lengths)
 
 
 @dataclass(frozen=True)

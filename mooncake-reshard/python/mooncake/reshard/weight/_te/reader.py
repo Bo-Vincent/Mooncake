@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from ...contracts import LeaseId, RuntimeFragmentId
 from ...transfer_engine import (
     MooncakeTransferEngineExecutor,
     TransferBatch,
@@ -10,15 +11,19 @@ from ...transfer_engine import (
     TransferEngineError,
 )
 from ..manifest import (
+    ParallelRank,
     RuntimeBindingFragment,
     WeightPlacementManifest,
     WeightRuntimeBindingManifest,
 )
-from ..planner import TransferOperation, TransferPlan
+from ..planner import BoundWeightFragment, LiveTransferOperation, TransferPlan
+from .batching import iter_transfer_batches
 from .execution import (
     pair_manifests,
     resolve_runtime_executors,
+    require_live_transfer_operation,
     runtime_binding_fragment,
+    validate_execution_input_types,
     validate_lowering_limits,
     validate_manifest_pair,
 )
@@ -77,11 +82,19 @@ class MooncakeTransferEngineReader:
         target_placement: WeightPlacementManifest,
         target_binding: WeightRuntimeBindingManifest,
         *,
+        target_worker_id: str | None = None,
         source_pre_registered: bool = True,
         source_registrations: Sequence[MemoryRegistrationLease] | None = None,
         target_pre_registered: bool = False,
         target_registrations: Sequence[MemoryRegistrationLease] | None = None,
     ) -> tuple[DirectReadReceipt, ...]:
+        validate_execution_input_types(
+            plan,
+            source_placement,
+            source_bindings,
+            target_placement,
+            (target_binding,),
+        )
         with self.transfer_executor.submission():
             return self._execute_reserved(
                 plan,
@@ -89,6 +102,7 @@ class MooncakeTransferEngineReader:
                 source_bindings,
                 target_placement,
                 target_binding,
+                target_worker_id=target_worker_id,
                 source_pre_registered=source_pre_registered,
                 source_registrations=source_registrations,
                 target_pre_registered=target_pre_registered,
@@ -103,6 +117,7 @@ class MooncakeTransferEngineReader:
         target_placement: WeightPlacementManifest,
         target_binding: WeightRuntimeBindingManifest,
         *,
+        target_worker_id: str | None = None,
         source_pre_registered: bool = True,
         source_registrations: Sequence[MemoryRegistrationLease] | None = None,
         target_pre_registered: bool = False,
@@ -122,16 +137,22 @@ class MooncakeTransferEngineReader:
             )
         except ValueError as error:
             raise TransferEngineError(str(error)) from error
+        if target_worker_id is not None:
+            target_executors = tuple(
+                executor
+                for executor in target_executors
+                if executor.worker_id == target_worker_id
+            )
         if len(target_executors) != 1:
             raise TransferEngineError(
-                "target manifest must describe one local executor"
+                "target binding requires exactly one local worker executor"
             )
         target_executor = target_executors[0]
 
-        sources: dict[str, RuntimeBindingFragment] = {}
-        source_runtime_lease_ids: dict[str, str] = {}
-        source_generations: dict[str, int] = {}
-        source_ranks = set()
+        sources: dict[RuntimeFragmentId, RuntimeBindingFragment] = {}
+        source_runtime_lease_ids: dict[RuntimeFragmentId, LeaseId] = {}
+        source_generations: dict[RuntimeFragmentId, int] = {}
+        source_executor_keys: set[tuple[ParallelRank, str]] = set()
         expected_source_participants = {
             executor.participant_id for executor in plan.source_executors
         }
@@ -147,11 +168,12 @@ class MooncakeTransferEngineReader:
             except ValueError as error:
                 raise TransferEngineError(str(error)) from error
             for executor in executors:
-                if executor.rank in source_ranks:
+                executor_key = (executor.rank, executor.worker_id)
+                if executor_key in source_executor_keys:
                     raise TransferEngineError(
-                        f"duplicate source executor rank: {executor.rank}"
+                        f"duplicate source executor rank and worker: {executor_key}"
                     )
-                source_ranks.add(executor.rank)
+                source_executor_keys.add(executor_key)
             for fragment in binding.fragments:
                 if fragment.fragment_id in sources:
                     raise TransferEngineError(
@@ -160,8 +182,10 @@ class MooncakeTransferEngineReader:
                 sources[fragment.fragment_id] = fragment
                 source_runtime_lease_ids[fragment.fragment_id] = binding.lease_id
                 source_generations[fragment.fragment_id] = binding.generation
-        expected_source_ranks = {executor.rank for executor in plan.source_executors}
-        if source_ranks != expected_source_ranks:
+        expected_source_executor_keys = {
+            (executor.rank, executor.worker_id) for executor in plan.source_executors
+        }
+        if source_executor_keys != expected_source_executor_keys:
             raise TransferEngineError("source executor set is incomplete")
 
         targets = {
@@ -176,15 +200,15 @@ class MooncakeTransferEngineReader:
             str,
             list[
                 tuple[
-                    TransferOperation,
-                    RuntimeBindingFragment,
-                    RuntimeBindingFragment,
+                    LiveTransferOperation,
+                    BoundWeightFragment,
+                    BoundWeightFragment,
                 ]
             ],
         ] = {}
-        used_targets: dict[str, RuntimeBindingFragment] = {}
+        used_targets: dict[RuntimeFragmentId, RuntimeBindingFragment] = {}
         for index in target_executor.operation_indices:
-            operation = plan.operations[index]
+            operation = require_live_transfer_operation(plan.operations[index])
             planned_source = runtime_binding_fragment(operation.source)
             planned_target = runtime_binding_fragment(operation.target)
             source = sources.get(planned_source.fragment_id)
@@ -222,7 +246,7 @@ class MooncakeTransferEngineReader:
                 )
             used_targets[target.fragment_id] = target
             operations_by_endpoint.setdefault(source.endpoint, []).append(
-                (operation, source, target)
+                (operation, operation.source, operation.target)
             )
 
         with registered_targets(
@@ -239,7 +263,7 @@ class MooncakeTransferEngineReader:
                 target_registrations,
             ),
         ):
-            receipts = []
+            receipts: list[DirectReadReceipt] = []
             for endpoint in sorted(operations_by_endpoint):
                 operations = sorted(
                     operations_by_endpoint[endpoint],
@@ -248,39 +272,16 @@ class MooncakeTransferEngineReader:
                         item[1].address + item[0].source_offset,
                     ),
                 )
-                target_addresses = []
-                source_addresses = []
-                sizes = []
                 operation_count = 0
                 total_bytes = 0
-                for operation, source, target in operations:
-                    for (
-                        source_offset,
-                        target_offset,
-                        nbytes,
-                    ) in operation.iter_segments():
-                        source_addresses.append(source.address + source_offset)
-                        target_addresses.append(target.address + target_offset)
-                        sizes.append(nbytes)
-                        operation_count += 1
-                        total_bytes += nbytes
-                        if len(sizes) == self.max_batch_operations:
-                            self._transfer_batch(
-                                endpoint,
-                                target_addresses,
-                                source_addresses,
-                                sizes,
-                            )
-                            target_addresses = []
-                            source_addresses = []
-                            sizes = []
-                if sizes:
-                    self._transfer_batch(
-                        endpoint,
-                        target_addresses,
-                        source_addresses,
-                        sizes,
-                    )
+                for batch in iter_transfer_batches(
+                    endpoint,
+                    operations,
+                    max_batch_operations=self.max_batch_operations,
+                ):
+                    self._transfer_batch(batch)
+                    operation_count += batch.operation_count
+                    total_bytes += batch.nbytes
                 receipts.append(
                     DirectReadReceipt(
                         source_endpoint=endpoint,
@@ -293,18 +294,10 @@ class MooncakeTransferEngineReader:
 
     def _transfer_batch(
         self,
-        endpoint: str,
-        target_addresses: list[int],
-        source_addresses: list[int],
-        sizes: list[int],
+        batch: TransferBatch,
     ) -> None:
         self.transfer_executor._execute_reserved_batch(
-            TransferBatch(
-                endpoint=endpoint,
-                source_addresses=tuple(source_addresses),
-                target_addresses=tuple(target_addresses),
-                sizes=tuple(sizes),
-            ),
+            batch,
             TransferDirection.READ,
         )
 

@@ -19,6 +19,16 @@ from .helpers import (
 )
 
 
+class _CompletedTicket:
+    status = "COMPLETED"
+
+
+class _ScatterEngine(FakeTransferEngine):
+    def scatter_transfer_sync_read_with_ticket(self, *arguments):
+        self.calls.append(("scatter-read", arguments))
+        return _CompletedTicket()
+
+
 def test_te_reader_pulls_local_target_ranges_without_source_rpc() -> None:
     sources = manifests(tp=2, prefix="source", address_base=0x10000)
     targets = manifests(tp=4, prefix="target", address_base=0x40000)
@@ -43,6 +53,41 @@ def test_te_reader_pulls_local_target_ranges_without_source_rpc() -> None:
     assert engine.calls == [("source-t0:12345", [0x41000], [0x10002], [2])]
     assert engine.register_calls == []
     assert engine.unregister_calls == []
+
+
+def test_te_reader_lowers_bound_fragments_to_scatter_allocation_ranges() -> None:
+    sources = manifests(tp=2, prefix="source", address_base=0x10000)
+    target = participant_inputs(
+        manifests(tp=4, prefix="target", address_base=0x40000), 1
+    )
+    engine = _ScatterEngine()
+
+    MooncakeTransferEngineReader(engine).execute(
+        plan_transfer_to_local_target(sources, target),
+        sources.placement,
+        sources.bindings,
+        target.placement,
+        target.bindings[0],
+        source_registrations=registration_leases(sources),
+        target_pre_registered=True,
+        target_registrations=registration_leases(target),
+    )
+
+    assert engine.calls == [
+        (
+            "scatter-read",
+            (
+                "source-t0:12345",
+                [0x41000],
+                [2],
+                [0x10000],
+                [4],
+                [[0]],
+                [[2]],
+                [[2]],
+            ),
+        )
+    ]
 
 
 def test_te_reader_wraps_target_registration_exception() -> None:
