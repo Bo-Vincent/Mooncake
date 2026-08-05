@@ -27,10 +27,15 @@ from weight_manifest.helpers import (
 
 def test_reshard_public_api_is_resource_neutral():
     assert reshard.__all__ == [
+        "PlacementManifest",
+        "ResourceAdapter",
+        "ResourceAdapterRegistry",
         "ResourceKind",
         "ResourceManifest",
-        "PlacementManifest",
+        "RuntimeBindingFragment",
         "RuntimeBindingManifest",
+        "StoredResourceManifest",
+        "validate_resource_binding_identity",
     ]
 
 
