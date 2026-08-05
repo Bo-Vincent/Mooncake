@@ -19,6 +19,16 @@ from .helpers import (
 )
 
 
+class _CompletedTicket:
+    status = "COMPLETED"
+
+
+class _ScatterEngine(FakeTransferEngine):
+    def scatter_transfer_sync_write_with_ticket(self, *arguments):
+        self.calls.append(("scatter-write", arguments))
+        return _CompletedTicket()
+
+
 def test_te_sink_executes_local_source_ranges_without_staging_buffer() -> None:
     sources = manifests(tp=2, prefix="source", address_base=0x10000)
     targets = manifests(tp=4, prefix="target", address_base=0x40000)
@@ -43,6 +53,131 @@ def test_te_sink_executes_local_source_ranges_without_staging_buffer() -> None:
     ]
     assert engine.register_calls == [(0x10000, 4)]
     assert engine.unregister_calls == [0x10000]
+
+
+def test_te_sink_lowers_bound_fragments_to_scatter_allocation_ranges() -> None:
+    sources = manifests(tp=2, prefix="source", address_base=0x10000)
+    targets = manifests(tp=4, prefix="target", address_base=0x40000)
+    engine = _ScatterEngine()
+
+    MooncakeTransferEngineSink(engine).execute(
+        plan_transfer(sources, targets),
+        sources.placement,
+        sources.bindings[0],
+        targets.placement,
+        targets.bindings,
+        target_registrations=registration_leases(targets),
+    )
+
+    assert engine.calls == [
+        (
+            "scatter-write",
+            (
+                "target-t0:12345",
+                [0x10000],
+                [4],
+                [0x40000],
+                [2],
+                [[0]],
+                [[0]],
+                [[2]],
+            ),
+        ),
+        (
+            "scatter-write",
+            (
+                "target-t1:12345",
+                [0x10000],
+                [4],
+                [0x41000],
+                [2],
+                [[2]],
+                [[0]],
+                [[2]],
+            ),
+        ),
+    ]
+
+
+def test_te_sink_lowers_nonzero_views_to_scatter_allocations() -> None:
+    source_inputs = manifests(tp=2, prefix="source", address_base=0x10000)
+    source_fragment = replace(
+        source_inputs.bindings[0].fragments[0],
+        storage_address=0xF000,
+        storage_nbytes=0x2000,
+        storage_offset_bytes=0x1000,
+    )
+    sources = RuntimeInputs(
+        source_inputs.placement,
+        (
+            replace(source_inputs.bindings[0], fragments=(source_fragment,)),
+            *source_inputs.bindings[1:],
+        ),
+    )
+    target_inputs = manifests(tp=4, prefix="target", address_base=0x40000)
+    target_fragments = (
+        replace(
+            target_inputs.bindings[0].fragments[0],
+            storage_address=0x3F000,
+            storage_nbytes=0x2000,
+            storage_offset_bytes=0x1000,
+        ),
+        replace(
+            target_inputs.bindings[1].fragments[0],
+            storage_address=0x40800,
+            storage_nbytes=0x1000,
+            storage_offset_bytes=0x800,
+        ),
+    )
+    targets = RuntimeInputs(
+        target_inputs.placement,
+        (
+            replace(target_inputs.bindings[0], fragments=(target_fragments[0],)),
+            replace(target_inputs.bindings[1], fragments=(target_fragments[1],)),
+            *target_inputs.bindings[2:],
+        ),
+    )
+    engine = _ScatterEngine()
+
+    MooncakeTransferEngineSink(engine).execute(
+        plan_transfer(sources, targets),
+        sources.placement,
+        sources.bindings[0],
+        targets.placement,
+        targets.bindings,
+        target_registrations=registration_leases(targets),
+    )
+
+    assert engine.register_calls == [(0xF000, 0x2000)]
+    assert engine.unregister_calls == [0xF000]
+    assert engine.calls == [
+        (
+            "scatter-write",
+            (
+                "target-t0:12345",
+                [0xF000],
+                [0x2000],
+                [0x3F000],
+                [0x2000],
+                [[0x1000]],
+                [[0x1000]],
+                [[2]],
+            ),
+        ),
+        (
+            "scatter-write",
+            (
+                "target-t1:12345",
+                [0xF000],
+                [0x2000],
+                [0x40800],
+                [0x1000],
+                [[0x1002]],
+                [[0x800]],
+                [[2]],
+            ),
+        ),
+    ]
 
 
 def test_te_sink_requires_generation_bound_target_registration_leases() -> None:

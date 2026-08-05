@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, cast
 
 from ..manifest import (
     RuntimeBindingFragment,
@@ -10,7 +10,9 @@ from ..manifest import (
 )
 from ..planner import (
     BoundWeightFragment,
+    ExecutableTransferOperation,
     ExecutorTransferPlan,
+    LiveTransferOperation,
     TransferPlan,
     resolve_executor_plans,
 )
@@ -38,6 +40,12 @@ def validate_plan_identity(
     placement: WeightPlacementManifest,
     label: str,
 ) -> None:
+    if not isinstance(plan, TransferPlan):
+        raise TransferEngineError("plan must be a TransferPlan")
+    if not isinstance(placement, WeightPlacementManifest):
+        raise TransferEngineError(
+            f"{label} placement must be a WeightPlacementManifest"
+        )
     if placement.resource_id != plan.resource_id:
         raise TransferEngineError(f"{label} resource_id mismatch")
     if placement.revision != plan.revision:
@@ -52,13 +60,13 @@ def validate_manifest_pair(
     binding: WeightRuntimeBindingManifest,
     label: str,
 ) -> None:
-    validate_plan_identity(plan, placement, label)
     try:
         validate_runtime_binding(placement, binding)
     except ValueError as error:
         raise TransferEngineError(
             f"invalid {label} runtime binding: {error}"
         ) from error
+    validate_plan_identity(plan, placement, label)
 
 
 def runtime_binding_fragment(
@@ -74,6 +82,20 @@ def runtime_binding_fragment(
     )
 
 
+def require_live_transfer_operation(
+    operation: ExecutableTransferOperation,
+) -> LiveTransferOperation:
+    """Reject Store-backed or non-canonical operations before TE submission."""
+
+    if not isinstance(operation.source, BoundWeightFragment) or not isinstance(
+        operation.target, BoundWeightFragment
+    ):
+        raise TransferEngineError(
+            "live TE execution requires runtime-bound source and target fragments"
+        )
+    return cast(LiveTransferOperation, operation)
+
+
 def pair_manifests(
     placement: WeightPlacementManifest,
     bindings: Sequence[WeightRuntimeBindingManifest],
@@ -84,12 +106,47 @@ def pair_manifests(
             f"{label} placement must be a WeightPlacementManifest"
         )
     binding_items = tuple(bindings)
+    if not all(
+        isinstance(binding, WeightRuntimeBindingManifest) for binding in binding_items
+    ):
+        raise TransferEngineError(
+            f"{label} binding must be a WeightRuntimeBindingManifest"
+        )
     participant_ids = [binding.participant_id for binding in binding_items]
     if len(participant_ids) != len(set(participant_ids)):
         raise TransferEngineError(f"duplicate {label} runtime binding participant")
     if any(binding.placement_id != placement.placement_id for binding in binding_items):
         raise TransferEngineError(f"{label} placement and binding IDs differ")
     return tuple((placement, binding) for binding in binding_items)
+
+
+def validate_execution_input_types(
+    plan: TransferPlan,
+    source_placement: WeightPlacementManifest,
+    source_bindings: Sequence[WeightRuntimeBindingManifest],
+    target_placement: WeightPlacementManifest,
+    target_bindings: Sequence[WeightRuntimeBindingManifest],
+) -> None:
+    if not isinstance(plan, TransferPlan):
+        raise TransferEngineError("plan must be a TransferPlan")
+    for label, placement in (
+        ("source", source_placement),
+        ("target", target_placement),
+    ):
+        if not isinstance(placement, WeightPlacementManifest):
+            raise TransferEngineError(
+                f"{label} placement must be a WeightPlacementManifest"
+            )
+    for label, bindings in (
+        ("source", source_bindings),
+        ("target", target_bindings),
+    ):
+        if not all(
+            isinstance(binding, WeightRuntimeBindingManifest) for binding in bindings
+        ):
+            raise TransferEngineError(
+                f"{label} binding must be a WeightRuntimeBindingManifest"
+            )
 
 
 def resolve_runtime_executors(
