@@ -12,6 +12,330 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef MOONCAKE_INTEGRATION_TRANSFER_ENGINE_TRANSFER_ENGINE_PY_H_
+#define MOONCAKE_INTEGRATION_TRANSFER_ENGINE_TRANSFER_ENGINE_PY_H_
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
+
+enum class BatchTransferCompletionStatus : int {
+    COMPLETED = 0,
+    FAILED_DRAINED = -1,
+    COMPLETION_UNKNOWN = -2,
+};
+
+enum class BatchTransferBackendStatus {
+    IN_PROGRESS,
+    COMPLETED,
+    FAILED,
+};
+
+enum class BatchTransferTaskStatus {
+    IN_PROGRESS,
+    COMPLETED,
+    FAILED,
+};
+
+template <typename Status>
+constexpr BatchTransferTaskStatus classifyBatchTransferTaskStatus(
+    Status status, Status completed, Status failed, Status canceled,
+    Status timeout, Status invalid) {
+    if (status == completed) return BatchTransferTaskStatus::COMPLETED;
+    if (status == failed || status == canceled || status == timeout ||
+        status == invalid) {
+        return BatchTransferTaskStatus::FAILED;
+    }
+    return BatchTransferTaskStatus::IN_PROGRESS;
+}
+
+class BatchTransferTaskTracker {
+   public:
+    explicit BatchTransferTaskTracker(size_t task_count)
+        : terminal_(task_count, false) {}
+
+    bool shouldPoll(size_t task_id) const {
+        return task_id < terminal_.size() && !terminal_[task_id];
+    }
+
+    void observe(size_t task_id, BatchTransferTaskStatus status) {
+        if (!shouldPoll(task_id) ||
+            status == BatchTransferTaskStatus::IN_PROGRESS) {
+            return;
+        }
+        terminal_[task_id] = true;
+        failed_ = failed_ || status == BatchTransferTaskStatus::FAILED;
+    }
+
+    BatchTransferBackendStatus aggregate() const {
+        if (std::find(terminal_.begin(), terminal_.end(), false) !=
+            terminal_.end()) {
+            return BatchTransferBackendStatus::IN_PROGRESS;
+        }
+        return failed_ ? BatchTransferBackendStatus::FAILED
+                       : BatchTransferBackendStatus::COMPLETED;
+    }
+
+    size_t size() const { return terminal_.size(); }
+
+   private:
+    std::vector<bool> terminal_;
+    bool failed_ = false;
+};
+
+// Keeps native request, batch, and engine state alive. The caller must retain
+// every referenced buffer and memory registration until drained() is true.
+class BatchTransferTicket {
+   public:
+    using Poller = std::function<BatchTransferBackendStatus()>;
+    using Releaser = std::function<bool()>;
+
+    BatchTransferTicket(uint64_t batch_id, std::shared_ptr<void> owner,
+                        Poller poller, Releaser releaser)
+        : batch_id_(batch_id),
+          owner_(std::move(owner)),
+          poller_(std::move(poller)),
+          releaser_(std::move(releaser)) {}
+
+    static std::shared_ptr<BatchTransferTicket> terminal(
+        BatchTransferCompletionStatus status) {
+        return std::shared_ptr<BatchTransferTicket>(
+            new BatchTransferTicket(status));
+    }
+
+    BatchTransferCompletionStatus status() const {
+        std::lock_guard<std::mutex> guard(state_mutex_);
+        return status_;
+    }
+
+    uint64_t batchId() const { return batch_id_; }
+
+    bool drained() const {
+        std::lock_guard<std::mutex> guard(state_mutex_);
+        return drained_;
+    }
+
+    BatchTransferCompletionStatus poll() {
+        std::lock_guard<std::mutex> poll_guard(poll_mutex_);
+
+        Poller poller;
+        Releaser releaser;
+        {
+            std::lock_guard<std::mutex> state_guard(state_mutex_);
+            if (drained_) return status_;
+            poller = poller_;
+            releaser = releaser_;
+        }
+
+        if (!poller || !releaser) {
+            return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+        }
+
+        BatchTransferBackendStatus backend_status;
+        try {
+            backend_status = poller();
+        } catch (...) {
+            return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+        }
+        if (backend_status == BatchTransferBackendStatus::IN_PROGRESS) {
+            return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+        }
+
+        bool released = false;
+        try {
+            released = releaser();
+        } catch (...) {
+            return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+        }
+        if (!released) {
+            return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+        }
+
+        std::vector<std::function<void()>> callbacks;
+        BatchTransferCompletionStatus terminal_status =
+            backend_status == BatchTransferBackendStatus::COMPLETED
+                ? BatchTransferCompletionStatus::COMPLETED
+                : BatchTransferCompletionStatus::FAILED_DRAINED;
+        {
+            std::lock_guard<std::mutex> state_guard(state_mutex_);
+            status_ = terminal_status;
+            drained_ = true;
+            owner_.reset();
+            poller_ = {};
+            releaser_ = {};
+            callbacks.swap(drained_callbacks_);
+        }
+        for (auto &callback : callbacks) callback();
+        return terminal_status;
+    }
+
+    BatchTransferCompletionStatus drain(uint64_t timeout_ms) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeout_ms);
+        while (true) {
+            auto completion = poll();
+            if (completion !=
+                BatchTransferCompletionStatus::COMPLETION_UNKNOWN) {
+                return completion;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+            }
+            std::this_thread::sleep_for(std::min(
+                std::chrono::microseconds(100),
+                std::chrono::duration_cast<std::chrono::microseconds>(deadline -
+                                                                      now)));
+        }
+    }
+
+    void addDrainedCallback(std::function<void()> callback) {
+        bool call_now = false;
+        {
+            std::lock_guard<std::mutex> guard(state_mutex_);
+            if (drained_) {
+                call_now = true;
+            } else {
+                drained_callbacks_.push_back(callback);
+            }
+        }
+        if (call_now) callback();
+    }
+
+   private:
+    explicit BatchTransferTicket(BatchTransferCompletionStatus status)
+        : status_(status), drained_(true) {}
+
+    uint64_t batch_id_ = 0;
+    std::shared_ptr<void> owner_;
+    Poller poller_;
+    Releaser releaser_;
+
+    mutable std::mutex state_mutex_;
+    std::mutex poll_mutex_;
+    BatchTransferCompletionStatus status_ =
+        BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+    bool drained_ = false;
+    std::vector<std::function<void()>> drained_callbacks_;
+};
+
+inline bool shouldRetryBatchTransfer(BatchTransferCompletionStatus status) {
+    return status == BatchTransferCompletionStatus::FAILED_DRAINED;
+}
+
+class BatchTransferPendingRegistry {
+   public:
+    void retain(const std::shared_ptr<BatchTransferTicket> &ticket) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        reapDrainedLocked();
+        if (!ticket || ticket->drained()) return;
+        auto duplicate = std::find(tickets_.begin(), tickets_.end(), ticket);
+        if (duplicate == tickets_.end() && !ticket->drained()) {
+            tickets_.push_back(ticket);
+        }
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        reapDrainedLocked();
+        return tickets_.size();
+    }
+
+    BatchTransferCompletionStatus drain(uint64_t timeout_ms) {
+        std::lock_guard<std::mutex> drain_guard(drain_mutex_);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeout_ms);
+
+        while (true) {
+            std::vector<std::shared_ptr<BatchTransferTicket>> snapshot;
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                if (tickets_.empty()) {
+                    auto completion =
+                        saw_failed_
+                            ? BatchTransferCompletionStatus::FAILED_DRAINED
+                            : BatchTransferCompletionStatus::COMPLETED;
+                    saw_failed_ = false;
+                    return completion;
+                }
+                snapshot = tickets_;
+            }
+
+            bool saw_failed = false;
+            for (const auto &ticket : snapshot) {
+                auto completion = ticket->poll();
+                if (completion ==
+                    BatchTransferCompletionStatus::FAILED_DRAINED) {
+                    saw_failed = true;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                saw_failed_ = saw_failed_ || saw_failed;
+                reapDrainedLocked();
+                if (tickets_.empty()) {
+                    auto completion =
+                        saw_failed_
+                            ? BatchTransferCompletionStatus::FAILED_DRAINED
+                            : BatchTransferCompletionStatus::COMPLETED;
+                    saw_failed_ = false;
+                    return completion;
+                }
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return BatchTransferCompletionStatus::COMPLETION_UNKNOWN;
+            }
+            std::this_thread::sleep_for(std::min(
+                std::chrono::microseconds(100),
+                std::chrono::duration_cast<std::chrono::microseconds>(deadline -
+                                                                      now)));
+        }
+    }
+
+    std::vector<std::shared_ptr<BatchTransferTicket>> takeAll() {
+        std::lock_guard<std::mutex> drain_guard(drain_mutex_);
+        std::lock_guard<std::mutex> guard(mutex_);
+        std::vector<std::shared_ptr<BatchTransferTicket>> tickets;
+        tickets.swap(tickets_);
+        saw_failed_ = false;
+        return tickets;
+    }
+
+   private:
+    void reapDrainedLocked() const {
+        for (const auto &ticket : tickets_) {
+            if (ticket->drained() &&
+                ticket->status() ==
+                    BatchTransferCompletionStatus::FAILED_DRAINED) {
+                saw_failed_ = true;
+            }
+        }
+        tickets_.erase(std::remove_if(tickets_.begin(), tickets_.end(),
+                                      [](const auto &ticket) {
+                                          return ticket->drained();
+                                      }),
+                       tickets_.end());
+    }
+
+    std::mutex drain_mutex_;
+    mutable std::mutex mutex_;
+    mutable std::vector<std::shared_ptr<BatchTransferTicket>> tickets_;
+    mutable bool saw_failed_ = false;
+};
+
+#ifndef MOONCAKE_TRANSFER_ENGINE_COMPLETION_CONTRACT_ONLY
+
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <pybind11/pybind11.h>
@@ -90,11 +414,21 @@ class TransferEnginePy {
                                std::vector<size_t> lengths,
                                const std::string &transport_hint = "");
 
+    std::shared_ptr<BatchTransferTicket> batchTransferSyncWriteWithTicket(
+        const char *target_hostname, std::vector<uintptr_t> buffers,
+        std::vector<uintptr_t> peer_buffer_addresses,
+        std::vector<size_t> lengths, const std::string &transport_hint = "");
+
     int batchTransferSyncRead(const char *target_hostname,
                               std::vector<uintptr_t> buffers,
                               std::vector<uintptr_t> peer_buffer_addresses,
                               std::vector<size_t> lengths,
                               const std::string &transport_hint = "");
+
+    std::shared_ptr<BatchTransferTicket> batchTransferSyncReadWithTicket(
+        const char *target_hostname, std::vector<uintptr_t> buffers,
+        std::vector<uintptr_t> peer_buffer_addresses,
+        std::vector<size_t> lengths, const std::string &transport_hint = "");
 
     batch_id_t batchTransferAsyncWrite(
         const char *target_hostname, const std::vector<uintptr_t> &buffers,
@@ -122,6 +456,20 @@ class TransferEnginePy {
                           std::vector<size_t> lengths, TransferOpcode opcode,
                           TransferNotify *notify = nullptr,
                           const std::string &transport_hint = "");
+
+    std::shared_ptr<BatchTransferTicket> batchTransferSyncWithTicket(
+        const char *target_hostname, std::vector<uintptr_t> buffers,
+        std::vector<uintptr_t> peer_buffer_addresses,
+        std::vector<size_t> lengths, TransferOpcode opcode,
+        TransferNotify *notify = nullptr,
+        const std::string &transport_hint = "");
+
+    BatchTransferCompletionStatus drainPendingBatchTransfers(
+        uint64_t timeout_ms);
+
+    size_t pendingBatchTransferCount() const {
+        return pending_batch_transfers_.size();
+    }
 
     batch_id_t batchTransferAsync(
         const char *target_hostname, const std::vector<uintptr_t> &buffers,
@@ -220,7 +568,12 @@ class TransferEnginePy {
     std::vector<char *> buffer_list_;
     std::unordered_set<char *> large_buffer_list_;
     std::unordered_map<std::string, Transport::SegmentHandle> handle_map_;
+    BatchTransferPendingRegistry pending_batch_transfers_;
     bool auto_discovery_;
 
     uint64_t transfer_timeout_nsec_;
 };
+
+#endif  // MOONCAKE_TRANSFER_ENGINE_COMPLETION_CONTRACT_ONLY
+
+#endif  // MOONCAKE_INTEGRATION_TRANSFER_ENGINE_TRANSFER_ENGINE_PY_H_

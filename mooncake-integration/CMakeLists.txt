@@ -80,6 +80,16 @@ if(WITH_TE)
   endif()
 endif()
 
+if(BUILD_UNIT_TESTS AND WITH_TE)
+  find_package(Threads REQUIRED)
+  add_executable(transfer_engine_completion_test
+                 transfer_engine/transfer_engine_completion_test.cpp)
+  target_link_libraries(transfer_engine_completion_test
+                        PRIVATE Threads::Threads)
+  add_test(NAME transfer_engine_completion_test
+           COMMAND transfer_engine_completion_test)
+endif()
+
 set(ALLOCATOR_SO_PATH
     "${CMAKE_BINARY_DIR}/mooncake-transfer-engine/nvlink-allocator/nvlink_allocator.so"
 )
