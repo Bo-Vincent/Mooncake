@@ -5,33 +5,55 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from math import prod
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import TypeAlias, cast
 
 from .._compat import _strict_zip
-from ..contracts import ResourceKind
+from ..contracts import ResourceId, ResourceKind, RevisionId, StoredFragmentId, TensorId
 from .serde import _axis_from_wire, _axis_to_wire
 from .types import (
     TensorDescriptor,
+    ParallelAxis,
+    _normalize_aliases,
     _require_integer,
     _require_integer_tuple,
     _require_manifest_items,
     _require_nonempty_string,
     _require_sequence,
     _require_u64,
+    validate_fragment_geometry,
 )
-from .validation import _validate_fragment_geometry
+
+
+StoredGeometryKey: TypeAlias = tuple[TensorId, tuple[int, ...], tuple[int, ...]]
+StoredAliasDescriptorKey: TypeAlias = tuple[
+    tuple[int, ...],
+    str,
+    int,
+    tuple[int, ...],
+    tuple[ParallelAxis, ...],
+    int | None,
+    int | None,
+    str,
+]
+StoredAliasGeometryKey: TypeAlias = tuple[
+    tuple[TensorId, ...],
+    tuple[int, ...],
+    tuple[int, ...],
+    int,
+]
 
 
 @dataclass(frozen=True)
 class StoredFragment:
-    fragment_id: str
-    tensor_id: str
+    fragment_id: StoredFragmentId
+    tensor_id: TensorId
     global_offset: tuple[int, ...]
     local_shape: tuple[int, ...]
     object_key: str
     object_offset: int
     nbytes: int
-    checksum: str | None = None
+    aliases: tuple[TensorId, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -48,15 +70,19 @@ class StoredFragment:
             _require_nonempty_string(getattr(self, name), name)
         _require_integer(self.object_offset, "object_offset", minimum=0)
         _require_integer(self.nbytes, "nbytes", minimum=1)
-        if self.checksum is not None:
-            _require_nonempty_string(self.checksum, "checksum")
+        object.__setattr__(self, "aliases", _normalize_aliases(self.aliases))
+        if self.aliases:
+            if len(self.aliases) < 2:
+                raise ValueError("alias group must contain at least two tensor IDs")
+            if self.tensor_id not in self.aliases:
+                raise ValueError("alias group must contain the fragment tensor_id")
 
 
 @dataclass(frozen=True)
 class WeightManifest:
     namespace: str
-    resource_id: str
-    revision: str
+    resource_id: ResourceId
+    revision: RevisionId
     weight_generation: int
     group_id: str
     manifest_key: str
@@ -106,11 +132,12 @@ class WeightManifest:
         ):
             raise ValueError("payload object_key does not belong to manifest group")
         _validate_stored_fragments(self.tensors, self.fragments)
+        _validate_stored_aliases(self.tensors, self.fragments)
         _validate_stored_coverage(self.tensors, self.fragments)
         _validate_stored_object_ranges(self.fragments)
 
     def to_json(self) -> str:
-        tensors = []
+        tensors: list[dict[str, object]] = []
         for tensor in self.tensors:
             tensors.append(
                 {
@@ -127,7 +154,7 @@ class WeightManifest:
                     ],
                 }
             )
-        raw = {
+        raw: dict[str, object] = {
             "resource_kind": self.resource_kind.value,
             "namespace": self.namespace,
             "resource_id": self.resource_id,
@@ -151,16 +178,28 @@ class WeightManifest:
         def reject_constant(constant: str) -> None:
             raise ValueError(f"non-finite JSON number is unsupported: {constant}")
 
+        def reject_duplicate_fields(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON field: {key}")
+                result[key] = item
+            return result
+
         try:
-            raw = json.loads(value, parse_constant=reject_constant)
+            raw = json.loads(
+                value,
+                parse_constant=reject_constant,
+                object_pairs_hook=reject_duplicate_fields,
+            )
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError("weight manifest is not valid JSON") from error
-        if not isinstance(raw, Mapping):
-            raise ValueError("weight manifest must be a JSON object")
-        return cls.from_dict(raw)
+        return cls.from_dict(_require_mapping(cast(object, raw), "weight manifest"))
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> WeightManifest:
+    def from_dict(cls, raw: Mapping[str, object]) -> WeightManifest:
         raw = _require_exact_fields(
             raw,
             frozenset(
@@ -201,19 +240,19 @@ class WeightManifest:
                 "object_key",
                 "object_offset",
                 "nbytes",
-                "checksum",
+                "aliases",
             }
         )
-        tensors = []
+        tensors: list[TensorDescriptor] = []
         if raw["resource_kind"] != ResourceKind.MODEL_WEIGHT.value:
             raise ValueError("weight manifest resource_kind must be model_weight")
         for index, item in enumerate(
             _require_sequence(raw["tensors"], "WeightManifest tensors")
         ):
-            tensor_values = dict(
+            tensor_values: dict[str, object] = dict(
                 _require_exact_fields(item, tensor_fields, "tensor descriptor")
             )
-            tensor_values["parallel_axes"] = tuple(
+            parallel_axes = tuple(
                 _axis_from_wire(axis, axis_index)
                 for axis_index, axis in enumerate(
                     _require_sequence(
@@ -222,47 +261,139 @@ class WeightManifest:
                     )
                 )
             )
-            tensors.append(TensorDescriptor(**tensor_values))
-        fragments = tuple(
-            StoredFragment(
-                **_require_exact_fields(item, fragment_fields, "stored fragment")
+            tensors.append(
+                TensorDescriptor(
+                    tensor_id=TensorId(
+                        _require_nonempty_string(
+                            tensor_values["tensor_id"],
+                            "stored tensor tensor_id",
+                        )
+                    ),
+                    global_shape=_require_integer_tuple(
+                        tensor_values["global_shape"],
+                        "stored tensor global_shape",
+                        minimum=1,
+                    ),
+                    dtype=_require_nonempty_string(
+                        tensor_values["dtype"], "stored tensor dtype"
+                    ),
+                    itemsize=_require_integer(
+                        tensor_values["itemsize"], "stored tensor itemsize", minimum=1
+                    ),
+                    layer_id=_optional_integer(
+                        tensor_values["layer_id"], "stored tensor layer_id", minimum=0
+                    ),
+                    expert_id=_optional_integer(
+                        tensor_values["expert_id"], "stored tensor expert_id", minimum=0
+                    ),
+                    layout_fingerprint=_require_nonempty_string(
+                        tensor_values["layout_fingerprint"],
+                        "stored tensor layout_fingerprint",
+                    ),
+                    shard_dims=_require_integer_tuple(
+                        tensor_values["shard_dims"],
+                        "stored tensor shard_dims",
+                        minimum=0,
+                    ),
+                    parallel_axes=parallel_axes,
+                )
             )
+        fragments: tuple[StoredFragment, ...] = tuple(
+            _stored_fragment_from_wire(item, fragment_fields)
             for item in _require_sequence(raw["fragments"], "WeightManifest fragments")
         )
         return cls(
-            namespace=raw["namespace"],
-            resource_id=raw["resource_id"],
-            revision=raw["revision"],
-            weight_generation=raw["weight_generation"],
-            group_id=raw["group_id"],
-            manifest_key=raw["manifest_key"],
+            namespace=_require_nonempty_string(raw["namespace"], "namespace"),
+            resource_id=ResourceId(
+                _require_nonempty_string(raw["resource_id"], "resource_id")
+            ),
+            revision=RevisionId(_require_nonempty_string(raw["revision"], "revision")),
+            weight_generation=_require_u64(
+                raw["weight_generation"], "weight_generation"
+            ),
+            group_id=_require_nonempty_string(raw["group_id"], "group_id"),
+            manifest_key=_require_nonempty_string(raw["manifest_key"], "manifest_key"),
             tensors=tuple(tensors),
             fragments=fragments,
-            created_at=raw["created_at"],
+            created_at=_require_nonempty_string(raw["created_at"], "created_at"),
         )
 
 
 def _require_exact_fields(
-    value: Any,
+    value: object,
     expected: frozenset[str],
     label: str,
-) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != expected:
+) -> Mapping[str, object]:
+    mapping = _require_mapping(value, label)
+    if frozenset(mapping) != expected:
         raise ValueError(f"{label} schema fields do not match contract")
-    return value
+    return mapping
+
+
+def _require_mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    raw = cast(Mapping[object, object], value)
+    if any(type(key) is not str for key in raw):
+        raise ValueError(f"{label} must be a JSON object")
+    return {cast(str, key): item for key, item in raw.items()}
+
+
+def _optional_integer(value: object, label: str, *, minimum: int) -> int | None:
+    if value is None:
+        return None
+    return _require_integer(value, label, minimum=minimum)
+
+
+def _stored_fragment_from_wire(
+    value: object,
+    fragment_fields: frozenset[str],
+) -> StoredFragment:
+    fragment = _require_exact_fields(value, fragment_fields, "stored fragment")
+    return StoredFragment(
+        fragment_id=StoredFragmentId(
+            _require_nonempty_string(
+                fragment["fragment_id"], "stored fragment fragment_id"
+            )
+        ),
+        tensor_id=TensorId(
+            _require_nonempty_string(fragment["tensor_id"], "stored fragment tensor_id")
+        ),
+        global_offset=_require_integer_tuple(
+            fragment["global_offset"], "stored fragment global_offset", minimum=0
+        ),
+        local_shape=_require_integer_tuple(
+            fragment["local_shape"], "stored fragment local_shape", minimum=1
+        ),
+        object_key=_require_nonempty_string(
+            fragment["object_key"], "stored fragment object_key"
+        ),
+        object_offset=_require_integer(
+            fragment["object_offset"], "stored fragment object_offset", minimum=0
+        ),
+        nbytes=_require_integer(
+            fragment["nbytes"], "stored fragment nbytes", minimum=1
+        ),
+        aliases=tuple(
+            TensorId(_require_nonempty_string(alias, "stored fragment alias"))
+            for alias in _require_sequence(
+                fragment["aliases"], "stored fragment aliases"
+            )
+        ),
+    )
 
 
 def _validate_stored_fragments(
     tensors: Sequence[TensorDescriptor],
     fragments: Sequence[StoredFragment],
 ) -> None:
-    tensor_by_id: dict[str, TensorDescriptor] = {}
+    tensor_by_id: dict[TensorId, TensorDescriptor] = {}
     for tensor in tensors:
         if tensor.tensor_id in tensor_by_id:
             raise ValueError(f"duplicate tensor_id: {tensor.tensor_id}")
         tensor_by_id[tensor.tensor_id] = tensor
 
-    fragment_ids: set[str] = set()
+    fragment_ids: set[StoredFragmentId] = set()
     for fragment in fragments:
         if fragment.fragment_id in fragment_ids:
             raise ValueError(f"duplicate fragment_id: {fragment.fragment_id}")
@@ -270,15 +401,21 @@ def _validate_stored_fragments(
         tensor = tensor_by_id.get(fragment.tensor_id)
         if tensor is None:
             raise ValueError(f"unknown tensor_id: {fragment.tensor_id}")
-        _validate_fragment_geometry(tensor, fragment)
+        validate_fragment_geometry(
+            tensor,
+            fragment_id=fragment.fragment_id,
+            global_offset=fragment.global_offset,
+            local_shape=fragment.local_shape,
+            nbytes=fragment.nbytes,
+        )
 
 
 def _validate_stored_coverage(
     tensors: Sequence[TensorDescriptor],
     fragments: Sequence[StoredFragment],
 ) -> None:
-    by_tensor: dict[str, list[StoredFragment]] = {}
-    geometries: set[tuple] = set()
+    by_tensor: dict[TensorId, list[StoredFragment]] = {}
+    geometries: set[StoredGeometryKey] = set()
     for fragment in fragments:
         geometry = (
             fragment.tensor_id,
@@ -299,6 +436,55 @@ def _validate_stored_coverage(
             tensor_fragments
         ):
             raise ValueError(f"tensor is not fully covered: {tensor.tensor_id}")
+
+
+def _stored_alias_descriptor_key(
+    tensor: TensorDescriptor,
+) -> StoredAliasDescriptorKey:
+    return (
+        tensor.global_shape,
+        tensor.dtype,
+        tensor.itemsize,
+        tensor.shard_dims,
+        tensor.parallel_axes,
+        tensor.layer_id,
+        tensor.expert_id,
+        tensor.layout_fingerprint,
+    )
+
+
+def _validate_stored_aliases(
+    tensors: Sequence[TensorDescriptor],
+    fragments: Sequence[StoredFragment],
+) -> None:
+    tensor_by_id: dict[TensorId, TensorDescriptor] = {
+        tensor.tensor_id: tensor for tensor in tensors
+    }
+    by_group_and_geometry: dict[StoredAliasGeometryKey, list[StoredFragment]] = {}
+    for fragment in fragments:
+        if not fragment.aliases:
+            continue
+        unknown = sorted(set(fragment.aliases) - set(tensor_by_id))
+        if unknown:
+            raise ValueError(f"stored alias references unknown tensor: {unknown[0]}")
+        key = (
+            fragment.aliases,
+            fragment.global_offset,
+            fragment.local_shape,
+            fragment.nbytes,
+        )
+        by_group_and_geometry.setdefault(key, []).append(fragment)
+
+    for (aliases, *_), alias_fragments in by_group_and_geometry.items():
+        tensor_ids = {fragment.tensor_id for fragment in alias_fragments}
+        if tensor_ids != set(aliases):
+            raise ValueError("stored alias group is incomplete for fragment geometry")
+        descriptor_keys = {
+            _stored_alias_descriptor_key(tensor_by_id[tensor_id])
+            for tensor_id in tensor_ids
+        }
+        if len(descriptor_keys) != 1:
+            raise ValueError("stored alias tensor descriptors differ")
 
 
 def _validate_stored_object_ranges(
