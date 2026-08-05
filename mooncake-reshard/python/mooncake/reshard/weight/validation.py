@@ -6,16 +6,16 @@ from collections.abc import Mapping, Sequence
 from itertools import product as cartesian_product
 from math import prod
 
-from ..contracts import RuntimeInstanceId, TensorId
+from ..contracts import RuntimeBindingFragment, RuntimeInstanceId, TensorId
 from .topology import ParallelTopology
 from .types import (
     OwnershipAxis,
     ParallelRank,
     PlacementFragment,
     ReplicatedAxis,
-    RuntimeBindingFragment,
     SplitAxis,
     TensorDescriptor,
+    validate_fragment_geometry,
 )
 
 
@@ -480,23 +480,13 @@ def _validate_fragment_geometry(
     tensor: TensorDescriptor,
     fragment: PlacementFragment,
 ) -> None:
-    ndim = len(tensor.global_shape)
-    if len(fragment.global_offset) != ndim or len(fragment.local_shape) != ndim:
-        raise ValueError(f"fragment rank mismatch: {fragment.fragment_id}")
-    for offset, extent, total in zip(
-        fragment.global_offset,
-        fragment.local_shape,
-        tensor.global_shape,
-    ):
-        if offset + extent > total:
-            raise ValueError(f"fragment is out of bounds: {fragment.fragment_id}")
-
-    expected_nbytes = prod(fragment.local_shape) * tensor.itemsize
-    if fragment.nbytes != expected_nbytes:
-        raise ValueError(
-            f"fragment byte size mismatch: {fragment.fragment_id}: "
-            f"expected {expected_nbytes}, got {fragment.nbytes}"
-        )
+    validate_fragment_geometry(
+        tensor,
+        fragment_id=fragment.fragment_id,
+        global_offset=fragment.global_offset,
+        local_shape=fragment.local_shape,
+        nbytes=fragment.nbytes,
+    )
 
 
 def _runtime_alias_descriptor_key(tensor: TensorDescriptor) -> tuple[object, ...]:
