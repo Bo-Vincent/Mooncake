@@ -1,0 +1,400 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Sequence, TypeAlias
+from urllib.parse import quote
+from uuid import uuid4
+
+from .._planner.ownership import (
+    complete_parallel_source_replicas,
+    parallel_tensor_owner,
+)
+from ...contracts import (
+    ResourceId,
+    RevisionId,
+    RuntimeFragmentId,
+    StoredFragmentId,
+    TensorId,
+)
+from ..manifest import (
+    PlacementFragment,
+    RuntimeBindingFragment,
+    TensorDescriptor,
+    WeightPlacementManifest,
+    WeightRuntimeBindingManifest,
+)
+from ..storage_manifest import StoredFragment, WeightManifest
+from .contracts import UploadOperation, UploadReceipt, WeightUploadPlan
+from .errors import WeightStoreError
+from .payload import PayloadStoreOperations
+from .session import WeightUploadSession
+from .validation import (
+    pair_manifests,
+    same_runtime_snapshot,
+    validate_manifest_pair,
+)
+
+if TYPE_CHECKING:
+    from .client import WeightStore
+
+
+UploadSource = tuple[
+    PlacementFragment,
+    RuntimeBindingFragment,
+    WeightRuntimeBindingManifest,
+]
+UploadGeometryKey: TypeAlias = tuple[TensorId, tuple[int, ...], tuple[int, ...]]
+UploadSortKey: TypeAlias = tuple[int, int, int, int, str, str]
+
+
+def _runtime_sort_key(source: UploadSource) -> UploadSortKey:
+    placement, binding, _ = source
+    return (
+        placement.rank.dp,
+        placement.rank.pp,
+        placement.rank.ep,
+        placement.rank.tp,
+        binding.worker_id,
+        binding.fragment_id,
+    )
+
+
+def _geometry_key(fragment: PlacementFragment) -> UploadGeometryKey:
+    return fragment.tensor_id, fragment.global_offset, fragment.local_shape
+
+
+def _collect_upload_sources(
+    placement: WeightPlacementManifest,
+    bindings: Sequence[WeightRuntimeBindingManifest],
+) -> tuple[
+    ResourceId,
+    RevisionId,
+    int,
+    tuple[TensorDescriptor, ...],
+    list[UploadSource],
+]:
+    pairs = pair_manifests(placement, tuple(bindings), "source")
+    resource_id = pairs[0][0].resource_id
+    revision = pairs[0][0].revision
+    weight_generation = pairs[0][0].weight_generation
+    tensor_by_id: dict[TensorId, TensorDescriptor] = {
+        tensor.tensor_id: tensor for tensor in placement.tensors
+    }
+    sources: list[UploadSource] = []
+    runtime_fragment_ids: set[RuntimeFragmentId] = set()
+    for placement, binding in pairs:
+        part = next(
+            item
+            for item in placement.parts
+            if item.participant_id == binding.participant_id
+        )
+        for tensor in part.tensors:
+            previous = tensor_by_id.setdefault(tensor.tensor_id, tensor)
+            if previous != tensor:
+                raise ValueError(f"tensor descriptor mismatch: {tensor.tensor_id}")
+        runtime_by_placement_id = {
+            fragment.placement_fragment_id: fragment for fragment in binding.fragments
+        }
+        for fragment in part.fragments:
+            runtime_fragment = runtime_by_placement_id[fragment.placement_fragment_id]
+            if runtime_fragment.fragment_id in runtime_fragment_ids:
+                raise ValueError(
+                    f"duplicate source fragment_id: {runtime_fragment.fragment_id}"
+                )
+            runtime_fragment_ids.add(runtime_fragment.fragment_id)
+            sources.append((fragment, runtime_fragment, binding))
+
+    tensors = tuple(sorted(tensor_by_id.values(), key=lambda item: item.tensor_id))
+    try:
+        complete_replicas = complete_parallel_source_replicas(
+            tensor_by_id,
+            [placement_fragment for placement_fragment, _, _ in sources],
+        )
+    except ValueError as error:
+        if str(error) == (
+            "source manifests have no complete DP replica; "
+            "tensors are not fully covered"
+        ):
+            raise ValueError(
+                "source manifests have no complete generation-consistent DP replica"
+            ) from error
+        raise
+
+    generations_by_dp: dict[int, int] = {}
+    for dp_rank, replica_owners in complete_replicas.items():
+        generations = {
+            binding_manifest.generation
+            for placement_fragment, _, binding_manifest in sources
+            if placement_fragment.rank.dp == dp_rank
+            and parallel_tensor_owner(
+                tensor_by_id[placement_fragment.tensor_id], placement_fragment
+            )
+            == replica_owners[placement_fragment.tensor_id]
+        }
+        if len(generations) == 1:
+            generations_by_dp[dp_rank] = next(iter(generations))
+    if not generations_by_dp:
+        raise ValueError(
+            "source manifests have no complete generation-consistent DP replica"
+        )
+    if len(set(generations_by_dp.values())) != 1:
+        raise ValueError(
+            "complete source DP replicas have inconsistent lease generations"
+        )
+
+    selected_dp = min(generations_by_dp)
+    owner_by_tensor = complete_replicas[selected_dp]
+    candidates: dict[UploadGeometryKey, list[UploadSource]] = {}
+    for source in sources:
+        placement_fragment, _, binding_manifest = source
+        tensor = tensor_by_id[placement_fragment.tensor_id]
+        if (
+            placement_fragment.rank.dp != selected_dp
+            or binding_manifest.generation != generations_by_dp[selected_dp]
+            or parallel_tensor_owner(tensor, placement_fragment)
+            != owner_by_tensor[placement_fragment.tensor_id]
+        ):
+            continue
+        candidates.setdefault(_geometry_key(placement_fragment), []).append(source)
+
+    selected: list[UploadSource] = []
+    for group in candidates.values():
+        group.sort(key=_runtime_sort_key)
+        selected.append(group[0])
+    selected.sort(
+        key=lambda source: (
+            source[0].tensor_id,
+            source[0].global_offset,
+            source[0].local_shape,
+        )
+    )
+    return resource_id, revision, weight_generation, tensors, selected
+
+
+def _safe_segment(value: str) -> str:
+    return quote(value, safe="._-")
+
+
+def _fragment_digest(fragment: PlacementFragment) -> StoredFragmentId:
+    value = (
+        f"{fragment.tensor_id}|{fragment.global_offset}|{fragment.local_shape}"
+    ).encode()
+    return StoredFragmentId(hashlib.sha256(value).hexdigest()[:24])
+
+
+class WeightUploadService:
+    def __init__(
+        self,
+        client: WeightStore,
+        payloads: PayloadStoreOperations,
+        session: WeightUploadSession,
+    ) -> None:
+        self.client = client
+        self.payloads = payloads
+        self.session = session
+
+    def prepare_upload(
+        self,
+        source_placement: WeightPlacementManifest,
+        source_bindings: Sequence[WeightRuntimeBindingManifest],
+        *,
+        namespace: str = "default",
+    ) -> WeightUploadPlan:
+        resource_id, revision, weight_generation, tensors, sources = (
+            _collect_upload_sources(
+                source_placement,
+                source_bindings,
+            )
+        )
+        base_key = "/".join(
+            (
+                self.client.key_prefix,
+                _safe_segment(namespace),
+                _safe_segment(resource_id),
+                _safe_segment(revision),
+                str(weight_generation),
+            )
+        )
+        group_id = base_key
+        upload_id = uuid4().hex
+        stored_fragments: list[StoredFragment] = []
+        operations: list[UploadOperation] = []
+        for placement_fragment, source_binding, binding_manifest in sources:
+            fragment_id = _fragment_digest(placement_fragment)
+            target = StoredFragment(
+                fragment_id=fragment_id,
+                tensor_id=placement_fragment.tensor_id,
+                global_offset=placement_fragment.global_offset,
+                local_shape=placement_fragment.local_shape,
+                object_key=(f"{base_key}/payload/{upload_id}/{fragment_id}"),
+                object_offset=0,
+                nbytes=placement_fragment.nbytes,
+                aliases=placement_fragment.aliases,
+            )
+            stored_fragments.append(target)
+            operations.append(
+                UploadOperation(
+                    source_placement=placement_fragment,
+                    source_binding=source_binding,
+                    source_participant_id=binding_manifest.participant_id,
+                    source_instance_id=binding_manifest.instance_id,
+                    target=target,
+                    source_generation=binding_manifest.generation,
+                    source_lease_id=binding_manifest.lease_id,
+                )
+            )
+
+        manifest = WeightManifest(
+            namespace=namespace,
+            resource_id=resource_id,
+            revision=revision,
+            weight_generation=weight_generation,
+            group_id=group_id,
+            manifest_key=f"{base_key}/manifest",
+            tensors=tensors,
+            fragments=tuple(stored_fragments),
+            created_at=datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+        )
+        return WeightUploadPlan(
+            manifest=manifest,
+            source_placement_id=source_placement.placement_id,
+            source_placement_digest=source_placement.digest,
+            session_group_id=f"{base_key}/sessions/{upload_id}",
+            control_key=f"{base_key}/sessions/{upload_id}/decision",
+            operations=tuple(operations),
+        )
+
+    def upload(
+        self,
+        plan: WeightUploadPlan,
+        source_placement: WeightPlacementManifest,
+        source_binding: WeightRuntimeBindingManifest,
+        *,
+        pre_registered: bool = False,
+        source_worker_id: str | None = None,
+    ) -> tuple[UploadReceipt, ...]:
+        validate_manifest_pair(source_placement, source_binding, "source")
+        if source_placement.resource_id != plan.manifest.resource_id or (
+            source_placement.revision != plan.manifest.revision
+        ):
+            raise WeightStoreError("source placement revision mismatch")
+        if source_placement.weight_generation != plan.manifest.weight_generation:
+            raise WeightStoreError("source placement weight generation mismatch")
+        if (
+            source_placement.placement_id != plan.source_placement_id
+            or source_placement.digest != plan.source_placement_digest
+        ):
+            raise WeightStoreError("source placement identity mismatch")
+        local = {
+            fragment.fragment_id: fragment for fragment in source_binding.fragments
+        }
+        source_part = next(
+            part
+            for part in source_placement.parts
+            if part.participant_id == source_binding.participant_id
+        )
+        local_placements = {
+            fragment.placement_fragment_id: fragment
+            for fragment in source_part.fragments
+        }
+        expected_operations = [
+            operation
+            for operation in plan.operations
+            if operation.source_participant_id == source_binding.participant_id
+        ]
+        if not expected_operations:
+            return ()
+        available_workers = sorted(
+            {operation.source_binding.worker_id for operation in expected_operations}
+        )
+        if source_worker_id is None:
+            if len(available_workers) != 1:
+                raise WeightStoreError(
+                    "source worker selector is required for a multi-worker binding"
+                )
+            source_worker_id = available_workers[0]
+        elif type(source_worker_id) is not str or not source_worker_id:
+            raise WeightStoreError("source_worker_id must be a non-empty string")
+        elif source_worker_id not in available_workers:
+            raise WeightStoreError(f"unknown source worker: {source_worker_id}")
+        expected_operations = [
+            operation
+            for operation in expected_operations
+            if operation.source_binding.worker_id == source_worker_id
+        ]
+        if any(
+            operation.source_instance_id != source_binding.instance_id
+            for operation in expected_operations
+        ):
+            raise WeightStoreError(
+                f"stale source instance: {source_binding.participant_id}"
+            )
+        missing = {
+            operation.source_binding.fragment_id
+            for operation in expected_operations
+            if operation.source_binding.fragment_id not in local
+        }
+        if missing:
+            raise WeightStoreError(
+                f"missing planned source fragment: {', '.join(sorted(missing))}"
+            )
+        local_operations: list[tuple[UploadOperation, RuntimeBindingFragment]] = []
+        for operation in expected_operations:
+            current = local.get(operation.source_binding.fragment_id)
+            if current is None:
+                raise AssertionError("planned source fragment was not resolved")
+            current_placement = local_placements.get(
+                operation.source_placement.placement_fragment_id
+            )
+            if current_placement != operation.source_placement:
+                raise WeightStoreError(
+                    "stale source placement: "
+                    f"{operation.source_placement.placement_fragment_id}"
+                )
+            if (
+                source_binding.lease_id != operation.source_lease_id
+                or source_binding.generation != operation.source_generation
+            ):
+                raise WeightStoreError(
+                    f"stale source lease: {operation.source_binding.fragment_id}"
+                )
+            if not same_runtime_snapshot(current, operation.source_binding):
+                raise WeightStoreError(
+                    f"stale source fragment: {operation.source_binding.fragment_id}"
+                )
+            local_operations.append((operation, current))
+        self.session.require_writable(plan)
+        sources = [current for _, current in local_operations]
+        object_keys = [operation.target.object_key for operation, _ in local_operations]
+        with self.client.registration.registered(
+            sources, pre_registered=pre_registered
+        ):
+            for begin in range(
+                0, len(local_operations), self.client.max_ranges_per_request
+            ):
+                batch = local_operations[
+                    begin : begin + self.client.max_ranges_per_request
+                ]
+                results = self.client.store.batch_put_from(
+                    [operation.target.object_key for operation, _ in batch],
+                    [current.address for _, current in batch],
+                    [current.nbytes for _, current in batch],
+                    self.client.config_factory(
+                        [plan.manifest.group_id] * len(batch), "payload"
+                    ),
+                )
+                if len(results) != len(batch) or any(result != 0 for result in results):
+                    raise WeightStoreError(f"batch_put_from failed: {results}")
+            self.payloads.require_complete_payloads(object_keys)
+        self.session.require_writable(plan, cleanup_keys=object_keys)
+        return tuple(
+            UploadReceipt(
+                fragment_id=operation.target.fragment_id,
+                object_key=operation.target.object_key,
+                worker_id=current.worker_id,
+            )
+            for operation, current in local_operations
+        )
