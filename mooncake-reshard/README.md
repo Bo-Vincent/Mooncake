@@ -1,8 +1,8 @@
 # Mooncake Reshard
 
-`mooncake-reshard` defines framework-neutral contracts for reusable runtime
-resources. This change adds the model-weight manifest contract; planning,
-storage, and transfer execution are added separately.
+`mooncake-reshard` defines framework-neutral contracts and logical planning for
+reusable runtime resources. This change adds the model-weight manifest and N-D
+reshard planner; storage and transfer execution are added separately.
 
 Framework-owned adapters outside Mooncake inspect framework runtime objects,
 normalize framework-specific values, and construct the typed canonical
@@ -59,6 +59,31 @@ consume only this globally validated placement.
 Empty participants need no runtime binding; any participant referenced by
 execution must provide one.
 
+## Logical Planning
+
+The planner consumes one complete source placement and one complete target
+placement:
+
+```python
+logical_plan = plan_placement_transfer(source_placement, target_placement)
+```
+
+For one target executor, the complete placements are retained and the target
+participant is selected explicitly:
+
+```python
+logical_plan = plan_placement_transfer_to_local_target(
+    source_placement,
+    target_placement,
+    target_participant_id,
+)
+```
+
+The result contains backend-neutral N-D overlap regions. PP routes tensor
+ownership, EP is represented by logical expert coordinates, TP changes shard
+boxes, and DP selects complete replicas without changing tensor geometry.
+Physical addresses are bound only after logical planning.
+
 The weight implementation is split by responsibility:
 
 - `types.py` defines tensor and logical-fragment contracts;
@@ -69,6 +94,8 @@ The weight implementation is split by responsibility:
 - `validation.py` checks logical geometry, coverage, declared storage alias
   groups, and addresses;
 - `binding.py` validates placement and binding attestation;
+- `_planner/` implements N-D overlap planning and late runtime binding;
+- `planner.py` preserves the planner public import surface;
 - `manifest.py` preserves the public import surface.
 
 `kv_cache` is reserved as a resource discriminator, but this change does not
