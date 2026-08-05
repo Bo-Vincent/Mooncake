@@ -33,7 +33,7 @@ NCCL M2N 与 Mooncake CUDA/TE 双机测试。canonical 配置默认禁止真实�
 从 Mooncake 仓库根目录运行：
 
 ```bash
-PYTHONPATH=mooncake-wheel:mooncake-reshard/python:mooncake-reshard \
+PYTHONPATH=mooncake-reshard/python:mooncake-reshard \
 python3 -m \
   benchmarks.heterogeneous_weight_reshard dry-run \
   --config mooncake-reshard/benchmarks/heterogeneous_weight_reshard/cases.json \
@@ -46,13 +46,14 @@ python3 -m \
 
 ## 真实执行
 
-真实执行使用单独模块，并要求运行配置显式设置 `execution_enabled=true`，同时环境
-中有 `VIN_RUN_BENCHMARK=1`。推荐在 source host 使用外层 runner；它根据配置中的
+真实执行使用单独模块，并要求先安装包含 `mooncake.reshard` 的 Mooncake wheel、
+在运行配置中显式设置 `execution_enabled=true`，同时环境中有
+`VIN_RUN_BENCHMARK=1`。推荐在 source host 使用外层 runner；它根据配置中的
 placement 通过 SSH 启动 target，并测量两个角色的完整进程 wall：
 
 ```bash
 VIN_RUN_BENCHMARK=1 \
-PYTHONPATH=mooncake-wheel:mooncake-reshard/python:mooncake-reshard \
+PYTHONPATH=mooncake-reshard \
 python3 -m \
   benchmarks.heterogeneous_weight_reshard.mooncake_distributed_benchmark \
   --config /path/to/authorized-cases.json \
@@ -71,7 +72,7 @@ host 启动 Mooncake target role：
 
 ```bash
 VIN_RUN_BENCHMARK=1 \
-PYTHONPATH=mooncake-wheel:mooncake-reshard/python:mooncake-reshard \
+PYTHONPATH=mooncake-reshard \
 python3 -m \
   benchmarks.heterogeneous_weight_reshard.mooncake_benchmark \
   --config /path/to/authorized-cases.json target \
@@ -84,7 +85,7 @@ python3 -m \
 
 ```bash
 VIN_RUN_BENCHMARK=1 \
-PYTHONPATH=mooncake-wheel:mooncake-reshard/python:mooncake-reshard \
+PYTHONPATH=mooncake-reshard \
 python3 -m \
   benchmarks.heterogeneous_weight_reshard.mooncake_benchmark \
   --config /path/to/authorized-cases.json source \
@@ -105,7 +106,7 @@ unregister 后 cudaFree。
 
 ```bash
 VIN_RUN_BENCHMARK=1 \
-PYTHONPATH=mooncake-wheel:mooncake-reshard/python:mooncake-reshard \
+PYTHONPATH=mooncake-reshard \
 python3 -m \
   benchmarks.heterogeneous_weight_reshard.m2n_benchmark \
   --config /path/to/authorized-cases.json \
