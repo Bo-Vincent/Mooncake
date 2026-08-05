@@ -13,6 +13,11 @@ ret = target.initialize(target_server_name, metadata_server, protocol, "")
 if ret != 0:
     raise RuntimeError(f"Target initialization failed with code {ret}")
 
+if metadata_server == "P2PHANDSHAKE":
+    target_server_name = (
+        target_server_name.rpartition(":")[0] + ":" + str(target.get_rpc_port())
+    )
+
 buffer_addr = target.get_first_buffer_address(target_server_name)
 if buffer_addr == 0:
     # No buffer registered, allocate a managed buffer as fallback
