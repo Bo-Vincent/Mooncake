@@ -127,6 +127,7 @@ design/architecture
 design/transfer-engine/index
 design/reshard-manifest
 design/model-weight-reshard-planner
+design/weight-group-manifest-rfc
 design/tent/overview
 design/store/mooncake-store
 design/nvme-kv-backend

@@ -28,7 +28,7 @@ the participant ID selects the executor output, not a partial target manifest.
 3. Produce a reusable `LogicalTransferPlan` without runtime addresses.
 4. Validate the required per-participant runtime bindings and bind the logical
    plan into a physical `TransferPlan`.
-5. Hand each `TransferRegion` to a backend-specific lowering adapter.
+5. Lower each `TransferRegion` to Store or Transfer Engine operations.
 
 ## Transfer Region
 
@@ -78,6 +78,15 @@ assembled. The attestation serializes only canonical placement/binding inputs;
 derived indexes are rebuilt and revalidated after a wire round trip. Store
 sources remain distinct: `WeightManifest` plus `WeightLoadPlan` authorizes the
 stored object set, while the live target still requires the same attestation.
+
+The executable plan also retains the complete target placement. Its public
+construction boundary re-checks that every selected target participant and
+fragment is covered exactly once, so truncating an otherwise internally
+consistent plan cannot authorize a partial target write. Physical target range
+sharing is accepted only for the same complete declared alias group under one
+identical runtime binding and lease scope; all other exact or partial overlaps
+fail closed. Executor lease snapshots are rebuilt from runtime fragment IDs in
+linear time, without quadratic membership scans.
 
 ## Boundaries
 
