@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from mooncake.reshard.weight import (
+    ParallelRank,
+    ParallelTopology,
+    PlacementFragment,
+    TensorDescriptor,
+    SplitAxis,
+    TopologyParticipant,
+    WeightPlacementManifest,
+    WeightPlacementPart,
+    plan_placement_transfer,
+)
+
+
+def _placement(
+    tp_size: int,
+    placement_set_id: str,
+    *,
+    canonical_fragment_ids: bool = False,
+) -> WeightPlacementManifest:
+    participants = tuple(
+        TopologyParticipant(f"{placement_set_id}-worker-{rank}", ParallelRank(tp=rank))
+        for rank in range(tp_size)
+    )
+    topology = ParallelTopology(
+        tp_size=tp_size,
+        pp_size=1,
+        ep_size=1,
+        dp_size=1,
+        participants=participants,
+    )
+    tensor = TensorDescriptor(
+        tensor_id="layers.0.weight",
+        global_shape=(8,),
+        dtype="uint8",
+        itemsize=1,
+        shard_dims=(0,),
+        layout_fingerprint="global-planner:uint8:v1",
+        parallel_axes=(SplitAxis(kind="tp", dim=0),),
+    )
+    extent = 8 // tp_size
+    parts = tuple(
+        WeightPlacementPart(
+            resource_id="model",
+            revision="revision",
+            weight_generation=9,
+            placement_set_id=placement_set_id,
+            topology_id=topology.topology_id,
+            participant_id=participant.participant_id,
+            rank=participant.rank,
+            tensors=(tensor,),
+            fragments=(
+                PlacementFragment(
+                    placement_fragment_id=(
+                        None
+                        if canonical_fragment_ids
+                        else f"{placement_set_id}-fragment-{participant.rank.tp}"
+                    ),
+                    tensor_id=tensor.tensor_id,
+                    global_offset=(participant.rank.tp * extent,),
+                    local_shape=(extent,),
+                    nbytes=extent,
+                    rank=participant.rank,
+                ),
+            ),
+        )
+        for participant in participants
+    )
+    return WeightPlacementManifest(
+        resource_id="model",
+        revision="revision",
+        weight_generation=9,
+        placement_set_id=placement_set_id,
+        topology=topology,
+        parts=parts,
+    )
+
+
+def test_planner_accepts_one_complete_source_and_target_manifest() -> None:
+    source = _placement(4, "source")
+    target = _placement(8, "target")
+
+    plan = plan_placement_transfer(source, target)
+
+    assert len(plan.operations) == 8
+    assert {item.placement_id for item in plan.source_executors} == {
+        source.placement_id
+    }
+    assert {item.placement_id for item in plan.target_executors} == {
+        target.placement_id
+    }
+
+
+def test_planner_accepts_canonical_fragment_ids_generated_by_manifest() -> None:
+    source = _placement(4, "source", canonical_fragment_ids=True)
+    target = _placement(8, "target", canonical_fragment_ids=True)
+
+    plan = plan_placement_transfer(source, target)
+
+    assert len(plan.operations) == 8
+    assert all(
+        fragment.placement_fragment_id.startswith("sha256:")
+        for fragment in source.fragments + target.fragments
+    )
