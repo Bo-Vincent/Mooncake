@@ -25,6 +25,7 @@ from .contracts import (
     TransferPlan,
     TransferRegion,
 )
+from .attestation import RuntimeBindingAttestation
 from .ownership import (
     _boxes_exactly_cover,
     _validate_local_target_inventory,
@@ -52,6 +53,8 @@ def _collect_placements(
 ) -> tuple[dict[str, TensorDescriptor], list[PlacementFragment]]:
     if not manifests:
         raise ValueError(f"{label} placement manifests must not be empty")
+    if len(manifests) != 1:
+        raise ValueError(f"{label} requires one complete WeightPlacementManifest")
     if any(not isinstance(manifest, WeightPlacementManifest) for manifest in manifests):
         raise ValueError(f"{label} placement manifests must be WeightPlacementManifest")
     resource_id = manifests[0].resource_id
@@ -93,13 +96,11 @@ def _build_executor_plans(
 ) -> tuple[ExecutorTransferPlan, ...]:
     if side not in ("source", "target"):
         raise ValueError(f"invalid executor side: {side}")
-    binding_by_placement_id = {binding.placement_id: binding for binding in bindings}
-    if len(binding_by_placement_id) != len(bindings):
-        raise ValueError(f"duplicate {side} runtime binding")
-    if set(binding_by_placement_id) != {
-        placement.placement_id for placement in placements
-    }:
-        raise ValueError(f"{side} placement and runtime binding IDs differ")
+    binding_by_participant = {
+        (binding.placement_id, binding.participant_id): binding for binding in bindings
+    }
+    if len(binding_by_participant) != len(bindings):
+        raise ValueError(f"duplicate {side} runtime binding participant")
 
     result = []
     ranks: set[ParallelRank] = set()
@@ -108,27 +109,37 @@ def _build_executor_plans(
         fragment_id = getattr(operation, side).fragment_id
         operation_indices_by_fragment.setdefault(fragment_id, []).append(index)
     for placement in placements:
-        if not placement.fragments:
-            raise ValueError(f"{side} executor placement has no fragments")
-        binding = binding_by_placement_id[placement.placement_id]
-        runtime_by_placement_fragment_id = {
-            fragment.placement_fragment_id: fragment for fragment in binding.fragments
-        }
-        fragments_by_rank: dict[ParallelRank, list[BoundWeightFragment]] = {}
-        for placement_fragment in placement.fragments:
-            runtime_fragment = runtime_by_placement_fragment_id[
-                placement_fragment.placement_fragment_id
-            ]
-            fragment = BoundWeightFragment(
-                placement=placement_fragment,
-                binding=runtime_fragment,
-                instance_id=binding.instance_id,
-                runtime_lease_id=binding.lease_id,
-                lease_generation=binding.generation,
-                owner=runtime_fragment.owner,
+        for part in placement.parts:
+            binding = binding_by_participant.get(
+                (placement.placement_id, part.participant_id)
             )
-            fragments_by_rank.setdefault(fragment.rank, []).append(fragment)
-        for rank, fragments in fragments_by_rank.items():
+            if binding is None:
+                continue
+            validate_runtime_binding(placement, binding)
+            attestation = RuntimeBindingAttestation(placement, binding)
+            if not part.fragments:
+                continue
+            runtime_by_placement_fragment_id = {
+                fragment.placement_fragment_id: fragment
+                for fragment in binding.fragments
+            }
+            fragments = [
+                BoundWeightFragment(
+                    placement=placement_fragment,
+                    binding=runtime_by_placement_fragment_id[
+                        placement_fragment.placement_fragment_id
+                    ],
+                    instance_id=binding.instance_id,
+                    runtime_lease_id=binding.lease_id,
+                    lease_generation=binding.generation,
+                    owner=runtime_by_placement_fragment_id[
+                        placement_fragment.placement_fragment_id
+                    ].owner,
+                    attestation=attestation,
+                )
+                for placement_fragment in part.fragments
+            ]
+            rank = part.rank
             workers = {fragment.worker_id for fragment in fragments}
             if len(workers) != 1:
                 raise ValueError(f"{side} executor rank spans multiple workers: {rank}")
@@ -150,6 +161,7 @@ def _build_executor_plans(
                 ExecutorTransferPlan(
                     instance_id=binding.instance_id,
                     placement_id=placement.placement_id,
+                    participant_id=part.participant_id,
                     placement_digest=placement.digest,
                     runtime_lease_id=binding.lease_id,
                     worker_id=next(iter(workers)),
@@ -160,6 +172,7 @@ def _build_executor_plans(
                         for fragment in ordered_fragments
                     ),
                     operation_indices=operation_indices,
+                    attestation=attestation,
                 )
             )
     result.sort(
@@ -172,6 +185,7 @@ def _build_placement_executor_plans(
     manifests: Sequence[WeightPlacementManifest],
     operations: Sequence[TransferOperation],
     side: str,
+    participant_ids: frozenset[str] | None = None,
 ) -> tuple[PlacementExecutorPlan, ...]:
     if side not in ("source", "target"):
         raise ValueError(f"invalid placement executor side: {side}")
@@ -187,12 +201,16 @@ def _build_placement_executor_plans(
     result = []
     ranks: set[ParallelRank] = set()
     for manifest in manifests:
-        if not manifest.fragments:
-            raise ValueError(f"{side} placement executor has no fragments")
-        fragments_by_rank: dict[ParallelRank, list[PlacementFragment]] = {}
-        for fragment in manifest.fragments:
-            fragments_by_rank.setdefault(fragment.rank, []).append(fragment)
-        for rank, fragments in fragments_by_rank.items():
+        for part in manifest.parts:
+            if (
+                participant_ids is not None
+                and part.participant_id not in participant_ids
+            ):
+                continue
+            fragments = part.fragments
+            if not fragments:
+                continue
+            rank = part.rank
             if rank in ranks:
                 raise ValueError(f"duplicate {side} placement executor rank: {rank}")
             ranks.add(rank)
@@ -206,9 +224,12 @@ def _build_placement_executor_plans(
                     for index in operation_indices_by_fragment.get(fragment_id, ())
                 )
             )
+            if not operation_indices:
+                continue
             result.append(
                 PlacementExecutorPlan(
                     placement_id=manifest.placement_id,
+                    participant_id=part.participant_id,
                     rank=rank,
                     placement_fragment_ids=fragment_ids,
                     operation_indices=operation_indices,
@@ -234,11 +255,18 @@ def resolve_executor_plans(
         raise ValueError(f"invalid executor side: {side}")
     if not executors:
         raise ValueError(f"transfer plan has no {side} executor metadata")
+    if (
+        plan.resource_id != placement.resource_id
+        or plan.revision != placement.revision
+        or plan.weight_generation != placement.weight_generation
+    ):
+        raise ValueError(f"transfer plan identity differs from {side} placement")
     validate_runtime_binding(placement, binding)
     expected_executors = tuple(
         executor
         for executor in executors
         if executor.instance_id == binding.instance_id
+        and executor.participant_id == binding.participant_id
     )
     if not expected_executors:
         raise ValueError(f"{side} executor snapshot mismatch: unknown instance")
@@ -404,15 +432,17 @@ def _logical_transfer_plan(
     *,
     source_tensors: dict[str, TensorDescriptor],
     target_tensors: dict[str, TensorDescriptor],
-    source_placements: Sequence[WeightPlacementManifest],
-    target_placements: Sequence[WeightPlacementManifest],
+    source_placement: WeightPlacementManifest | None,
+    target_placement: WeightPlacementManifest,
+    source_participant_ids: frozenset[str] | None = None,
+    target_participant_ids: frozenset[str] | None = None,
 ) -> LogicalTransferPlan:
     operations = transfer.operations
     return LogicalTransferPlan(
         resource_id=transfer.resource_id,
         revision=transfer.revision,
-        source_placements=tuple(source_placements),
-        target_placements=tuple(target_placements),
+        source_placement=source_placement,
+        target_placement=target_placement,
         source_tensors=tuple(
             sorted(source_tensors.values(), key=lambda item: item.tensor_id)
         ),
@@ -421,12 +451,20 @@ def _logical_transfer_plan(
         ),
         operations=operations,
         source_executors=(
-            _build_placement_executor_plans(source_placements, operations, "source")
-            if source_placements
+            _build_placement_executor_plans(
+                (source_placement,),
+                operations,
+                "source",
+                source_participant_ids,
+            )
+            if source_placement is not None
             else ()
         ),
         target_executors=_build_placement_executor_plans(
-            target_placements, operations, "target"
+            (target_placement,),
+            operations,
+            "target",
+            target_participant_ids,
         ),
         pipeline_routes=_build_pipeline_routes(operations),
     )

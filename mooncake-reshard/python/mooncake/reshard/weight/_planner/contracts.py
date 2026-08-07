@@ -18,6 +18,7 @@ from .geometry import (
     _fragment_itemsize,
     _validate_outer_strides,
 )
+from .attestation import RuntimeBindingAttestation
 
 
 RuntimeTensorOwner = tuple[tuple[str, int], ...]
@@ -34,6 +35,11 @@ class BoundWeightFragment:
     runtime_lease_id: str
     lease_generation: int
     owner: Any = field(default=None, compare=False, repr=False)
+    attestation: RuntimeBindingAttestation | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.placement, PlacementFragment):
@@ -58,6 +64,10 @@ class BoundWeightFragment:
             )
         if self.owner is not self.binding.owner:
             raise ValueError("bound fragment owner differs from runtime binding")
+        if self.attestation is not None and not isinstance(
+            self.attestation, RuntimeBindingAttestation
+        ):
+            raise ValueError("bound fragment runtime attestation is invalid")
 
     @property
     def placement_fragment_id(self) -> str:
@@ -148,6 +158,7 @@ class RuntimeLeaseSnapshot:
 class ExecutorTransferPlan:
     instance_id: str
     placement_id: str
+    participant_id: str
     placement_digest: str
     runtime_lease_id: str | None
     worker_id: str
@@ -155,6 +166,11 @@ class ExecutorTransferPlan:
     fragment_ids: tuple[str, ...]
     fragment_leases: tuple[RuntimeLeaseSnapshot, ...]
     operation_indices: tuple[int, ...]
+    attestation: RuntimeBindingAttestation | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fragment_ids", tuple(self.fragment_ids))
@@ -163,6 +179,7 @@ class ExecutorTransferPlan:
         if (
             not self.instance_id
             or not self.placement_id
+            or not self.participant_id
             or not self.worker_id
             or not self.fragment_ids
         ):
@@ -188,6 +205,10 @@ class ExecutorTransferPlan:
             raise ValueError("executor plan fragment lease IDs do not match")
         if any(type(index) is not int or index < 0 for index in self.operation_indices):
             raise ValueError("executor operation indices must be non-negative integers")
+        if self.attestation is not None and not isinstance(
+            self.attestation, RuntimeBindingAttestation
+        ):
+            raise ValueError("executor plan runtime attestation is invalid")
 
 
 @dataclass(frozen=True)
@@ -516,10 +537,167 @@ class TransferRegion:
 TransferOperation = Union[CopyRange, TransferRegion]
 
 
+def _validate_execution_provenance(
+    *,
+    resource_id: str,
+    revision: str,
+    weight_generation: int,
+    operations: tuple[TransferOperation, ...],
+) -> None:
+    """Require live execution fragments to come from verified bindings."""
+
+    for operation in operations:
+        fragments: tuple[tuple[str, BoundWeightFragment], ...] = (
+            ("target", operation.target),
+        )
+        fragments = (("source", operation.source), *fragments)
+        for side, fragment in fragments:
+            attestation = fragment.attestation
+            if not isinstance(attestation, RuntimeBindingAttestation):
+                raise ValueError(
+                    f"transfer plan {side} fragment lacks an attested runtime binding"
+                )
+            placement = attestation.placement
+            if (
+                placement.resource_id != resource_id
+                or placement.revision != revision
+                or placement.weight_generation != weight_generation
+            ):
+                raise ValueError(
+                    f"transfer plan identity differs from {side} placement"
+                )
+            if not attestation.validates(fragment.placement, fragment.binding):
+                raise ValueError(
+                    f"transfer plan {side} fragment differs from attested runtime binding"
+                )
+
+
+def _validate_executor_provenance(
+    *,
+    resource_id: str,
+    revision: str,
+    weight_generation: int,
+    operations: tuple[TransferOperation, ...],
+    executors: tuple[ExecutorTransferPlan, ...],
+    side: str,
+) -> None:
+    """Validate live executor routing against attested operation fragments."""
+
+    fragments = tuple(
+        operation.source if side == "source" else operation.target
+        for operation in operations
+    )
+    if not all(isinstance(fragment, BoundWeightFragment) for fragment in fragments):
+        raise ValueError(f"transfer plan {side} fragment is not runtime-bound")
+    live_fragments: tuple[BoundWeightFragment, ...] = tuple(fragments)
+    if not executors:
+        return
+
+    ExecutorKey = tuple[str, str, str, str, str, str, ParallelRank]
+    expected_indices: dict[ExecutorKey, list[int]] = {}
+    for index, fragment in enumerate(live_fragments):
+        attestation = fragment.attestation
+        if not isinstance(attestation, RuntimeBindingAttestation):
+            raise ValueError(f"transfer plan {side} fragment lacks runtime attestation")
+        binding = attestation.binding
+        placement = attestation.placement
+        key: ExecutorKey = (
+            binding.instance_id,
+            placement.placement_id,
+            binding.participant_id,
+            placement.digest,
+            binding.lease_id,
+            fragment.worker_id,
+            fragment.rank,
+        )
+        expected_indices.setdefault(key, []).append(index)
+
+    active_placement_ids = {
+        fragment.attestation.placement.placement_id
+        for fragment in live_fragments
+        if isinstance(fragment.attestation, RuntimeBindingAttestation)
+    }
+    actual_indices: dict[ExecutorKey, list[int]] = {}
+    for executor in executors:
+        if executor.runtime_lease_id is None:
+            raise ValueError(f"{side} executor is missing runtime lease provenance")
+        key: ExecutorKey = (
+            executor.instance_id,
+            executor.placement_id,
+            executor.participant_id,
+            executor.placement_digest,
+            executor.runtime_lease_id,
+            executor.worker_id,
+            executor.rank,
+        )
+        if key in actual_indices:
+            raise ValueError(f"transfer plan has duplicate {side} executor provenance")
+        attestation = executor.attestation
+        if not isinstance(attestation, RuntimeBindingAttestation):
+            raise ValueError(f"{side} executor lacks runtime attestation")
+        placement = attestation.placement
+        binding = attestation.binding
+        if (
+            placement.resource_id != resource_id
+            or placement.revision != revision
+            or placement.weight_generation != weight_generation
+            or placement.placement_id not in active_placement_ids
+        ):
+            raise ValueError(f"{side} executor attestation identity differs")
+        expected_key: ExecutorKey = (
+            binding.instance_id,
+            placement.placement_id,
+            binding.participant_id,
+            placement.digest,
+            binding.lease_id,
+            executor.worker_id,
+            executor.rank,
+        )
+        if key != expected_key:
+            raise ValueError(f"{side} executor provenance differs from attestation")
+        actual_indices[key] = list(executor.operation_indices)
+        expected_fragment_leases = tuple(
+            sorted(
+                (
+                    RuntimeLeaseSnapshot(
+                        fragment_id=runtime.fragment_id,
+                        tensor_id=placement_fragment.tensor_id,
+                        global_offset=placement_fragment.global_offset,
+                        local_shape=placement_fragment.local_shape,
+                        address=runtime.address,
+                        nbytes=runtime.nbytes,
+                        worker_id=runtime.worker_id,
+                        endpoint=runtime.endpoint,
+                        device=runtime.device,
+                        lease_generation=binding.generation,
+                    )
+                    for placement_fragment, runtime in attestation.worker_fragment_pairs(
+                        executor.worker_id
+                    )
+                ),
+                key=lambda item: item.fragment_id,
+            )
+        )
+        if executor.fragment_leases != expected_fragment_leases:
+            raise ValueError(f"{side} executor fragment provenance differs")
+
+    for key, actual in actual_indices.items():
+        expected = expected_indices.get(key)
+        if expected is None:
+            if actual:
+                raise ValueError(f"{side} executor provenance differs from operations")
+            continue
+        if sorted(actual) != sorted(expected):
+            raise ValueError(f"{side} executor provenance differs from operations")
+    if set(expected_indices) - set(actual_indices):
+        raise ValueError(f"{side} executor provenance differs from operations")
+
+
 @dataclass(frozen=True)
 class TransferPlan:
     resource_id: str
     revision: str
+    weight_generation: int
     operations: tuple[TransferOperation, ...]
     source_executors: tuple[ExecutorTransferPlan, ...] = ()
     target_executors: tuple[ExecutorTransferPlan, ...] = ()
@@ -542,6 +720,35 @@ class TransferPlan:
             for operation in self.operations
         ):
             raise ValueError("executable transfer plan source must be runtime-bound")
+        if type(self.weight_generation) is not int or self.weight_generation < 0:
+            raise ValueError("transfer plan weight_generation must be non-negative")
+        if not all(
+            isinstance(executor, ExecutorTransferPlan)
+            for executor in (*self.source_executors, *self.target_executors)
+        ):
+            raise ValueError("transfer plan has invalid canonical executor metadata")
+        _validate_execution_provenance(
+            resource_id=self.resource_id,
+            revision=self.revision,
+            weight_generation=self.weight_generation,
+            operations=self.operations,
+        )
+        _validate_executor_provenance(
+            resource_id=self.resource_id,
+            revision=self.revision,
+            weight_generation=self.weight_generation,
+            operations=self.operations,
+            executors=self.source_executors,
+            side="source",
+        )
+        _validate_executor_provenance(
+            resource_id=self.resource_id,
+            revision=self.revision,
+            weight_generation=self.weight_generation,
+            operations=self.operations,
+            executors=self.target_executors,
+            side="target",
+        )
         for executor in (*self.source_executors, *self.target_executors):
             if any(
                 index >= len(self.operations) for index in executor.operation_indices
@@ -576,6 +783,7 @@ class TransferPlan:
 @dataclass(frozen=True)
 class PlacementExecutorPlan:
     placement_id: str
+    participant_id: str
     rank: ParallelRank
     placement_fragment_ids: tuple[str, ...]
     operation_indices: tuple[int, ...]
@@ -585,7 +793,11 @@ class PlacementExecutorPlan:
             self, "placement_fragment_ids", tuple(self.placement_fragment_ids)
         )
         object.__setattr__(self, "operation_indices", tuple(self.operation_indices))
-        if not self.placement_id or not self.placement_fragment_ids:
+        if (
+            not self.placement_id
+            or not self.participant_id
+            or not self.placement_fragment_ids
+        ):
             raise ValueError("placement executor identifiers must not be empty")
         if len(self.placement_fragment_ids) != len(set(self.placement_fragment_ids)):
             raise ValueError("placement executor has duplicate fragment IDs")
@@ -599,8 +811,8 @@ class PlacementExecutorPlan:
 class LogicalTransferPlan:
     resource_id: str
     revision: str
-    source_placements: tuple[WeightPlacementManifest, ...]
-    target_placements: tuple[WeightPlacementManifest, ...]
+    source_placement: WeightPlacementManifest
+    target_placement: WeightPlacementManifest
     source_tensors: tuple[TensorDescriptor, ...]
     target_tensors: tuple[TensorDescriptor, ...]
     operations: tuple[TransferOperation, ...]
@@ -610,8 +822,6 @@ class LogicalTransferPlan:
 
     def __post_init__(self) -> None:
         for name in (
-            "source_placements",
-            "target_placements",
             "source_tensors",
             "target_tensors",
             "operations",
@@ -620,31 +830,19 @@ class LogicalTransferPlan:
             "pipeline_routes",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
-        if (
-            not self.resource_id
-            or not self.revision
-            or not self.source_placements
-            or not self.target_placements
-        ):
+        if not self.resource_id or not self.revision:
             raise ValueError("logical transfer plan identifiers must not be empty")
-        for side, placements in (
-            ("source", self.source_placements),
-            ("target", self.target_placements),
+        if not isinstance(self.target_placement, WeightPlacementManifest):
+            raise ValueError("logical transfer plan target placement is invalid")
+        if not isinstance(self.source_placement, WeightPlacementManifest):
+            raise ValueError("logical transfer plan source placement is invalid")
+        for side, placement in (
+            ("source", self.source_placement),
+            ("target", self.target_placement),
         ):
-            if any(
-                not isinstance(placement, WeightPlacementManifest)
-                for placement in placements
-            ):
-                raise ValueError(f"logical transfer plan {side} placements are invalid")
-            placement_ids = [placement.placement_id for placement in placements]
-            if len(placement_ids) != len(set(placement_ids)):
-                raise ValueError(
-                    f"logical transfer plan has duplicate {side} placement IDs"
-                )
-            if any(
+            if (
                 placement.resource_id != self.resource_id
                 or placement.revision != self.revision
-                for placement in placements
             ):
                 raise ValueError(
                     f"logical transfer plan {side} placement identity differs"
@@ -679,12 +877,16 @@ class LogicalTransferPlan:
         return sum(operation.total_bytes for operation in self.operations)
 
     @property
-    def source_placement_ids(self) -> tuple[str, ...]:
-        return tuple(placement.placement_id for placement in self.source_placements)
+    def source_placement_id(self) -> str | None:
+        return (
+            self.source_placement.placement_id
+            if self.source_placement is not None
+            else None
+        )
 
     @property
-    def target_placement_ids(self) -> tuple[str, ...]:
-        return tuple(placement.placement_id for placement in self.target_placements)
+    def target_placement_id(self) -> str:
+        return self.target_placement.placement_id
 
 
 __all__ = [
