@@ -4,12 +4,12 @@ from math import prod
 from typing import Sequence
 
 from ..._compat import _strict_zip
+from ...contracts import TensorId
 from ..manifest import OwnershipAxis, PlacementFragment, TensorDescriptor
 from .contracts import (
     RuntimeTensorOwner,
-    SourceFragment,
-    TargetFragment,
 )
+from .fragments import LogicalSourceFragment, LogicalTargetFragment
 from .geometry import _box_contains
 
 
@@ -72,7 +72,7 @@ def _boxes_exactly_cover(
 
 def _fragments_fully_cover_tensor(
     tensor: TensorDescriptor,
-    fragments: Sequence[SourceFragment | PlacementFragment],
+    fragments: Sequence[LogicalSourceFragment],
 ) -> bool:
     geometries = {
         (fragment.global_offset, fragment.local_shape): fragment
@@ -96,12 +96,14 @@ def parallel_tensor_owner(
 
 
 def _validate_target_coverage(
-    target_tensors: dict[str, TensorDescriptor],
-    target_fragments: Sequence[TargetFragment],
+    target_tensors: dict[TensorId, TensorDescriptor],
+    target_fragments: Sequence[LogicalTargetFragment],
 ) -> None:
     if not target_fragments:
         raise ValueError("target manifests have no fragments")
-    fragments_by_dp_and_tensor: dict[int, dict[str, list[TargetFragment]]] = {}
+    fragments_by_dp_and_tensor: dict[
+        int, dict[TensorId, list[LogicalTargetFragment]]
+    ] = {}
     for fragment in target_fragments:
         fragments_by_dp_and_tensor.setdefault(fragment.rank.dp, {}).setdefault(
             fragment.tensor_id, []
@@ -109,7 +111,9 @@ def _validate_target_coverage(
     dp_ranks = sorted(fragments_by_dp_and_tensor)
     for dp_rank in dp_ranks:
         for tensor in target_tensors.values():
-            fragments_by_owner: dict[RuntimeTensorOwner, list[TargetFragment]] = {}
+            fragments_by_owner: dict[
+                RuntimeTensorOwner, list[LogicalTargetFragment]
+            ] = {}
             for fragment in fragments_by_dp_and_tensor[dp_rank].get(
                 tensor.tensor_id, ()
             ):
@@ -127,18 +131,18 @@ def _validate_target_coverage(
 
 
 def complete_parallel_source_replicas(
-    source_tensors: dict[str, TensorDescriptor],
+    source_tensors: dict[TensorId, TensorDescriptor],
     source_fragments: Sequence[PlacementFragment],
-) -> dict[int, dict[str, RuntimeTensorOwner]]:
-    replicas: dict[int, dict[str, RuntimeTensorOwner]] = {}
-    fragments_by_dp_and_tensor: dict[int, dict[str, list[PlacementFragment]]] = {}
+) -> dict[int, dict[TensorId, RuntimeTensorOwner]]:
+    replicas: dict[int, dict[TensorId, RuntimeTensorOwner]] = {}
+    fragments_by_dp_and_tensor: dict[int, dict[TensorId, list[PlacementFragment]]] = {}
     for fragment in source_fragments:
         dp_rank = fragment.rank.dp
         fragments_by_dp_and_tensor.setdefault(dp_rank, {}).setdefault(
             fragment.tensor_id, []
         ).append(fragment)
     for dp_rank in sorted(fragments_by_dp_and_tensor):
-        owner_by_tensor: dict[str, RuntimeTensorOwner] = {}
+        owner_by_tensor: dict[TensorId, RuntimeTensorOwner] = {}
         complete = True
         for tensor in source_tensors.values():
             fragments_by_owner: dict[RuntimeTensorOwner, list[PlacementFragment]] = {}
@@ -169,8 +173,8 @@ def complete_parallel_source_replicas(
 
 
 def _validate_local_target_inventory(
-    target_tensors: dict[str, TensorDescriptor],
-    target_fragments: Sequence[TargetFragment],
+    target_tensors: dict[TensorId, TensorDescriptor],
+    target_fragments: Sequence[LogicalTargetFragment],
 ) -> None:
     if not target_fragments:
         raise ValueError("local target manifest has no fragments")

@@ -3,30 +3,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from ..manifest import (
-    ParallelRank,
-    PlacementFragment,
-    TensorDescriptor,
-    WeightPlacementManifest,
-    WeightRuntimeBindingManifest,
-    validate_runtime_binding,
+from ...contracts import (
+    ParticipantId,
+    PlacementFragmentId,
+    PlacementId,
+    ResourceId,
+    RevisionId,
+    RuntimeFragmentId,
+    TensorId,
 )
+from ..binding import validate_runtime_binding
+from ..placement import WeightPlacementManifest
+from ..runtime import WeightRuntimeBindingManifest
 from ..storage_manifest import StoredFragment
+from ..types import ParallelRank, PlacementFragment, TensorDescriptor
 from . import geometry
 from .contracts import (
     BoundWeightFragment,
+    ExecutableTransferOperation,
     ExecutorTransferPlan,
     LogicalTransferPlan,
+    LogicalTransferOperation,
     PipelineRouteGroup,
     PlacementExecutorPlan,
     RuntimeLeaseSnapshot,
-    SourceFragment,
-    TargetFragment,
-    TransferOperation,
     TransferPlan,
     TransferRegion,
 )
 from .attestation import RuntimeBindingAttestation
+from .fragments import LogicalSourceFragment, LogicalTargetFragment
 from .ownership import (
     _boxes_exactly_cover,
     _validate_local_target_inventory,
@@ -43,15 +48,15 @@ from .validation import (
 
 @dataclass(frozen=True)
 class _PlannedTransfer:
-    resource_id: str
-    revision: str
-    operations: tuple[TransferOperation, ...]
+    resource_id: ResourceId
+    revision: RevisionId
+    operations: tuple[LogicalTransferOperation, ...]
 
 
 def _collect_placements(
     manifests: Sequence[WeightPlacementManifest],
     label: str,
-) -> tuple[dict[str, TensorDescriptor], list[PlacementFragment]]:
+) -> tuple[dict[TensorId, TensorDescriptor], list[PlacementFragment]]:
     if not manifests:
         raise ValueError(f"{label} placement manifests must not be empty")
     if len(manifests) != 1:
@@ -60,9 +65,9 @@ def _collect_placements(
         raise ValueError(f"{label} placement manifests must be WeightPlacementManifest")
     resource_id = manifests[0].resource_id
     revision = manifests[0].revision
-    placement_ids: set[str] = set()
-    fragment_ids: set[str] = set()
-    tensors: dict[str, TensorDescriptor] = {}
+    placement_ids: set[PlacementId] = set()
+    fragment_ids: set[PlacementFragmentId] = set()
+    tensors: dict[TensorId, TensorDescriptor] = {}
     fragments: list[PlacementFragment] = []
     for manifest in manifests:
         if manifest.resource_id != resource_id or manifest.revision != revision:
@@ -92,8 +97,10 @@ def _collect_placements(
 def _build_executor_plans(
     placements: Sequence[WeightPlacementManifest],
     bindings: Sequence[WeightRuntimeBindingManifest],
-    operations: Sequence[TransferOperation],
+    operations: Sequence[ExecutableTransferOperation],
     side: str,
+    *,
+    include_inactive: bool = False,
 ) -> tuple[ExecutorTransferPlan, ...]:
     if side not in ("source", "target"):
         raise ValueError(f"invalid executor side: {side}")
@@ -103,11 +110,16 @@ def _build_executor_plans(
     if len(binding_by_participant) != len(bindings):
         raise ValueError(f"duplicate {side} runtime binding participant")
 
-    result = []
-    ranks: set[ParallelRank] = set()
-    operation_indices_by_fragment: dict[str, list[int]] = {}
+    result: list[ExecutorTransferPlan] = []
+    executor_keys: set[tuple[ParallelRank, str]] = set()
+    operation_indices_by_fragment: dict[RuntimeFragmentId, list[int]] = {}
     for index, operation in enumerate(operations):
-        fragment_id = getattr(operation, side).fragment_id
+        fragment = operation.source if side == "source" else operation.target
+        if not isinstance(fragment, BoundWeightFragment):
+            raise ValueError(
+                f"{side} executor plan requires runtime-bound operation fragments"
+            )
+        fragment_id = fragment.fragment_id
         operation_indices_by_fragment.setdefault(fragment_id, []).append(index)
     for placement in placements:
         for part in placement.parts:
@@ -140,42 +152,55 @@ def _build_executor_plans(
                 )
                 for placement_fragment in part.fragments
             ]
-            rank = part.rank
-            workers = {fragment.worker_id for fragment in fragments}
-            if len(workers) != 1:
-                raise ValueError(f"{side} executor rank spans multiple workers: {rank}")
-            if rank in ranks:
-                raise ValueError(f"duplicate {side} executor rank: {rank}")
-            ranks.add(rank)
-            ordered_fragments = sorted(
-                fragments, key=lambda fragment: fragment.fragment_id
-            )
-            fragment_ids = tuple(fragment.fragment_id for fragment in ordered_fragments)
-            operation_indices = tuple(
-                sorted(
-                    index
-                    for fragment_id in fragment_ids
-                    for index in operation_indices_by_fragment.get(fragment_id, ())
+            fragments_by_worker: dict[str, list[BoundWeightFragment]] = {}
+            for fragment in fragments:
+                fragments_by_worker.setdefault(fragment.worker_id, []).append(fragment)
+            for worker_id, worker_fragments in sorted(fragments_by_worker.items()):
+                active_fragments = tuple(
+                    fragment
+                    for fragment in worker_fragments
+                    if fragment.fragment_id in operation_indices_by_fragment
                 )
-            )
-            result.append(
-                ExecutorTransferPlan(
-                    instance_id=binding.instance_id,
-                    placement_id=placement.placement_id,
-                    participant_id=part.participant_id,
-                    placement_digest=placement.digest,
-                    runtime_lease_id=binding.lease_id,
-                    worker_id=next(iter(workers)),
-                    rank=rank,
-                    fragment_ids=fragment_ids,
-                    fragment_leases=tuple(
-                        RuntimeLeaseSnapshot.from_fragment(fragment)
-                        for fragment in ordered_fragments
-                    ),
-                    operation_indices=operation_indices,
-                    attestation=attestation,
+                if not active_fragments and not include_inactive:
+                    continue
+                ordered_fragments = sorted(
+                    worker_fragments,
+                    key=lambda fragment: fragment.fragment_id,
                 )
-            )
+                executor_key = (part.rank, worker_id)
+                if executor_key in executor_keys:
+                    raise ValueError(
+                        f"duplicate {side} executor rank and worker: {executor_key}"
+                    )
+                executor_keys.add(executor_key)
+                fragment_ids = tuple(
+                    fragment.fragment_id for fragment in ordered_fragments
+                )
+                operation_indices = tuple(
+                    sorted(
+                        index
+                        for fragment_id in fragment_ids
+                        for index in operation_indices_by_fragment.get(fragment_id, ())
+                    )
+                )
+                result.append(
+                    ExecutorTransferPlan(
+                        instance_id=binding.instance_id,
+                        placement_id=placement.placement_id,
+                        participant_id=part.participant_id,
+                        placement_digest=placement.digest,
+                        runtime_lease_id=binding.lease_id,
+                        worker_id=worker_id,
+                        rank=part.rank,
+                        fragment_ids=fragment_ids,
+                        fragment_leases=tuple(
+                            RuntimeLeaseSnapshot.from_fragment(fragment)
+                            for fragment in ordered_fragments
+                        ),
+                        operation_indices=operation_indices,
+                        attestation=attestation,
+                    )
+                )
     result.sort(
         key=lambda item: (item.rank.dp, item.rank.pp, item.rank.ep, item.rank.tp)
     )
@@ -184,22 +209,22 @@ def _build_executor_plans(
 
 def _build_placement_executor_plans(
     manifests: Sequence[WeightPlacementManifest],
-    operations: Sequence[TransferOperation],
+    operations: Sequence[LogicalTransferOperation],
     side: str,
-    participant_ids: frozenset[str] | None = None,
+    participant_ids: frozenset[ParticipantId] | None = None,
 ) -> tuple[PlacementExecutorPlan, ...]:
     if side not in ("source", "target"):
         raise ValueError(f"invalid placement executor side: {side}")
-    operation_indices_by_fragment: dict[str, list[int]] = {}
+    operation_indices_by_fragment: dict[PlacementFragmentId, list[int]] = {}
     for index, operation in enumerate(operations):
-        fragment = getattr(operation, side)
+        fragment = operation.source if side == "source" else operation.target
         if not isinstance(fragment, PlacementFragment):
-            raise ValueError(f"placement executor operation {side} is runtime-bound")
+            raise ValueError(f"placement executor operation {side} is not a placement")
         operation_indices_by_fragment.setdefault(
             fragment.placement_fragment_id, []
         ).append(index)
 
-    result = []
+    result: list[PlacementExecutorPlan] = []
     ranks: set[ParallelRank] = set()
     for manifest in manifests:
         for part in manifest.parts:
@@ -277,8 +302,36 @@ def resolve_executor_plans(
         plan.operations,
         side,
     )
-    if current_executors != expected_executors:
+    expected_active = tuple(
+        executor for executor in expected_executors if executor.operation_indices
+    )
+    expected_inactive = tuple(
+        executor for executor in expected_executors if not executor.operation_indices
+    )
+    executor_keys = [
+        (executor.rank, executor.worker_id) for executor in expected_executors
+    ]
+    if len(executor_keys) != len(set(executor_keys)):
+        raise ValueError(f"{side} executor snapshot has duplicate rank and worker")
+    if current_executors != expected_active:
         raise ValueError(f"{side} executor snapshot mismatch")
+    if expected_inactive:
+        inactive_candidates = {
+            (executor.rank, executor.worker_id): executor
+            for executor in _build_executor_plans(
+                (placement,),
+                (binding,),
+                plan.operations,
+                side,
+                include_inactive=True,
+            )
+            if not executor.operation_indices
+        }
+        if any(
+            inactive_candidates.get((executor.rank, executor.worker_id)) != executor
+            for executor in expected_inactive
+        ):
+            raise ValueError(f"{side} executor snapshot mismatch")
     return expected_executors
 
 
@@ -295,12 +348,12 @@ def resolve_executor_plan(
 
 
 def _plan_transfer(
-    resource_id: str,
-    revision: str,
-    source_tensors: dict[str, TensorDescriptor],
-    source_fragments: Sequence[SourceFragment],
-    target_tensors: dict[str, TensorDescriptor],
-    target_fragments: Sequence[TargetFragment],
+    resource_id: ResourceId,
+    revision: RevisionId,
+    source_tensors: dict[TensorId, TensorDescriptor],
+    source_fragments: Sequence[LogicalSourceFragment],
+    target_tensors: dict[TensorId, TensorDescriptor],
+    target_fragments: Sequence[LogicalTargetFragment],
     *,
     local_target: bool = False,
 ) -> _PlannedTransfer:
@@ -310,17 +363,27 @@ def _plan_transfer(
     else:
         _validate_tensor_sets(source_tensors, target_tensors)
         _validate_target_coverage(target_tensors, target_fragments)
-    placement_sources = all(
-        isinstance(fragment, PlacementFragment) for fragment in source_fragments
+    placement_source_fragments = tuple(
+        fragment
+        for fragment in source_fragments
+        if isinstance(fragment, PlacementFragment)
     )
-    stored_sources = all(
-        isinstance(fragment, StoredFragment) for fragment in source_fragments
+    stored_source_fragments = tuple(
+        fragment
+        for fragment in source_fragments
+        if isinstance(fragment, StoredFragment)
     )
-    if sum((placement_sources, stored_sources)) != 1:
+    if (
+        len(placement_source_fragments) + len(stored_source_fragments)
+        != len(source_fragments)
+        or not source_fragments
+    ):
         raise ValueError("source fragments mix placement and stored locations")
-    parallel_sources = placement_sources
+    if placement_source_fragments and stored_source_fragments:
+        raise ValueError("source fragments mix placement and stored locations")
+    parallel_sources = bool(placement_source_fragments)
     source_replicas = (
-        complete_parallel_source_replicas(source_tensors, source_fragments)
+        complete_parallel_source_replicas(source_tensors, placement_source_fragments)
         if parallel_sources
         else {}
     )
@@ -333,7 +396,10 @@ def _plan_transfer(
         if parallel_sources
         else {}
     )
-    candidates: dict[str, dict[tuple, list[SourceFragment]]] = {}
+    candidates: dict[
+        TensorId,
+        dict[geometry.GeometryKey, list[LogicalSourceFragment]],
+    ] = {}
     for fragment in source_fragments:
         candidates.setdefault(fragment.tensor_id, {}).setdefault(
             geometry._geometry_key(fragment), []
@@ -348,7 +414,7 @@ def _plan_transfer(
         for tensor_id, tensor_candidates in candidates.items()
     }
 
-    operations: list[TransferRegion] = []
+    operations: list[TransferRegion[LogicalSourceFragment, LogicalTargetFragment]] = []
     for target in sorted(target_fragments, key=lambda item: item.fragment_id):
         target_tensor = target_tensors[target.tensor_id]
         source_tensor = source_tensors.get(target.tensor_id)
@@ -356,7 +422,9 @@ def _plan_transfer(
             raise ValueError(f"missing source tensor: {target.tensor_id}")
         _validate_tensor_compatibility(source_tensor, target_tensor)
 
-        overlaps: list[tuple[tuple[int, ...], tuple[int, ...], SourceFragment]] = []
+        overlaps: list[
+            tuple[tuple[int, ...], tuple[int, ...], LogicalSourceFragment]
+        ] = []
         candidate_index = candidate_indexes.get(target.tensor_id)
         candidate_groups = (
             candidate_index.query(target) if candidate_index is not None else ()
@@ -420,7 +488,7 @@ def _plan_transfer(
 
 
 def _build_pipeline_routes(
-    operations: Sequence[TransferOperation],
+    operations: Sequence[LogicalTransferOperation | ExecutableTransferOperation],
 ) -> tuple[PipelineRouteGroup, ...]:
     indices_by_route: dict[tuple[int | None, int], list[int]] = {}
     for index, operation in enumerate(operations):
@@ -454,12 +522,12 @@ def _build_pipeline_routes(
 def _logical_transfer_plan(
     transfer: _PlannedTransfer,
     *,
-    source_tensors: dict[str, TensorDescriptor],
-    target_tensors: dict[str, TensorDescriptor],
+    source_tensors: dict[TensorId, TensorDescriptor],
+    target_tensors: dict[TensorId, TensorDescriptor],
     source_placement: WeightPlacementManifest | None,
     target_placement: WeightPlacementManifest,
-    source_participant_ids: frozenset[str] | None = None,
-    target_participant_ids: frozenset[str] | None = None,
+    source_participant_ids: frozenset[ParticipantId] | None = None,
+    target_participant_ids: frozenset[ParticipantId] | None = None,
 ) -> LogicalTransferPlan:
     operations = transfer.operations
     return LogicalTransferPlan(

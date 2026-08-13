@@ -13,6 +13,7 @@ from mooncake.reshard.weight import (
     OwnershipAxis,
     SplitAxis,
 )
+from mooncake.reshard.weight._planner.contracts import RuntimeLeaseSnapshot
 
 from .helpers import (
     RuntimeInputs,
@@ -101,7 +102,7 @@ def _flat_fragment(
     )
 
 
-def test_plan_deduplicates_identical_physical_alias_copies() -> None:
+def test_plan_preserves_identical_physical_alias_copies() -> None:
     aliases = ("embed_tokens.weight", "lm_head.weight")
     tensors = _alias_tensors()
     source = _runtime_inputs(
@@ -139,8 +140,8 @@ def test_plan_deduplicates_identical_physical_alias_copies() -> None:
 
     plan = plan_transfer(source, target)
 
-    assert len(plan.operations) == 1
-    assert plan.total_bytes == 64
+    assert len(plan.operations) == 2
+    assert plan.total_bytes == 128
 
 
 def test_plan_rejects_target_aliases_with_distinct_source_storage() -> None:
@@ -183,7 +184,7 @@ def test_plan_rejects_target_aliases_with_distinct_source_storage() -> None:
         plan_transfer(source, target)
 
 
-def test_plan_deduplicates_declared_target_alias_across_pp_sources() -> None:
+def test_plan_preserves_declared_target_aliases_across_pp_sources() -> None:
     aliases = ("embed_tokens.weight", "lm_head.weight")
     tensors = _alias_tensors()
     source = _runtime_inputs(
@@ -226,12 +227,18 @@ def test_plan_deduplicates_declared_target_alias_across_pp_sources() -> None:
 
     plan = plan_transfer(source, target)
 
-    assert len(plan.operations) == 1
-    assert plan.operations[0].tensor_id == "embed_tokens.weight"
-    assert plan.operations[0].source.worker_id == "source-pp0"
+    assert len(plan.operations) == 2
+    assert {operation.tensor_id for operation in plan.operations} == {
+        "embed_tokens.weight",
+        "lm_head.weight",
+    }
+    assert {operation.source.worker_id for operation in plan.operations} == {
+        "source-pp0",
+        "source-pp1",
+    }
 
 
-def test_plan_deduplicates_cross_dim_declared_aliases() -> None:
+def test_plan_preserves_cross_dim_declared_aliases() -> None:
     tensor_ids = ("alias.a", "alias.b")
     aliases = tensor_ids
     source_tensors = tuple(
@@ -307,7 +314,149 @@ def test_plan_deduplicates_cross_dim_declared_aliases() -> None:
 
     plan = plan_transfer(source, target)
 
-    assert len(plan.operations) == 4
-    assert {operation.tensor_id for operation in plan.operations} == {"alias.a"}
+    assert len(plan.operations) == 8
+    assert {operation.tensor_id for operation in plan.operations} == {
+        "alias.a",
+        "alias.b",
+    }
     assert plan.pipeline_routes[0].source_pp == 0
     assert plan.pipeline_routes[0].target_pp == 1
+
+
+def test_plan_rejects_alias_targets_with_distinct_runtime_lease_scopes() -> None:
+    """A physical target range cannot span independently fenced bindings."""
+
+    aliases = ("embed_tokens.weight", "lm_head.weight")
+    tensors = _alias_tensors()
+    source = _runtime_inputs(
+        resource_id="qwen3.5-0.8b",
+        tensors=tensors,
+        groups=tuple(
+            (
+                f"source-pp{pp}",
+                (
+                    (
+                        _flat_fragment(
+                            tensor.tensor_id,
+                            prefix=f"source-pp{pp}",
+                            aliases=aliases,
+                            pp=pp,
+                        ),
+                        0x10000 + pp * 0x1000,
+                    ),
+                ),
+            )
+            for pp, tensor in enumerate(tensors)
+        ),
+    )
+    target = _runtime_inputs(
+        resource_id="qwen3.5-0.8b",
+        tensors=tensors,
+        groups=tuple(
+            (
+                f"target-pp{pp}",
+                (
+                    (
+                        _flat_fragment(
+                            tensor.tensor_id,
+                            prefix=f"target-pp{pp}",
+                            aliases=aliases,
+                            pp=pp,
+                        ),
+                        0x20000,
+                    ),
+                ),
+            )
+            for pp, tensor in enumerate(tensors)
+        ),
+    )
+    target = RuntimeInputs(
+        target.placement,
+        tuple(
+            replace(
+                binding,
+                instance_id="shared-target-instance",
+                lease_id=f"target-lease-{index}",
+                fragments=(
+                    replace(
+                        binding.fragments[0],
+                        worker_id="shared-target-worker",
+                        endpoint="shared-target-worker:12345",
+                        address=0x20000,
+                        storage_address=0x20000,
+                        owner=f"target-owner-{index}",
+                    ),
+                ),
+            )
+            for index, binding in enumerate(target.bindings)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        plan_transfer(source, target)
+
+
+def test_bound_participant_lease_collection_is_linear(monkeypatch) -> None:
+    """Executor provenance must not use repeated list-membership scans."""
+
+    fragment_count = 32
+    tensors = tuple(
+        replace(
+            descriptor(),
+            tensor_id=f"layers.{index}.mlp.down_proj.weight",
+            global_shape=(32,),
+            shard_dims=(),
+            layer_id=None,
+            expert_id=None,
+            layout_fingerprint="sglang:qwen3.5:linear-lease-scan:v1",
+            parallel_axes=(OwnershipAxis(kind="pp"),),
+        )
+        for index in range(fragment_count)
+    )
+    source = _runtime_inputs(
+        resource_id="qwen3.5-0.8b",
+        tensors=tensors,
+        groups=(
+            (
+                "source",
+                tuple(
+                    (
+                        _flat_fragment(tensor.tensor_id, prefix="source", aliases=()),
+                        0x10000 + index * 0x1000,
+                    )
+                    for index, tensor in enumerate(tensors)
+                ),
+            ),
+        ),
+    )
+    target = _runtime_inputs(
+        resource_id="qwen3.5-0.8b",
+        tensors=tensors,
+        groups=(
+            (
+                "target",
+                tuple(
+                    (
+                        _flat_fragment(tensor.tensor_id, prefix="target", aliases=()),
+                        0x40000 + index * 0x1000,
+                    )
+                    for index, tensor in enumerate(tensors)
+                ),
+            ),
+        ),
+    )
+
+    comparisons = 0
+    original_eq = RuntimeLeaseSnapshot.__eq__
+
+    def counting_eq(self, other):
+        nonlocal comparisons
+        comparisons += 1
+        return original_eq(self, other)
+
+    monkeypatch.setattr(RuntimeLeaseSnapshot, "__eq__", counting_eq)
+
+    plan = plan_transfer(source, target)
+
+    assert len(plan.operations) == fragment_count
+    assert comparisons < fragment_count * 8

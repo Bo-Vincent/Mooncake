@@ -2,13 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import prod
-from typing import Any, Iterable, Union
+from typing import Generic, Iterable, TypeAlias, TypeVar, cast
 
 from ..._compat import _strict_zip
+from ...contracts import (
+    LeaseId,
+    ParticipantId,
+    PlacementFragmentId,
+    PlacementId,
+    ResourceId,
+    RevisionId,
+    RuntimeFragmentId,
+    RuntimeInstanceId,
+    TensorId,
+)
 from ..manifest import (
     ParallelRank,
     PlacementFragment,
-    RuntimeBindingFragment,
     TensorDescriptor,
     WeightPlacementManifest,
 )
@@ -20,117 +30,25 @@ from .geometry import (
     _validate_outer_strides,
 )
 from .attestation import RuntimeBindingAttestation
+from .fragments import (
+    BoundWeightFragment,
+    ExecutableSourceFragment,
+    ExecutableTargetFragment,
+    GeometryFragment,
+    LogicalSourceFragment,
+    LogicalTargetFragment,
+)
 
 
 RuntimeTensorOwner = tuple[tuple[str, int], ...]
-_MAX_U64 = (1 << 64) - 1
-
-
-@dataclass(frozen=True)
-class BoundWeightFragment:
-    """Planner-local physical view of one logical placement fragment."""
-
-    placement: PlacementFragment
-    binding: RuntimeBindingFragment
-    instance_id: str
-    runtime_lease_id: str
-    lease_generation: int
-    owner: Any = field(default=None, compare=False, repr=False)
-    attestation: RuntimeBindingAttestation | None = field(
-        default=None,
-        compare=False,
-        repr=False,
-    )
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.placement, PlacementFragment):
-            raise ValueError("bound fragment placement is invalid")
-        if not isinstance(self.binding, RuntimeBindingFragment):
-            raise ValueError("bound fragment runtime binding is invalid")
-        if self.placement.placement_fragment_id != self.binding.placement_fragment_id:
-            raise ValueError("bound fragment placement identity differs")
-        if self.placement.nbytes != self.binding.nbytes:
-            raise ValueError("bound fragment byte size differs")
-        for name in ("instance_id", "runtime_lease_id"):
-            value = getattr(self, name)
-            if type(value) is not str or not value:
-                raise ValueError(f"bound fragment {name} must be non-empty")
-        if (
-            type(self.lease_generation) is not int
-            or self.lease_generation < 0
-            or self.lease_generation > _MAX_U64
-        ):
-            raise ValueError(
-                "bound fragment lease_generation must fit in an unsigned 64-bit integer"
-            )
-        if self.owner is not self.binding.owner:
-            raise ValueError("bound fragment owner differs from runtime binding")
-        if self.attestation is not None and not isinstance(
-            self.attestation, RuntimeBindingAttestation
-        ):
-            raise ValueError("bound fragment runtime attestation is invalid")
-
-    @property
-    def placement_fragment_id(self) -> str:
-        return self.placement.placement_fragment_id
-
-    @property
-    def fragment_id(self) -> str:
-        return self.binding.fragment_id
-
-    @property
-    def tensor_id(self) -> str:
-        return self.placement.tensor_id
-
-    @property
-    def global_offset(self) -> tuple[int, ...]:
-        return self.placement.global_offset
-
-    @property
-    def local_shape(self) -> tuple[int, ...]:
-        return self.placement.local_shape
-
-    @property
-    def nbytes(self) -> int:
-        return self.binding.nbytes
-
-    @property
-    def rank(self) -> ParallelRank:
-        return self.placement.rank
-
-    @property
-    def aliases(self) -> tuple[str, ...]:
-        return self.placement.aliases
-
-    @property
-    def address(self) -> int:
-        return self.binding.address
-
-    @property
-    def worker_id(self) -> str:
-        return self.binding.worker_id
-
-    @property
-    def endpoint(self) -> str:
-        return self.binding.endpoint
-
-    @property
-    def device(self) -> str:
-        return self.binding.device
-
-
-SourceFragment = Union[
-    BoundWeightFragment,
-    StoredFragment,
-    PlacementFragment,
-]
-TargetFragment = Union[BoundWeightFragment, PlacementFragment]
+_SourceFragmentT = TypeVar("_SourceFragmentT", bound=GeometryFragment)
+_TargetFragmentT = TypeVar("_TargetFragmentT", bound=GeometryFragment)
 
 
 @dataclass(frozen=True)
 class RuntimeLeaseSnapshot:
-    fragment_id: str
-    tensor_id: str
+    fragment_id: RuntimeFragmentId
+    tensor_id: TensorId
     global_offset: tuple[int, ...]
     local_shape: tuple[int, ...]
     address: int
@@ -158,14 +76,14 @@ class RuntimeLeaseSnapshot:
 
 @dataclass(frozen=True)
 class ExecutorTransferPlan:
-    instance_id: str
-    placement_id: str
-    participant_id: str
+    instance_id: RuntimeInstanceId
+    placement_id: PlacementId
+    participant_id: ParticipantId
     placement_digest: str
-    runtime_lease_id: str | None
+    runtime_lease_id: LeaseId | None
     worker_id: str
     rank: ParallelRank
-    fragment_ids: tuple[str, ...]
+    fragment_ids: tuple[RuntimeFragmentId, ...]
     fragment_leases: tuple[RuntimeLeaseSnapshot, ...]
     operation_indices: tuple[int, ...]
     attestation: RuntimeBindingAttestation | None = field(
@@ -234,10 +152,10 @@ class PipelineRouteGroup:
 
 
 @dataclass(frozen=True)
-class CopyRange:
-    tensor_id: str
-    source: SourceFragment
-    target: TargetFragment
+class CopyRange(Generic[_SourceFragmentT, _TargetFragmentT]):
+    tensor_id: TensorId
+    source: _SourceFragmentT
+    target: _TargetFragmentT
     source_offset: int
     target_offset: int
     nbytes: int
@@ -304,10 +222,10 @@ class CopyRange:
 
 
 @dataclass(frozen=True)
-class TransferRegion:
-    tensor_id: str
-    source: SourceFragment
-    target: TargetFragment
+class TransferRegion(Generic[_SourceFragmentT, _TargetFragmentT]):
+    tensor_id: TensorId
+    source: _SourceFragmentT
+    target: _TargetFragmentT
     overlap_offset: tuple[int, ...]
     overlap_shape: tuple[int, ...]
     source_base_offset: int
@@ -538,15 +456,128 @@ class TransferRegion:
                 return
 
 
-TransferOperation = Union[CopyRange, TransferRegion]
+LogicalCopyRange: TypeAlias = CopyRange[
+    LogicalSourceFragment,
+    LogicalTargetFragment,
+]
+LogicalTransferRegion: TypeAlias = TransferRegion[
+    LogicalSourceFragment,
+    LogicalTargetFragment,
+]
+LogicalTransferOperation: TypeAlias = LogicalCopyRange | LogicalTransferRegion
+
+ExecutableCopyRange: TypeAlias = CopyRange[
+    ExecutableSourceFragment,
+    ExecutableTargetFragment,
+]
+ExecutableTransferRegion: TypeAlias = TransferRegion[
+    ExecutableSourceFragment,
+    ExecutableTargetFragment,
+]
+ExecutableTransferOperation: TypeAlias = ExecutableCopyRange | ExecutableTransferRegion
+
+LiveTransferOperation: TypeAlias = (
+    CopyRange[BoundWeightFragment, BoundWeightFragment]
+    | TransferRegion[BoundWeightFragment, BoundWeightFragment]
+)
+StoredLoadOperation: TypeAlias = (
+    CopyRange[StoredFragment, BoundWeightFragment]
+    | TransferRegion[StoredFragment, BoundWeightFragment]
+)
+ExecutorKey: TypeAlias = tuple[
+    RuntimeInstanceId,
+    PlacementId,
+    ParticipantId,
+    str,
+    LeaseId,
+    str,
+    ParallelRank,
+]
+
+
+def _is_canonical_operation(value: object) -> bool:
+    return isinstance(value, (CopyRange, TransferRegion))
+
+
+def _validate_executable_operation(value: object) -> None:
+    if not _is_canonical_operation(value):
+        raise ValueError("transfer plan requires a canonical transfer operation")
+    operation = cast(ExecutableTransferOperation, value)
+    if not isinstance(operation.target, BoundWeightFragment):
+        raise ValueError("executable transfer plan target must be runtime-bound")
+    if not isinstance(operation.source, (BoundWeightFragment, StoredFragment)):
+        raise ValueError("executable transfer plan source must be runtime-bound")
+    operation.validate_bounds()
+
+
+def _validate_logical_operation(
+    value: object,
+    source_has_placement: bool,
+) -> None:
+    if not _is_canonical_operation(value):
+        raise ValueError(
+            "logical transfer plan requires a canonical transfer operation"
+        )
+    operation = cast(LogicalTransferOperation, value)
+    if not isinstance(operation.target, PlacementFragment):
+        raise ValueError("logical transfer plan target must be a placement")
+    if source_has_placement:
+        if not isinstance(operation.source, PlacementFragment):
+            raise ValueError("logical transfer plan source must be a placement")
+    elif not isinstance(operation.source, StoredFragment):
+        raise ValueError("logical transfer plan source has no placement")
+    operation.validate_bounds()
+
+
+def _validate_source_target_allocations_do_not_overlap(
+    operations: tuple[ExecutableTransferOperation, ...],
+) -> None:
+    source_allocations: set[tuple[RuntimeInstanceId, str, str, int, int]] = set()
+    target_allocations: set[tuple[RuntimeInstanceId, str, str, int, int]] = set()
+    for operation in operations:
+        if isinstance(operation.source, BoundWeightFragment):
+            source_allocations.add(
+                (
+                    operation.source.instance_id,
+                    operation.source.worker_id,
+                    operation.source.device,
+                    operation.source.binding.storage_address,
+                    operation.source.binding.storage_nbytes,
+                )
+            )
+        if isinstance(operation.target, BoundWeightFragment):
+            target_allocations.add(
+                (
+                    operation.target.instance_id,
+                    operation.target.worker_id,
+                    operation.target.device,
+                    operation.target.binding.storage_address,
+                    operation.target.binding.storage_nbytes,
+                )
+            )
+
+    for source in source_allocations:
+        source_space = source[:3]
+        source_start, source_size = source[3:]
+        source_end = source_start + source_size
+        for target in target_allocations:
+            if target[:3] != source_space:
+                continue
+            target_start, target_size = target[3:]
+            target_end = target_start + target_size
+            if source_start < target_end and target_start < source_end:
+                raise ValueError(
+                    "source and target runtime storage allocations overlap in "
+                    f"address space {source_space}; in-place reshard is unsupported"
+                )
 
 
 def _validate_execution_provenance(
     *,
-    resource_id: str,
-    revision: str,
+    resource_id: ResourceId,
+    revision: RevisionId,
     weight_generation: int,
-    operations: tuple[TransferOperation, ...],
+    operations: tuple[ExecutableTransferOperation, ...],
 ) -> None:
     """Require live execution fragments to come from verified bindings."""
 
@@ -554,7 +585,8 @@ def _validate_execution_provenance(
         fragments: tuple[tuple[str, BoundWeightFragment], ...] = (
             ("target", operation.target),
         )
-        fragments = (("source", operation.source), *fragments)
+        if isinstance(operation.source, BoundWeightFragment):
+            fragments = (("source", operation.source), *fragments)
         for side, fragment in fragments:
             attestation = fragment.attestation
             if not isinstance(attestation, RuntimeBindingAttestation):
@@ -578,10 +610,10 @@ def _validate_execution_provenance(
 
 def _validate_executor_provenance(
     *,
-    resource_id: str,
-    revision: str,
+    resource_id: ResourceId,
+    revision: RevisionId,
     weight_generation: int,
-    operations: tuple[TransferOperation, ...],
+    operations: tuple[ExecutableTransferOperation, ...],
     executors: tuple[ExecutorTransferPlan, ...],
     side: str,
 ) -> None:
@@ -591,13 +623,25 @@ def _validate_executor_provenance(
         operation.source if side == "source" else operation.target
         for operation in operations
     )
-    if not all(isinstance(fragment, BoundWeightFragment) for fragment in fragments):
+    has_stored_source = any(
+        isinstance(fragment, StoredFragment) for fragment in fragments
+    )
+    if has_stored_source:
+        if side != "source" or not all(
+            isinstance(fragment, StoredFragment) for fragment in fragments
+        ):
+            raise ValueError("transfer plan mixes stored and live source fragments")
+        if executors:
+            raise ValueError("stored source must not have live executor provenance")
+        return
+    live_fragments = tuple(
+        fragment for fragment in fragments if isinstance(fragment, BoundWeightFragment)
+    )
+    if len(live_fragments) != len(fragments):
         raise ValueError(f"transfer plan {side} fragment is not runtime-bound")
-    live_fragments: tuple[BoundWeightFragment, ...] = tuple(fragments)
     if not executors:
         return
 
-    ExecutorKey = tuple[str, str, str, str, str, str, ParallelRank]
     expected_indices: dict[ExecutorKey, list[int]] = {}
     for index, fragment in enumerate(live_fragments):
         attestation = fragment.attestation
@@ -699,10 +743,11 @@ def _validate_executor_provenance(
 
 @dataclass(frozen=True)
 class TransferPlan:
-    resource_id: str
-    revision: str
+    resource_id: ResourceId
+    revision: RevisionId
     weight_generation: int
-    operations: tuple[TransferOperation, ...]
+    target_placement: WeightPlacementManifest
+    operations: tuple[ExecutableTransferOperation, ...]
     source_executors: tuple[ExecutorTransferPlan, ...] = ()
     target_executors: tuple[ExecutorTransferPlan, ...] = ()
     pipeline_routes: tuple[PipelineRouteGroup, ...] = ()
@@ -714,18 +759,10 @@ class TransferPlan:
         object.__setattr__(self, "pipeline_routes", tuple(self.pipeline_routes))
         if not self.resource_id or not self.revision:
             raise ValueError("transfer plan identifiers must not be empty")
-        if any(
-            not isinstance(operation.target, BoundWeightFragment)
-            for operation in self.operations
-        ):
-            raise ValueError("executable transfer plan target must be runtime-bound")
-        if any(
-            not isinstance(operation.source, (BoundWeightFragment, StoredFragment))
-            for operation in self.operations
-        ):
-            raise ValueError("executable transfer plan source must be runtime-bound")
         if type(self.weight_generation) is not int or self.weight_generation < 0:
             raise ValueError("transfer plan weight_generation must be non-negative")
+        for operation in self.operations:
+            _validate_executable_operation(operation)
         if not all(
             isinstance(executor, ExecutorTransferPlan)
             for executor in (*self.source_executors, *self.target_executors)
@@ -737,6 +774,14 @@ class TransferPlan:
             weight_generation=self.weight_generation,
             operations=self.operations,
         )
+        if not isinstance(self.target_placement, WeightPlacementManifest):
+            raise ValueError("transfer plan target placement is invalid")
+        if (
+            self.target_placement.resource_id != self.resource_id
+            or self.target_placement.revision != self.revision
+            or self.target_placement.weight_generation != self.weight_generation
+        ):
+            raise ValueError("transfer plan target placement identity differs")
         _validate_executor_provenance(
             resource_id=self.resource_id,
             revision=self.revision,
@@ -753,13 +798,24 @@ class TransferPlan:
             executors=self.target_executors,
             side="target",
         )
+        _validate_source_target_allocations_do_not_overlap(self.operations)
+        # Re-check the complete target placement at the public executable-plan
+        # boundary. Binding output can be serialized or reconstructed, so the
+        # executor snapshot alone cannot be trusted as a coverage proof.
+        from .validation import (
+            _validate_bound_target_coverage,
+            _validate_target_physical_ranges,
+        )
+
+        _validate_target_physical_ranges(self.operations)
+        _validate_bound_target_coverage(self)
         for executor in (*self.source_executors, *self.target_executors):
             if any(
                 index >= len(self.operations) for index in executor.operation_indices
             ):
                 raise ValueError("executor operation index is out of range")
-        route_indices = []
-        route_keys = set()
+        route_indices: list[int] = []
+        route_keys: set[tuple[int | None, int]] = set()
         for route in self.pipeline_routes:
             if not isinstance(route, PipelineRouteGroup):
                 raise ValueError("transfer plan has invalid pipeline route metadata")
@@ -780,16 +836,16 @@ class TransferPlan:
         return sum(operation.total_bytes for operation in self.operations)
 
     @property
-    def regions(self) -> tuple[TransferOperation, ...]:
+    def regions(self) -> tuple[ExecutableTransferOperation, ...]:
         return self.operations
 
 
 @dataclass(frozen=True)
 class PlacementExecutorPlan:
-    placement_id: str
-    participant_id: str
+    placement_id: PlacementId
+    participant_id: ParticipantId
     rank: ParallelRank
-    placement_fragment_ids: tuple[str, ...]
+    placement_fragment_ids: tuple[PlacementFragmentId, ...]
     operation_indices: tuple[int, ...]
 
     def __post_init__(self) -> None:
@@ -809,31 +865,30 @@ class PlacementExecutorPlan:
             raise ValueError(
                 "placement executor operation indices must be non-negative integers"
             )
+        if not self.operation_indices:
+            raise ValueError("placement executor operation indices must not be empty")
 
 
 @dataclass(frozen=True)
 class LogicalTransferPlan:
-    resource_id: str
-    revision: str
+    resource_id: ResourceId
+    revision: RevisionId
     source_placement: WeightPlacementManifest | None
     target_placement: WeightPlacementManifest
     source_tensors: tuple[TensorDescriptor, ...]
     target_tensors: tuple[TensorDescriptor, ...]
-    operations: tuple[TransferOperation, ...]
+    operations: tuple[LogicalTransferOperation, ...]
     source_executors: tuple[PlacementExecutorPlan, ...] = ()
     target_executors: tuple[PlacementExecutorPlan, ...] = ()
     pipeline_routes: tuple[PipelineRouteGroup, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in (
-            "source_tensors",
-            "target_tensors",
-            "operations",
-            "source_executors",
-            "target_executors",
-            "pipeline_routes",
-        ):
-            object.__setattr__(self, name, tuple(getattr(self, name)))
+        object.__setattr__(self, "source_tensors", tuple(self.source_tensors))
+        object.__setattr__(self, "target_tensors", tuple(self.target_tensors))
+        object.__setattr__(self, "operations", tuple(self.operations))
+        object.__setattr__(self, "source_executors", tuple(self.source_executors))
+        object.__setattr__(self, "target_executors", tuple(self.target_executors))
+        object.__setattr__(self, "pipeline_routes", tuple(self.pipeline_routes))
         if not self.resource_id or not self.revision:
             raise ValueError("logical transfer plan identifiers must not be empty")
         if not isinstance(self.target_placement, WeightPlacementManifest):
@@ -853,42 +908,62 @@ class LogicalTransferPlan:
                 raise ValueError(
                     f"logical transfer plan {side} placement identity differs"
                 )
-        if self.source_placement is not None and any(
-            not isinstance(operation.source, PlacementFragment)
-            for operation in self.operations
+        if self.source_placement is not None and (
+            self.source_placement.weight_generation
+            != self.target_placement.weight_generation
         ):
-            raise ValueError("logical transfer plan source must be a placement")
-        if self.source_placement is None and any(
-            not isinstance(operation.source, StoredFragment)
-            for operation in self.operations
+            raise ValueError(
+                "logical transfer plan source and target weight_generation differs"
+            )
+        for operation in self.operations:
+            _validate_logical_operation(operation, self.source_placement is not None)
+        if not all(
+            isinstance(executor, PlacementExecutorPlan)
+            for executor in (*self.source_executors, *self.target_executors)
         ):
-            raise ValueError("logical transfer plan source has no placement")
-        if any(
-            not isinstance(operation.target, PlacementFragment)
-            for operation in self.operations
+            raise ValueError(
+                "logical transfer plan has invalid canonical executor metadata"
+            )
+        if not all(
+            isinstance(route, PipelineRouteGroup) for route in self.pipeline_routes
         ):
-            raise ValueError("logical transfer plan target must be a placement")
+            raise ValueError(
+                "logical transfer plan has invalid pipeline route metadata"
+            )
         for executor in (*self.source_executors, *self.target_executors):
             if any(
                 index >= len(self.operations) for index in executor.operation_indices
             ):
                 raise ValueError("logical executor operation index is out of range")
-        route_indices = [
+        route_indices: list[int] = [
             index for route in self.pipeline_routes for index in route.operation_indices
         ]
+        route_keys: set[tuple[int | None, int]] = set()
+        for route in self.pipeline_routes:
+            key = (route.source_pp, route.target_pp)
+            if key in route_keys:
+                raise ValueError(
+                    "logical transfer plan has duplicate pipeline route groups"
+                )
+            route_keys.add(key)
         if self.pipeline_routes and sorted(route_indices) != list(
             range(len(self.operations))
         ):
             raise ValueError(
                 "logical pipeline routes must cover every operation exactly once"
             )
+        # Keep construction strict without making the data-contract module own
+        # planner geometry validation.
+        from .validation import _validate_logical_target_coverage
+
+        _validate_logical_target_coverage(self)
 
     @property
     def total_bytes(self) -> int:
         return sum(operation.total_bytes for operation in self.operations)
 
     @property
-    def source_placement_id(self) -> str | None:
+    def source_placement_id(self) -> PlacementId | None:
         return (
             self.source_placement.placement_id
             if self.source_placement is not None
@@ -896,7 +971,7 @@ class LogicalTransferPlan:
         )
 
     @property
-    def target_placement_id(self) -> str:
+    def target_placement_id(self) -> PlacementId:
         return self.target_placement.placement_id
 
 
@@ -909,9 +984,14 @@ __all__ = [
     "PlacementExecutorPlan",
     "RuntimeLeaseSnapshot",
     "RuntimeTensorOwner",
-    "SourceFragment",
-    "TargetFragment",
-    "TransferOperation",
+    "ExecutableCopyRange",
+    "ExecutableTransferOperation",
+    "ExecutableTransferRegion",
+    "LiveTransferOperation",
+    "LogicalCopyRange",
+    "LogicalTransferOperation",
+    "LogicalTransferRegion",
+    "StoredLoadOperation",
     "TransferPlan",
     "TransferRegion",
 ]
