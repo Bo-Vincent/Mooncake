@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import replace
 import pickle
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from mooncake.reshard.contracts import ResourceId, RevisionId
 from mooncake.reshard.weight import (
     bind_logical_transfer_plan,
     plan_placement_transfer,
+    plan_placement_transfer_to_local_target,
 )
 from mooncake.reshard.weight._planner.core import resolve_executor_plans
 from mooncake.reshard.weight._planner.contracts import (
@@ -85,7 +87,7 @@ def test_bind_accepts_participant_local_source_generations() -> None:
     }
 
 
-def test_binding_preserves_nd_region_geometry() -> None:
+def test_binding_preserves_n_dim_region_geometry() -> None:
     sources = tp_manifests(
         tp=2,
         pp_rank=0,
@@ -128,6 +130,235 @@ def test_binding_preserves_nd_region_geometry() -> None:
         assert live_operation.outer_loop_counts == logical_operation.outer_loop_counts
         assert live_operation.source_strides == logical_operation.source_strides
         assert live_operation.target_strides == logical_operation.target_strides
+
+
+def test_bind_rejects_logical_plan_with_target_coverage_gap() -> None:
+    """A forged logical plan must not leave a target shard partially written."""
+
+    sources = tp_manifests(
+        tp=4,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    targets = tp_manifests(
+        tp=2,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    logical = plan_placement_transfer(sources.placement, targets.placement)
+
+    # Every TP2 target shard normally receives two source overlaps.  Drop one
+    # target-TP0 overlap, then keep every executor and PP-route index coherent.
+    kept_indices = tuple(
+        index
+        for index, operation in enumerate(logical.operations)
+        if not (operation.target.rank.tp == 0 and operation.source.rank.tp == 0)
+    )
+    remapped_indices = {old: new for new, old in enumerate(kept_indices)}
+
+    def remap(items):
+        return tuple(
+            replace(
+                item,
+                operation_indices=tuple(
+                    remapped_indices[index]
+                    for index in item.operation_indices
+                    if index in remapped_indices
+                ),
+            )
+            for item in items
+            if any(index in remapped_indices for index in item.operation_indices)
+        )
+
+    truncated_values = {
+        "operations": tuple(logical.operations[index] for index in kept_indices),
+        "source_executors": remap(logical.source_executors),
+        "target_executors": remap(logical.target_executors),
+        "pipeline_routes": remap(logical.pipeline_routes),
+    }
+
+    with pytest.raises(ValueError, match="target fragment is not fully covered"):
+        replace(logical, **truncated_values)
+
+    # Binding must independently reject a deserialized/reconstructed immutable
+    # value that bypassed constructor validation.
+    reconstructed = copy(logical)
+    for name, value in truncated_values.items():
+        object.__setattr__(reconstructed, name, value)
+
+    with pytest.raises(ValueError, match="target fragment is not fully covered"):
+        bind_logical_transfer_plan(
+            reconstructed,
+            targets.bindings,
+            source_bindings=sources.bindings,
+        )
+
+
+def test_public_transfer_plan_rejects_bound_target_coverage_gap() -> None:
+    """The public executable-plan boundary must re-check target coverage."""
+
+    sources = tp_manifests(
+        tp=2,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    targets = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    plan = plan_transfer(sources, targets)
+    kept_indices = tuple(
+        index
+        for index, operation in enumerate(plan.operations)
+        if operation.source.rank.tp == 1
+    )
+    remapped_indices = {old: new for new, old in enumerate(kept_indices)}
+
+    def remap(items):
+        return tuple(
+            replace(
+                item,
+                operation_indices=tuple(
+                    remapped_indices[index]
+                    for index in item.operation_indices
+                    if index in remapped_indices
+                ),
+            )
+            for item in items
+            if any(index in remapped_indices for index in item.operation_indices)
+        )
+
+    with pytest.raises(ValueError, match="bound target fragment is not fully covered"):
+        replace(
+            plan,
+            operations=tuple(plan.operations[index] for index in kept_indices),
+            source_executors=remap(plan.source_executors),
+            target_executors=remap(plan.target_executors),
+            pipeline_routes=remap(plan.pipeline_routes),
+        )
+
+
+def test_public_transfer_plan_rejects_empty_target_selection() -> None:
+    source = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    target = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    plan = plan_transfer(source, target)
+
+    with pytest.raises(ValueError, match="bound plan has no target executor metadata"):
+        replace(
+            plan,
+            operations=(),
+            source_executors=(),
+            target_executors=(),
+            pipeline_routes=(),
+        )
+
+
+def test_bind_accepts_a_complete_local_target_plan() -> None:
+    sources = tp_manifests(
+        tp=4,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    targets = tp_manifests(
+        tp=2,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    target_binding = targets.bindings[0]
+    logical = plan_placement_transfer_to_local_target(
+        sources.placement,
+        targets.placement,
+        target_binding.participant_id,
+    )
+
+    plan = bind_logical_transfer_plan(
+        logical,
+        (target_binding,),
+        source_bindings=sources.bindings,
+    )
+
+    assert {operation.target.rank.tp for operation in plan.operations} == {0}
+
+
+def test_logical_plan_rejects_legacy_ranges_that_do_not_cover_target() -> None:
+    source = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    target = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    logical = plan_placement_transfer(source.placement, target.placement)
+    region = logical.operations[0]
+    legacy_gap = CopyRange(
+        tensor_id=region.tensor_id,
+        source=region.source,
+        target=region.target,
+        source_offset=region.source_offset,
+        target_offset=region.target_offset,
+        nbytes=region.nbytes - 2,
+    )
+
+    with pytest.raises(ValueError, match="target fragment is not fully covered"):
+        replace(logical, operations=(legacy_gap,))
+
+
+def test_bind_rejects_duck_typed_logical_plan() -> None:
+    sources = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    targets = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    logical = plan_placement_transfer(sources.placement, targets.placement)
+    duck_plan = SimpleNamespace(**vars(logical))
+
+    with pytest.raises(ValueError, match="LogicalTransferPlan"):
+        bind_logical_transfer_plan(
+            duck_plan,
+            targets.bindings,
+            source_bindings=sources.bindings,
+        )
 
 
 def test_bind_rejects_duck_typed_runtime_binding() -> None:
@@ -412,7 +643,46 @@ def test_public_transfer_plan_rejects_unattested_runtime_view() -> None:
             resource_id=plan.resource_id,
             revision=plan.revision,
             weight_generation=plan.weight_generation,
+            target_placement=target.placement,
             operations=(replace(operation, source=malformed_source),),
+        )
+
+
+def test_public_transfer_plan_rejects_attested_overlapping_target_ranges() -> None:
+    """Attestation does not waive physical target-range validation."""
+
+    source = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    target = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    plan = plan_transfer(source, target)
+    operation = plan.operations[0]
+    overlapping = CopyRange(
+        tensor_id=operation.tensor_id,
+        source=operation.source,
+        target=operation.target,
+        source_offset=operation.source_offset,
+        target_offset=operation.target_offset + 2,
+        nbytes=operation.nbytes - 2,
+    )
+
+    with pytest.raises(ValueError, match="conflicting target physical range"):
+        TransferPlan(
+            resource_id=plan.resource_id,
+            revision=plan.revision,
+            weight_generation=plan.weight_generation,
+            target_placement=target.placement,
+            operations=(operation, overlapping),
         )
 
 

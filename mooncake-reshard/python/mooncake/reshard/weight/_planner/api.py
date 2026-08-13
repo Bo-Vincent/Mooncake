@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ...contracts import ParticipantId
 from ..manifest import WeightPlacementManifest
 from ..storage_manifest import WeightManifest
 from .contracts import LogicalTransferPlan
@@ -52,7 +53,7 @@ def plan_placement_transfer(
 def plan_placement_transfer_to_local_target(
     source_placement: WeightPlacementManifest,
     target_placement: WeightPlacementManifest,
-    target_participant_id: str | None = None,
+    target_participant_id: ParticipantId | None = None,
 ) -> LogicalTransferPlan:
     """Plan one target executor using address-free source and target layouts."""
 

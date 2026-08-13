@@ -2,18 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import prod
-from typing import Sequence, Union
+from typing import TYPE_CHECKING, Sequence, TypeAlias
 
 from ..._compat import _strict_zip
-from ..manifest import (
-    PlacementFragment,
-    TensorDescriptor,
-)
+from ...contracts import TensorId
+from ..types import TensorDescriptor
 from ..storage_manifest import StoredFragment
+from .fragments import (
+    GeometryFragment,
+    LogicalSourceFragment,
+    LogicalTargetFragment,
+)
 
-
-SourceFragment = Union[StoredFragment, PlacementFragment]
-TargetFragment = PlacementFragment
+if TYPE_CHECKING:
+    from .contracts import TransferRegion
 
 
 def _box_contains(
@@ -34,7 +36,7 @@ def _box_contains(
     )
 
 
-def _fragment_itemsize(fragment: SourceFragment | PlacementFragment) -> int:
+def _fragment_itemsize(fragment: GeometryFragment) -> int:
     elements = prod(fragment.local_shape)
     if elements <= 0 or fragment.nbytes % elements != 0:
         raise ValueError("transfer region fragment byte size is invalid")
@@ -45,7 +47,7 @@ def _fragment_itemsize(fragment: SourceFragment | PlacementFragment) -> int:
 
 
 def _logical_byte_offset(
-    fragment: SourceFragment | TargetFragment,
+    fragment: GeometryFragment,
     overlap_offset: tuple[int, ...],
     itemsize: int,
 ) -> int:
@@ -74,11 +76,25 @@ def _validate_outer_strides(
         span += (count - 1) * stride
 
 
-def _geometry_key(fragment: SourceFragment) -> tuple:
+GeometryKey: TypeAlias = tuple[TensorId, tuple[int, ...], tuple[int, ...]]
+SourceSortKey: TypeAlias = (
+    tuple[int, int, int, int, str]
+    | tuple[
+        int,
+        int,
+        int,
+        int,
+        str,
+        str,
+    ]
+)
+
+
+def _geometry_key(fragment: LogicalSourceFragment) -> GeometryKey:
     return fragment.tensor_id, fragment.global_offset, fragment.local_shape
 
 
-def _source_sort_key(fragment: SourceFragment) -> tuple:
+def _source_sort_key(fragment: LogicalSourceFragment) -> SourceSortKey:
     if isinstance(fragment, StoredFragment):
         return (0, 0, 0, 0, fragment.object_key, fragment.fragment_id)
     return (
@@ -94,7 +110,7 @@ def _source_sort_key(fragment: SourceFragment) -> tuple:
 class _CandidateInterval:
     begin: int
     end: int
-    group: tuple[SourceFragment, ...]
+    group: tuple[LogicalSourceFragment, ...]
 
 
 @dataclass(frozen=True)
@@ -114,9 +130,9 @@ class _CandidateIntervalNode:
         center = sorted((interval.begin + interval.end) // 2 for interval in intervals)[
             len(intervals) // 2
         ]
-        left = []
-        right = []
-        crossing = []
+        left: list[_CandidateInterval] = []
+        right: list[_CandidateInterval] = []
+        crossing: list[_CandidateInterval] = []
         for interval in intervals:
             if interval.end <= center:
                 left.append(interval)
@@ -140,7 +156,7 @@ class _CandidateIntervalNode:
         self,
         begin: int,
         end: int,
-        result: list[tuple[SourceFragment, ...]],
+        result: list[tuple[LogicalSourceFragment, ...]],
     ) -> None:
         if end <= self.center:
             for interval in self.crossing_by_begin:
@@ -172,7 +188,9 @@ class _CandidateBoxIndex:
     root: _CandidateIntervalNode
 
     @classmethod
-    def build(cls, groups: Sequence[tuple[SourceFragment, ...]]) -> _CandidateBoxIndex:
+    def build(
+        cls, groups: Sequence[tuple[LogicalSourceFragment, ...]]
+    ) -> _CandidateBoxIndex:
         if not groups:
             raise ValueError("candidate box index requires source fragments")
         ndim = len(groups[0][0].global_offset)
@@ -207,9 +225,11 @@ class _CandidateBoxIndex:
         assert root is not None
         return cls(dimension=dimension, root=root)
 
-    def query(self, target: TargetFragment) -> tuple[tuple[SourceFragment, ...], ...]:
+    def query(
+        self, target: LogicalTargetFragment
+    ) -> tuple[tuple[LogicalSourceFragment, ...], ...]:
         begin = target.global_offset[self.dimension]
-        result = []
+        result: list[tuple[LogicalSourceFragment, ...]] = []
         self.root.query(
             begin,
             begin + target.local_shape[self.dimension],
@@ -219,8 +239,8 @@ class _CandidateBoxIndex:
 
 
 def _overlap_box(
-    source: SourceFragment,
-    target: TargetFragment,
+    source: GeometryFragment,
+    target: GeometryFragment,
 ) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
     overlap_offset = tuple(
         max(source_begin, target_begin)
@@ -249,7 +269,7 @@ def _overlap_box(
 
 
 def _canonical_byte_strides(shape: tuple[int, ...], itemsize: int) -> tuple[int, ...]:
-    result = []
+    result: list[int] = []
     running = itemsize
     for extent in reversed(shape):
         result.append(running)
@@ -258,8 +278,8 @@ def _canonical_byte_strides(shape: tuple[int, ...], itemsize: int) -> tuple[int,
 
 
 def _derive_region_geometry(
-    source: SourceFragment,
-    target: TargetFragment,
+    source: GeometryFragment,
+    target: GeometryFragment,
     overlap_offset: tuple[int, ...],
     overlap_shape: tuple[int, ...],
 ) -> tuple[
@@ -317,12 +337,12 @@ def _derive_region_geometry(
 
 def _transfer_region(
     tensor: TensorDescriptor,
-    source: SourceFragment,
-    target: TargetFragment,
+    source: LogicalSourceFragment,
+    target: LogicalTargetFragment,
     overlap_offset: tuple[int, ...],
     overlap_shape: tuple[int, ...],
-):
-    from .contracts import TransferRegion
+) -> "TransferRegion[LogicalSourceFragment, LogicalTargetFragment]":
+    from .contracts import TransferRegion as transfer_region
 
     if (
         _fragment_itemsize(source) != tensor.itemsize
@@ -338,7 +358,7 @@ def _transfer_region(
         target_strides,
     ) = _derive_region_geometry(source, target, overlap_offset, overlap_shape)
 
-    return TransferRegion(
+    return transfer_region(
         tensor_id=tensor.tensor_id,
         source=source,
         target=target,

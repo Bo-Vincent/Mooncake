@@ -1,16 +1,35 @@
 from __future__ import annotations
 
 from math import prod
+from types import SimpleNamespace
 
 import pytest
 
-from mooncake.reshard.weight._planner.contracts import TransferRegion
+from mooncake.reshard.weight._planner.contracts import (
+    LogicalTransferPlan,
+    TransferPlan,
+    TransferRegion,
+)
 from mooncake.reshard.weight._planner.validation import (
     _validate_target_physical_ranges,
 )
 from mooncake.reshard.weight.manifest import ParallelRank
 
-from .helpers import bound_fragment
+from .helpers import bound_fragment, tp_manifests
+
+
+class MutableOperation:
+    """Deliberately non-canonical operation used to prove the public boundary."""
+
+    def __init__(self, source: object, target: object) -> None:
+        self.source = source
+        self.target = target
+
+    def iter_segments(self) -> tuple[tuple[int, int, int], ...]:
+        return ((0, 0, 2),)
+
+    def validate_bounds(self) -> None:
+        return None
 
 
 def strided_column_region(
@@ -85,6 +104,195 @@ def test_physical_overlap_is_detected_for_logically_disjoint_regions() -> None:
 
     with pytest.raises(ValueError, match="conflicting target physical range"):
         _validate_target_physical_ranges((left, right))
+
+
+def test_public_transfer_plan_rejects_conflicting_target_physical_ranges() -> None:
+    """The public executable-plan boundary must not rely on binder-only checks."""
+
+    left = strided_column_region(
+        tensor_id="left",
+        fragment_suffix="left",
+        target_fragment_id="shared-fragment",
+        target_address=0x40000,
+        column=0,
+    )
+    right = strided_column_region(
+        tensor_id="right",
+        fragment_suffix="right",
+        target_fragment_id="shared-fragment",
+        target_address=0x40000 - 2,
+        column=1,
+    )
+
+    with pytest.raises(ValueError, match="lacks an attested runtime binding"):
+        TransferPlan(
+            resource_id="resource",
+            revision="revision",
+            weight_generation=1,
+            target_placement=tp_manifests(
+                tp=1,
+                pp_rank=0,
+                ep_rank=0,
+                address_base=0x40000,
+                worker_prefix="target-placement",
+            ).placement,
+            operations=(left, right),
+        )
+
+
+def test_public_transfer_plan_accepts_disjoint_target_physical_ranges() -> None:
+    left = strided_column_region(
+        tensor_id="left",
+        fragment_suffix="left",
+        target_fragment_id="target-left",
+        target_address=0x40000,
+        column=0,
+    )
+    right = strided_column_region(
+        tensor_id="right",
+        fragment_suffix="right",
+        target_fragment_id="target-right",
+        target_address=0x40000,
+        column=1,
+    )
+
+    with pytest.raises(ValueError, match="lacks an attested runtime binding"):
+        TransferPlan(
+            resource_id="resource",
+            revision="revision",
+            weight_generation=1,
+            target_placement=tp_manifests(
+                tp=1,
+                pp_rank=0,
+                ep_rank=0,
+                address_base=0x40000,
+                worker_prefix="target-placement",
+            ).placement,
+            operations=(left, right),
+        )
+
+
+def test_public_transfer_plan_rejects_mutable_duck_typed_operation() -> None:
+    source = bound_fragment(
+        fragment_id="source-fake",
+        tensor_id="fake",
+        global_offset=(0,),
+        local_shape=(4,),
+        address=0x30000,
+        nbytes=8,
+        worker_id="source-worker",
+        endpoint="source-worker:12345",
+        device="cuda:0",
+        rank=ParallelRank(),
+    )
+    target = bound_fragment(
+        fragment_id="target-fake",
+        tensor_id="fake",
+        global_offset=(0,),
+        local_shape=(4,),
+        address=0x40000,
+        nbytes=8,
+        worker_id="target-worker",
+        endpoint="target-worker:12345",
+        device="cuda:0",
+        instance_id="target-instance",
+        rank=ParallelRank(),
+    )
+
+    with pytest.raises(ValueError, match="canonical transfer operation"):
+        TransferPlan(
+            resource_id="resource",
+            revision="revision",
+            weight_generation=1,
+            target_placement=tp_manifests(
+                tp=1,
+                pp_rank=0,
+                ep_rank=0,
+                address_base=0x40000,
+                worker_prefix="target-placement",
+            ).placement,
+            operations=(MutableOperation(source, target),),  # type: ignore[arg-type]
+        )
+
+
+def test_public_transfer_plan_rejects_duck_typed_executor_metadata() -> None:
+    region = strided_column_region(
+        tensor_id="tensor",
+        fragment_suffix="executor",
+        target_fragment_id="target-executor",
+        target_address=0x40000,
+        column=0,
+    )
+    fake_executor = SimpleNamespace(operation_indices=(0,))
+
+    with pytest.raises(ValueError, match="canonical executor metadata"):
+        TransferPlan(
+            resource_id="resource",
+            revision="revision",
+            weight_generation=1,
+            target_placement=tp_manifests(
+                tp=1,
+                pp_rank=0,
+                ep_rank=0,
+                address_base=0x40000,
+                worker_prefix="target-placement",
+            ).placement,
+            operations=(region,),
+            source_executors=(fake_executor,),  # type: ignore[arg-type]
+        )
+
+
+def test_public_logical_plan_rejects_mutable_duck_typed_operation() -> None:
+    source_placement = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source-placement",
+    ).placement
+    target_placement = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x20000,
+        worker_prefix="target-placement",
+    ).placement
+    source = bound_fragment(
+        fragment_id="source-logical-fake",
+        tensor_id="fake",
+        global_offset=(0,),
+        local_shape=(4,),
+        address=0x30000,
+        nbytes=8,
+        worker_id="source-worker",
+        endpoint="source-worker:12345",
+        device="cuda:0",
+        rank=ParallelRank(),
+    )
+    target = bound_fragment(
+        fragment_id="target-logical-fake",
+        tensor_id="fake",
+        global_offset=(0,),
+        local_shape=(4,),
+        address=0x40000,
+        nbytes=8,
+        worker_id="target-worker",
+        endpoint="target-worker:12345",
+        device="cuda:0",
+        instance_id="target-instance",
+        rank=ParallelRank(),
+    )
+
+    with pytest.raises(ValueError, match="canonical transfer operation"):
+        LogicalTransferPlan(
+            resource_id=source_placement.resource_id,
+            revision=source_placement.revision,
+            source_placement=source_placement,
+            target_placement=target_placement,
+            source_tensors=(),
+            target_tensors=(),
+            operations=(MutableOperation(source, target),),  # type: ignore[arg-type]
+        )
 
 
 def test_interleaved_disjoint_target_segments_are_accepted() -> None:

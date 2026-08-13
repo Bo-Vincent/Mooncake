@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Sequence
 
+from ...contracts import (
+    ParticipantId,
+    PlacementFragmentId,
+    PlacementId,
+    RuntimeFragmentId,
+    TensorId,
+)
 from ..binding import _validate_runtime_binding_subset
 from ..manifest import (
     PlacementFragment,
@@ -14,8 +20,13 @@ from ..manifest import (
 from ..storage_manifest import StoredFragment
 from .contracts import (
     BoundWeightFragment,
+    CopyRange,
+    ExecutableTransferOperation,
+    LogicalTransferOperation,
     LogicalTransferPlan,
+    PlacementExecutorPlan,
     TransferPlan,
+    TransferRegion,
 )
 from .core import (
     _build_executor_plans,
@@ -23,15 +34,20 @@ from .core import (
     _collect_placements,
 )
 from .attestation import RuntimeBindingAttestation
-from .validation import _deduplicate_target_copies
+from .validation import (
+    _validate_logical_target_coverage,
+    _validate_target_physical_ranges,
+)
 
 
 def _validated_bindings_by_placement_id(
     placements: Sequence[WeightPlacementManifest],
     bindings: Sequence[WeightRuntimeBindingManifest],
     label: str,
-    required_participants: dict[str, frozenset[str]],
-) -> dict[tuple[str, str], WeightRuntimeBindingManifest]:
+    required_participants: dict[PlacementId, frozenset[ParticipantId]],
+    *,
+    retain_unselected: bool = False,
+) -> dict[tuple[PlacementId, ParticipantId], WeightRuntimeBindingManifest]:
     if not placements:
         if bindings:
             raise ValueError(f"logical plan has no {label} placements")
@@ -40,8 +56,10 @@ def _validated_bindings_by_placement_id(
         raise ValueError(f"logical plan requires {label} runtime bindings")
 
     placement_by_id = {placement.placement_id: placement for placement in placements}
-    binding_by_id: dict[tuple[str, str], WeightRuntimeBindingManifest] = {}
-    runtime_fragment_ids: set[str] = set()
+    binding_by_id: dict[
+        tuple[PlacementId, ParticipantId], WeightRuntimeBindingManifest
+    ] = {}
+    runtime_fragment_ids: set[RuntimeFragmentId] = set()
     for binding in bindings:
         if not isinstance(binding, WeightRuntimeBindingManifest):
             raise ValueError(f"invalid {label} runtime binding input")
@@ -80,7 +98,13 @@ def _validated_bindings_by_placement_id(
                 f"logical plan and {label} runtime binding participants differ"
             )
         _validate_runtime_binding_subset(placement, placement_bindings)
-    return binding_by_id
+    if retain_unselected:
+        return binding_by_id
+    return {
+        key: binding
+        for key, binding in binding_by_id.items()
+        if key[1] in required_participants.get(key[0], frozenset())
+    }
 
 
 def _bound_fragment(
@@ -101,10 +125,12 @@ def _bound_fragment(
 
 def _bound_fragments_by_placement_fragment_id(
     placements: Sequence[WeightPlacementManifest],
-    binding_by_placement_id: dict[tuple[str, str], WeightRuntimeBindingManifest],
+    binding_by_placement_id: dict[
+        tuple[PlacementId, ParticipantId], WeightRuntimeBindingManifest
+    ],
     label: str,
-) -> dict[str, BoundWeightFragment]:
-    result: dict[str, BoundWeightFragment] = {}
+) -> dict[PlacementFragmentId, BoundWeightFragment]:
+    result: dict[PlacementFragmentId, BoundWeightFragment] = {}
     for placement in placements:
         for part in placement.parts:
             binding = binding_by_placement_id.get(
@@ -132,7 +158,9 @@ def _bound_fragments_by_placement_fragment_id(
     return result
 
 
-def _tensor_map(tensors: Sequence[TensorDescriptor]) -> dict[str, TensorDescriptor]:
+def _tensor_map(
+    tensors: Sequence[TensorDescriptor],
+) -> dict[TensorId, TensorDescriptor]:
     result = {tensor.tensor_id: tensor for tensor in tensors}
     if len(result) != len(tensors):
         raise ValueError("logical transfer plan has duplicate tensor descriptors")
@@ -169,8 +197,42 @@ def _validate_logical_tensor_snapshots(logical_plan: LogicalTransferPlan) -> Non
         raise ValueError("logical plan and target placement tensor descriptors differ")
 
 
-def _required_participants(executors) -> dict[str, frozenset[str]]:
-    participants: dict[str, set[str]] = {}
+def _validate_logical_fragment_snapshots(logical_plan: LogicalTransferPlan) -> None:
+    target_by_id = {
+        fragment.placement_fragment_id: fragment
+        for fragment in logical_plan.target_placement.fragments
+    }
+    source_by_id = (
+        {
+            fragment.placement_fragment_id: fragment
+            for fragment in logical_plan.source_placement.fragments
+        }
+        if logical_plan.source_placement is not None
+        else {}
+    )
+    for operation in logical_plan.operations:
+        target = operation.target
+        if (
+            not isinstance(target, PlacementFragment)
+            or target_by_id.get(target.placement_fragment_id) != target
+        ):
+            raise ValueError(
+                "logical plan and target placement fragment snapshots differ"
+            )
+        source = operation.source
+        if logical_plan.source_placement is not None and (
+            not isinstance(source, PlacementFragment)
+            or source_by_id.get(source.placement_fragment_id) != source
+        ):
+            raise ValueError(
+                "logical plan and source placement fragment snapshots differ"
+            )
+
+
+def _required_participants(
+    executors: Sequence[PlacementExecutorPlan],
+) -> dict[PlacementId, frozenset[ParticipantId]]:
+    participants: dict[PlacementId, set[ParticipantId]] = {}
     for executor in executors:
         participants.setdefault(executor.placement_id, set()).add(
             executor.participant_id
@@ -178,6 +240,42 @@ def _required_participants(executors) -> dict[str, frozenset[str]]:
     return {
         placement_id: frozenset(values) for placement_id, values in participants.items()
     }
+
+
+def _bind_operation(
+    operation: LogicalTransferOperation,
+    source: BoundWeightFragment | StoredFragment,
+    target: BoundWeightFragment,
+) -> ExecutableTransferOperation:
+    """Rebuild a logical value object with the bound execution fragments."""
+
+    if isinstance(operation, CopyRange):
+        return CopyRange(
+            tensor_id=operation.tensor_id,
+            source=source,
+            target=target,
+            source_offset=operation.source_offset,
+            target_offset=operation.target_offset,
+            nbytes=operation.nbytes,
+            repeat=operation.repeat,
+            source_stride=operation.source_stride,
+            target_stride=operation.target_stride,
+        )
+    if isinstance(operation, TransferRegion):
+        return TransferRegion(
+            tensor_id=operation.tensor_id,
+            source=source,
+            target=target,
+            overlap_offset=operation.overlap_offset,
+            overlap_shape=operation.overlap_shape,
+            source_base_offset=operation.source_base_offset,
+            target_base_offset=operation.target_base_offset,
+            inner_bytes=operation.inner_bytes,
+            outer_loop_counts=operation.outer_loop_counts,
+            source_strides=operation.source_strides,
+            target_strides=operation.target_strides,
+        )
+    raise ValueError("logical transfer operation is not canonical")
 
 
 def bind_logical_transfer_plan(
@@ -188,7 +286,13 @@ def bind_logical_transfer_plan(
 ) -> TransferPlan:
     """Bind an address-free logical plan to validated runtime locations."""
 
+    if not isinstance(logical_plan, LogicalTransferPlan):
+        raise ValueError("logical_plan must be a LogicalTransferPlan")
+    # Re-check the immutable plan contract at the public binding boundary. This
+    # protects deserialized or otherwise reconstructed plan values as well.
+    _validate_logical_target_coverage(logical_plan)
     _validate_logical_tensor_snapshots(logical_plan)
+    _validate_logical_fragment_snapshots(logical_plan)
     target_required = _required_participants(logical_plan.target_executors)
     source_required = _required_participants(logical_plan.source_executors)
     target_binding_by_id = _validated_bindings_by_placement_id(
@@ -206,6 +310,7 @@ def bind_logical_transfer_plan(
         source_bindings,
         "source",
         source_required,
+        retain_unselected=True,
     )
     runtime_targets = _bound_fragments_by_placement_fragment_id(
         (logical_plan.target_placement,),
@@ -226,7 +331,7 @@ def bind_logical_transfer_plan(
         else {}
     )
 
-    operations = []
+    operations: list[ExecutableTransferOperation] = []
     for operation in logical_plan.operations:
         placement_source = operation.source
         placement_target = operation.target
@@ -249,30 +354,35 @@ def bind_logical_transfer_plan(
             runtime_source = placement_source
         else:
             raise ValueError("logical transfer operation source is runtime-bound")
-        operations.append(
-            replace(operation, source=runtime_source, target=runtime_target)
-        )
+        operations.append(_bind_operation(operation, runtime_source, runtime_target))
 
-    source_tensors = _tensor_map(logical_plan.source_tensors)
-    target_tensors = _tensor_map(logical_plan.target_tensors)
-    bound_operations = _deduplicate_target_copies(
-        operations,
-        source_tensors,
-        target_tensors,
-    )
+    # Each logical tensor remains an explicit operation. A physical alias may
+    # share an allocation only after the target-range validator proves the same
+    # complete alias group and attested lease scope.
+    bound_operations = tuple(operations)
+    _validate_target_physical_ranges(bound_operations)
     target_binding_values = tuple(target_binding_by_id.values())
     source_binding_values = tuple(source_binding_by_id.values())
+    source_placements: tuple[WeightPlacementManifest, ...] = ()
+    if source_binding_values:
+        source_placement = logical_plan.source_placement
+        if source_placement is None:
+            raise ValueError("source runtime bindings require a source placement")
+        source_placements = (source_placement,)
+
     return TransferPlan(
         resource_id=logical_plan.resource_id,
         revision=logical_plan.revision,
         weight_generation=logical_plan.target_placement.weight_generation,
+        target_placement=logical_plan.target_placement,
         operations=bound_operations,
         source_executors=(
             _build_executor_plans(
-                (logical_plan.source_placement,),
+                source_placements,
                 source_binding_values,
                 bound_operations,
                 "source",
+                include_inactive=True,
             )
             if source_binding_values
             else ()
@@ -282,6 +392,7 @@ def bind_logical_transfer_plan(
             target_binding_values,
             bound_operations,
             "target",
+            include_inactive=True,
         ),
         pipeline_routes=_build_pipeline_routes(bound_operations),
     )
