@@ -91,6 +91,7 @@ class WeightLoadService:
             transfer=bind_logical_transfer_plan(
                 logical_plan,
                 target_bindings=target_bindings,
+                source_manifest=manifest,
             ),
         )
 

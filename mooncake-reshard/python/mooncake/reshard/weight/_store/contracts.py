@@ -161,6 +161,8 @@ class WeightLoadPlan:
             or self.transfer.weight_generation != self.manifest.weight_generation
         ):
             raise ValueError("load plan transfer and manifest identity differ")
+        if self.transfer.source_manifest_identity != self.manifest.manifest_identity:
+            raise ValueError("load plan transfer source manifest differs")
         if not self.transfer.operations:
             raise ValueError("load plan must transfer stored fragments to runtime")
         stored_operations = tuple(
@@ -176,29 +178,9 @@ class WeightLoadPlan:
             previous = planned_sources.setdefault(source.fragment_id, source)
             if previous != source:
                 raise ValueError("load plan contains conflicting stored fragments")
-        if set(planned_sources) - set(manifest_fragments):
-            raise ValueError("load plan sources and manifest differ")
-        for fragment_id, manifest_fragment in manifest_fragments.items():
-            planned = planned_sources.get(fragment_id)
-            if planned == manifest_fragment:
-                continue
-            if not any(
-                _stored_alias_equivalent(manifest_fragment, candidate)
-                for candidate in planned_sources.values()
-            ):
+        for fragment_id, planned in planned_sources.items():
+            if manifest_fragments.get(fragment_id) != planned:
                 raise ValueError("load plan sources and manifest differ")
-
-
-def _stored_alias_equivalent(left: StoredFragment, right: StoredFragment) -> bool:
-    return (
-        len(left.aliases) >= 2
-        and left.aliases == right.aliases
-        and left.tensor_id in left.aliases
-        and right.tensor_id in left.aliases
-        and left.global_offset == right.global_offset
-        and left.local_shape == right.local_shape
-        and left.nbytes == right.nbytes
-    )
 
 
 __all__ = [
