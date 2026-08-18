@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mooncake.reshard.weight._planner.contracts as logical_contracts
 import mooncake.reshard.weight.planner as planner
 from mooncake.reshard.weight import (
     ParallelRank,
@@ -18,13 +19,15 @@ from mooncake.reshard.weight._planner.api import (
 from mooncake.reshard.weight._planner.binding import (
     bind_logical_transfer_plan,
 )
+from mooncake.reshard.weight._planner.bound_contracts import (
+    ExecutorTransferPlan,
+    TransferPlan,
+)
 from mooncake.reshard.weight._planner.contracts import (
     BoundWeightFragment,
-    ExecutorTransferPlan,
     LogicalTransferPlan,
     PipelineRouteGroup,
     PlacementExecutorPlan,
-    TransferPlan,
     TransferRegion,
 )
 from model_weight_planner.helpers import global_placement_from_fragments
@@ -146,6 +149,12 @@ def test_planner_responsibility_modules_preserve_public_identity() -> None:
         planner.plan_stored_transfer_to_target_placement
         is plan_stored_transfer_to_target_placement
     )
+
+
+def test_logical_contracts_module_excludes_runtime_bound_plan_types() -> None:
+    assert not hasattr(logical_contracts, "TransferPlan")
+    assert not hasattr(logical_contracts, "ExecutorTransferPlan")
+    assert not hasattr(logical_contracts, "RuntimeLeaseSnapshot")
 
 
 def test_planner_does_not_export_combined_runtime_convenience_apis() -> None:
