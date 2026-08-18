@@ -15,7 +15,7 @@ from mooncake.reshard.weight.manifest import ParallelRank
 from .helpers import bound_fragment
 
 
-def test_canonical_contract_exposes_only_nd_transfer_regions() -> None:
+def test_canonical_contract_exposes_only_n_dim_transfer_regions() -> None:
     assert not hasattr(planner_contracts, "CopyRange")
 
 
