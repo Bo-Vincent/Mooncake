@@ -1,15 +1,17 @@
 # Model Weight Reshard Planner
 
-The model-weight planner converts one complete source placement and one complete
-target placement into backend-neutral transfer regions. It does not require
-runtime addresses while computing logical overlap.
+The model-weight planner converts one complete source placement or committed
+Store snapshot and one complete target placement into backend-neutral transfer
+regions. It does not require runtime addresses while computing logical overlap.
 
 ## Inputs
 
-Both source and target are singular `WeightPlacementManifest` objects. Each
-manifest describes one complete global logical placement of the same model,
-revision, and weight generation, including its `ParallelTopology`, participants,
-tensors, and per-participant `WeightPlacementPart` values.
+The target is a singular `WeightPlacementManifest`. The source is either a
+complete `WeightPlacementManifest` or a committed `WeightManifest` snapshot.
+Both forms describe the same model, revision, and weight generation. A
+placement carries `ParallelTopology`, participants, and per-participant
+`WeightPlacementPart` values; a stored source carries its group/key and
+canonical content digest as immutable source provenance.
 
 The public APIs are:
 
@@ -18,8 +20,15 @@ The public APIs are:
 - `plan_placement_transfer_to_local_target(source_placement, target_placement,
   target_participant_id)` for one target participant in a global placement.
 
-The local-target form still receives the complete source and target placement;
-the participant ID selects the executor output, not a partial target manifest.
+The local-target placement form still receives complete source and target
+placements; the participant ID selects the executor output, not a partial
+target manifest.
+
+A stored-source logical plan retains that manifest provenance, but binding must
+receive a fresh authoritative manifest from Store or the control plane and
+compare its identity and every selected stored fragment before producing a
+bound plan. A serialized plan is therefore not trusted as the authority for an
+object key or range.
 
 ## Planning Flow
 
@@ -51,9 +60,10 @@ bounded lazy lowering for backends that accept only flat ranges.
 - EP uses the leading logical expert coordinate for grouped expert tensors.
   Independent expert allocations remain independent fragments and are not
   packed or all-gathered by the planner.
-- DP does not change tensor geometry. A plan may choose one complete source DP
-  replica for a target while both global manifests retain their declared
-  `dp_size` and participant mappings.
+- DP does not change tensor geometry. `ReplicatedAxis(kind="dp")` allows a plan
+  to choose one complete source replica for a target. `OwnershipAxis(kind="dp")`
+  instead routes each tensor only through its declared DP owner; it never
+  requires every tensor to exist on every DP rank.
 
 The four axes are resolved in one N-D logical-box plan rather than four
 model-wide transformation passes.
@@ -76,8 +86,10 @@ passed runtime validation. Its resource ID, revision, generation, executor
 routing, fragment leases, and address view are checked again when the plan is
 assembled. The attestation serializes only canonical placement/binding inputs;
 derived indexes are rebuilt and revalidated after a wire round trip. Store
-sources remain distinct: `WeightManifest` plus `WeightLoadPlan` authorizes the
-stored object set, while the live target still requires the same attestation.
+sources remain distinct: the bound plan retains a typed `StoredManifestIdentity`,
+and the Store/control plane supplies the authoritative `WeightManifest` for a
+fresh identity-and-fragment check before binding. The live target still requires
+the same attestation.
 
 The executable plan also retains the complete target placement. Its public
 construction boundary re-checks that every selected target participant and

@@ -13,7 +13,7 @@ from ...contracts import (
 )
 from ...geometry import boxes_exactly_cover
 from ..placement import WeightPlacementManifest
-from ..storage_manifest import StoredFragment
+from ..storage_manifest import StoredFragment, WeightManifest
 from ..types import ParallelRank, PlacementFragment, TensorDescriptor
 from . import geometry
 from .contracts import (
@@ -314,6 +314,7 @@ def _logical_transfer_plan(
     source_tensors: dict[TensorId, TensorDescriptor],
     target_tensors: dict[TensorId, TensorDescriptor],
     source_placement: Optional[WeightPlacementManifest],
+    source_manifest: Optional[WeightManifest],
     target_placement: WeightPlacementManifest,
     source_participant_ids: Optional[frozenset[ParticipantId]] = None,
     target_participant_ids: Optional[frozenset[ParticipantId]] = None,
@@ -331,6 +332,7 @@ def _logical_transfer_plan(
             sorted(target_tensors.values(), key=lambda item: item.tensor_id)
         ),
         operations=operations,
+        source_manifest=source_manifest,
         planning_limits=transfer.planning_limits,
         source_executors=(
             _build_placement_executor_plans(

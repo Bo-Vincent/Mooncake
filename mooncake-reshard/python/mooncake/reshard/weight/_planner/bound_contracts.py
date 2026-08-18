@@ -17,7 +17,7 @@ from ...contracts import (
     TensorId,
 )
 from ..manifest import ParallelRank, WeightPlacementManifest
-from ..storage_manifest import StoredFragment
+from ..storage_manifest import StoredFragment, StoredManifestIdentity
 from . import contracts as _contracts
 from .attestation import RuntimeBindingAttestation
 from .contracts import (
@@ -378,6 +378,7 @@ class TransferPlan:
     planning_limits: PlanningLimits = field(default_factory=PlanningLimits)
     source_executors: tuple[ExecutorTransferPlan, ...] = ()
     target_executors: tuple[ExecutorTransferPlan, ...] = ()
+    source_manifest_identity: Optional[StoredManifestIdentity] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operations", tuple(self.operations))
@@ -389,6 +390,11 @@ class TransferPlan:
             raise ValueError("transfer plan weight_generation must be non-negative")
         if not isinstance(self.planning_limits, PlanningLimits):
             raise ValueError("transfer plan planning_limits is invalid")
+        if self.source_manifest_identity is not None and not isinstance(
+            self.source_manifest_identity,
+            StoredManifestIdentity,
+        ):
+            raise ValueError("transfer plan source manifest identity is invalid")
         if len(self.operations) > self.planning_limits.max_transfer_regions:
             raise ValueError("transfer plan exceeds max_transfer_regions")
         total_lowered_segments = 0
@@ -399,6 +405,26 @@ class TransferPlan:
             total_lowered_segments += operation.segment_count
             if total_lowered_segments > self.planning_limits.max_total_lowered_segments:
                 raise ValueError("transfer plan exceeds max_total_lowered_segments")
+        has_stored_source = any(
+            isinstance(operation.source, StoredFragment)
+            for operation in self.operations
+        )
+        if has_stored_source:
+            if self.source_manifest_identity is None:
+                raise ValueError(
+                    "stored transfer plan requires a source manifest identity"
+                )
+            if (
+                self.source_manifest_identity.resource_id != self.resource_id
+                or self.source_manifest_identity.revision != self.revision
+                or self.source_manifest_identity.weight_generation
+                != self.weight_generation
+            ):
+                raise ValueError("transfer plan source manifest identity differs")
+        elif self.source_manifest_identity is not None:
+            raise ValueError(
+                "runtime transfer plan must not have a source manifest identity"
+            )
         if not all(
             isinstance(executor, ExecutorTransferPlan)
             for executor in (*self.source_executors, *self.target_executors)
