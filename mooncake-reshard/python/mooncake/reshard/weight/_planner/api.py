@@ -51,6 +51,7 @@ def plan_placement_transfer(
         source_tensors=source_tensors,
         target_tensors=target_tensors,
         source_placement=source_placement,
+        source_manifest=None,
         target_placement=target_placement,
     )
 
@@ -108,6 +109,7 @@ def plan_placement_transfer_to_local_target(
         source_tensors=source_tensors,
         target_tensors=target_tensors,
         source_placement=source_placement,
+        source_manifest=None,
         target_placement=target_placement,
         target_participant_ids=frozenset({target_participant_id}),
     )
@@ -150,6 +152,7 @@ def plan_stored_transfer_to_target_placement(
         source_tensors=source_tensors,
         target_tensors=target_tensors,
         source_placement=None,
+        source_manifest=source_manifest,
         target_placement=target_placement,
     )
 

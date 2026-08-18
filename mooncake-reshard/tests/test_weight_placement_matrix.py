@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from mooncake.reshard.weight import (
@@ -559,12 +559,118 @@ class PlacementStoredSourceTest(unittest.TestCase):
         target = _combine_placement_shards(placements, "store-target")
         targets = bind_all(target)
         logical = plan_stored_transfer_to_target_placement(source, target)
-        bound = bind_logical_transfer_plan(logical, targets)
+        bound = bind_logical_transfer_plan(
+            logical,
+            targets,
+            source_manifest=source,
+        )
 
         self.assertEqual(
             bound,
             WeightStore(object()).plan_load(source, target, targets).transfer,
         )
+
+    def test_store_source_rejects_a_forged_payload_fragment_on_bind(self) -> None:
+        descriptor = tensor()
+        source = WeightManifest(
+            namespace="default",
+            resource_id=MODEL_ID,
+            revision=REVISION,
+            weight_generation=5,
+            group_id="weights/default/model/revision/5",
+            manifest_key="weights/default/model/revision/5/manifest",
+            created_at="2026-07-23T00:00:00Z",
+            tensors=(descriptor,),
+            fragments=(
+                StoredFragment(
+                    fragment_id="stored-full",
+                    tensor_id=descriptor.tensor_id,
+                    global_offset=(0,),
+                    local_shape=(8,),
+                    object_key="weights/default/model/revision/5/payload/0",
+                    object_offset=0,
+                    nbytes=8,
+                ),
+            ),
+        )
+        placements = tuple(
+            placement_manifest(
+                placement_id=f"store-target-tp{rank}",
+                rank=ParallelRank(tp=rank),
+                tensors=(descriptor,),
+                boxes=((descriptor.tensor_id, (rank * 2,), (2,)),),
+            )
+            for rank in range(4)
+        )
+        target = _combine_placement_shards(placements, "store-target")
+        logical = plan_stored_transfer_to_target_placement(source, target)
+
+        self.assertEqual(logical.source_manifest, source)
+        self.assertEqual(logical.source_manifest_identity, source.manifest_identity)
+        foreign_source = WeightManifest(
+            namespace="default",
+            resource_id=MODEL_ID,
+            revision=REVISION,
+            weight_generation=5,
+            group_id="weights/default/other/revision/5",
+            manifest_key="weights/default/other/revision/5/manifest",
+            created_at="2026-07-23T00:00:00Z",
+            tensors=(descriptor,),
+            fragments=(
+                StoredFragment(
+                    fragment_id="stored-full",
+                    tensor_id=descriptor.tensor_id,
+                    global_offset=(0,),
+                    local_shape=(8,),
+                    object_key="weights/default/other/revision/5/payload/0",
+                    object_offset=0,
+                    nbytes=8,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "stored source plan requires a source manifest",
+        ):
+            bind_logical_transfer_plan(logical, bind_all(target))
+        with self.assertRaisesRegex(
+            ValueError,
+            "source manifest identity differs",
+        ):
+            bind_logical_transfer_plan(
+                logical,
+                bind_all(target),
+                source_manifest=foreign_source,
+            )
+        forged_source = replace(
+            logical.operations[0].source,
+            object_key="another-tenant/private-object",
+        )
+        forged_operation = replace(logical.operations[0], source=forged_source)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source manifest fragment snapshots differ",
+        ):
+            replace(
+                logical,
+                operations=(forged_operation, *logical.operations[1:]),
+            )
+        object.__setattr__(
+            logical,
+            "operations",
+            (forged_operation, *logical.operations[1:]),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source manifest fragment snapshots differ",
+        ):
+            bind_logical_transfer_plan(
+                logical,
+                bind_all(target),
+                source_manifest=source,
+            )
 
     def test_store_source_cannot_authorize_target_alias_deduplication(self) -> None:
         aliases = ("alias.a", "alias.b")
@@ -641,7 +747,11 @@ class PlacementStoredSourceTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "conflicting target physical range"):
-            bind_logical_transfer_plan(logical, (target_binding,))
+            bind_logical_transfer_plan(
+                logical,
+                (target_binding,),
+                source_manifest=source,
+            )
 
 
 if __name__ == "__main__":

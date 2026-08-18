@@ -18,7 +18,11 @@ from ..manifest import (
     WeightPlacementManifest,
     WeightRuntimeBindingManifest,
 )
-from ..storage_manifest import StoredFragment
+from ..storage_manifest import (
+    StoredFragment,
+    WeightManifest,
+    validate_weight_manifest_snapshot,
+)
 from .bound_contracts import ExecutorTransferPlan, RuntimeLeaseSnapshot, TransferPlan
 from .bound_validation import _validate_target_physical_ranges
 from .contracts import (
@@ -161,7 +165,26 @@ def _tensor_map(
     return result
 
 
-def _validate_logical_tensor_snapshots(logical_plan: LogicalTransferPlan) -> None:
+def _validated_store_source_manifest(
+    logical_plan: LogicalTransferPlan,
+    source_manifest: WeightManifest | None,
+) -> WeightManifest | None:
+    if logical_plan.source_manifest is None:
+        if source_manifest is not None:
+            raise ValueError("runtime source plan must not receive a source manifest")
+        return None
+    if source_manifest is None:
+        raise ValueError("stored source plan requires a source manifest")
+    authoritative_manifest = validate_weight_manifest_snapshot(source_manifest)
+    if logical_plan.source_manifest_identity != authoritative_manifest.manifest_identity:
+        raise ValueError("logical plan source manifest identity differs")
+    return authoritative_manifest
+
+
+def _validate_logical_tensor_snapshots(
+    logical_plan: LogicalTransferPlan,
+    source_manifest: WeightManifest | None,
+) -> None:
     source_tensors = _tensor_map(logical_plan.source_tensors)
     target_tensors = _tensor_map(logical_plan.target_tensors)
     if logical_plan.source_placement is not None:
@@ -172,6 +195,14 @@ def _validate_logical_tensor_snapshots(logical_plan: LogicalTransferPlan) -> Non
         if current_source_tensors != source_tensors:
             raise ValueError(
                 "logical plan and source placement tensor descriptors differ"
+            )
+    elif source_manifest is not None:
+        current_source_tensors = {
+            tensor.tensor_id: tensor for tensor in source_manifest.tensors
+        }
+        if current_source_tensors != source_tensors:
+            raise ValueError(
+                "logical plan and source manifest tensor descriptors differ"
             )
     current_target_tensors, _ = _collect_placements(
         (logical_plan.target_placement,),
@@ -191,7 +222,11 @@ def _validate_logical_tensor_snapshots(logical_plan: LogicalTransferPlan) -> Non
         raise ValueError("logical plan and target placement tensor descriptors differ")
 
 
-def _validate_logical_fragment_snapshots(logical_plan: LogicalTransferPlan) -> None:
+def _validate_logical_fragment_snapshots(
+    logical_plan: LogicalTransferPlan,
+    source_manifest: WeightManifest | None,
+) -> None:
+    logical_plan.validate_source_manifest_snapshot()
     target_by_id = {
         fragment.placement_fragment_id: fragment
         for fragment in logical_plan.target_placement.fragments
@@ -202,6 +237,11 @@ def _validate_logical_fragment_snapshots(logical_plan: LogicalTransferPlan) -> N
             for fragment in logical_plan.source_placement.fragments
         }
         if logical_plan.source_placement is not None
+        else {}
+    )
+    stored_source_by_id = (
+        {fragment.fragment_id: fragment for fragment in source_manifest.fragments}
+        if source_manifest is not None
         else {}
     )
     for operation in logical_plan.operations:
@@ -220,6 +260,13 @@ def _validate_logical_fragment_snapshots(logical_plan: LogicalTransferPlan) -> N
         ):
             raise ValueError(
                 "logical plan and source placement fragment snapshots differ"
+            )
+        if logical_plan.source_manifest is not None and (
+            not isinstance(source, StoredFragment)
+            or stored_source_by_id.get(source.fragment_id) != source
+        ):
+            raise ValueError(
+                "logical plan and source manifest fragment snapshots differ"
             )
 
 
@@ -351,6 +398,7 @@ def bind_logical_transfer_plan(
     target_bindings: Sequence[WeightRuntimeBindingManifest],
     *,
     source_bindings: Sequence[WeightRuntimeBindingManifest] = (),
+    source_manifest: WeightManifest | None = None,
 ) -> TransferPlan:
     """Bind an address-free logical plan to validated runtime locations."""
 
@@ -359,8 +407,12 @@ def bind_logical_transfer_plan(
     # Re-check the immutable plan contract at the public binding boundary. This
     # protects deserialized or otherwise reconstructed plan values as well.
     _validate_logical_target_coverage(logical_plan)
-    _validate_logical_tensor_snapshots(logical_plan)
-    _validate_logical_fragment_snapshots(logical_plan)
+    authoritative_source_manifest = _validated_store_source_manifest(
+        logical_plan,
+        source_manifest,
+    )
+    _validate_logical_tensor_snapshots(logical_plan, authoritative_source_manifest)
+    _validate_logical_fragment_snapshots(logical_plan, authoritative_source_manifest)
     target_required = _required_participants(logical_plan.target_executors)
     source_required = _required_participants(logical_plan.source_executors)
     target_binding_by_id = _validated_bindings_by_placement_id(
@@ -445,6 +497,7 @@ def bind_logical_transfer_plan(
         target_placement=logical_plan.target_placement,
         operations=bound_operations,
         planning_limits=logical_plan.planning_limits,
+        source_manifest_identity=logical_plan.source_manifest_identity,
         source_executors=(
             _build_executor_plans(
                 source_placements,

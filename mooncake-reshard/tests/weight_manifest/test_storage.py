@@ -91,6 +91,9 @@ def test_weight_manifest_round_trip_is_stable_and_has_no_runtime_address() -> No
     encoded = manifest.to_json()
 
     assert WeightManifest.from_json(encoded) == manifest
+    assert manifest.manifest_identity.group_id == manifest.group_id
+    assert manifest.manifest_identity.manifest_key == manifest.manifest_key
+    assert manifest.manifest_identity.content_sha256 == manifest.manifest_digest
     assert encoded == manifest.to_json()
     assert "4096" not in encoded
     assert "address" not in json.loads(encoded)["fragments"][0]
@@ -141,7 +144,7 @@ def test_weight_manifest_round_trip_preserves_shard_dims() -> None:
 
 def test_weight_manifest_round_trip_preserves_single_and_multi_axis_shards() -> None:
     single_axis = tensor_descriptor(tensor_id="layers.0.attn.qkv", expert_id=None)
-    nd_tensor = tensor_descriptor(
+    multi_axis_tensor = tensor_descriptor(
         tensor_id="layers.2.experts.w1",
         global_shape=(2, 8, 4),
         shard_dims=(0, 1),
@@ -159,7 +162,7 @@ def test_weight_manifest_round_trip_preserves_single_and_multi_axis_shards() -> 
         weight_generation=7,
         group_id=group_id,
         manifest_key=f"{group_id}/manifest",
-        tensors=(single_axis, nd_tensor),
+        tensors=(single_axis, multi_axis_tensor),
         fragments=(
             StoredFragment(
                 fragment_id="single-axis",
@@ -172,11 +175,11 @@ def test_weight_manifest_round_trip_preserves_single_and_multi_axis_shards() -> 
             ),
             *(
                 StoredFragment(
-                    fragment_id=f"nd-e{expert}-o{out_shard}",
-                    tensor_id=nd_tensor.tensor_id,
+                    fragment_id=f"multi-e{expert}-o{out_shard}",
+                    tensor_id=multi_axis_tensor.tensor_id,
                     global_offset=(expert, out_shard * 4, 0),
                     local_shape=(1, 4, 4),
-                    object_key=f"{group_id}/payload/nd-e{expert}-o{out_shard}",
+                    object_key=f"{group_id}/payload/multi-e{expert}-o{out_shard}",
                     object_offset=0,
                     nbytes=32,
                 )

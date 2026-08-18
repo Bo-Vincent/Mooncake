@@ -326,7 +326,11 @@ class PlacementExecutionE2ETest(unittest.TestCase):
             source,
             target_placement,
         )
-        transfer = bind_logical_transfer_plan(logical, (target_binding,))
+        transfer = bind_logical_transfer_plan(
+            logical,
+            (target_binding,),
+            source_manifest=source,
+        )
         store = RangeStore(
             {
                 stored.object_key: payload,
