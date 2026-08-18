@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Sequence, Union
 
 from ..storage_manifest import WeightManifest
 from .contracts import UploadReceipt, WeightUploadPlan
@@ -89,8 +89,8 @@ class PayloadStoreOperations:
             if operation.target.object_key not in persisted_keys
         ]
 
-    def remove_keys(self, keys: Sequence[str]) -> list[tuple[str, str | int]]:
-        failures: list[tuple[str, str | int]] = []
+    def remove_keys(self, keys: Sequence[str]) -> list[tuple[str, Union[str, int]]]:
+        failures: list[tuple[str, Union[str, int]]] = []
         for key in keys:
             try:
                 result = self.client.store.remove(key, force=True)

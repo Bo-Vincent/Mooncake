@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Sequence, TypeAlias
+from typing import TYPE_CHECKING, Optional, Sequence
+from uuid import uuid4
+
+from ..._typing import TypeAlias
 
 from ...contracts import RuntimeFragmentId
+from ...transfer_engine.lifetime import AllocationTokenSet, TerminalTransferState
+from ..lifetime import (
+    WeightAllocationGuardProviders,
+    acquire_weight_binding_token,
+)
 from ..manifest import (
     RuntimeBindingFragment,
     WeightPlacementManifest,
@@ -18,6 +26,7 @@ from ..storage_manifest import WeightManifest
 from .backend import RangeResults
 from .contracts import WeightLoadPlan, _require_stored_load_operation
 from .errors import WeightStoreError
+from .registration import StoreRegistrationLease
 from .validation import (
     pair_manifests,
     runtime_binding_fragment,
@@ -91,8 +100,10 @@ class WeightLoadService:
         target_placement: WeightPlacementManifest,
         target_binding: WeightRuntimeBindingManifest,
         *,
-        pre_registered: bool = False,
-        target_worker_id: str | None = None,
+        target_worker_id: Optional[str] = None,
+        target_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        registration_lease: Optional[StoreRegistrationLease] = None,
+        transfer_id: Optional[str] = None,
     ) -> None:
         validate_manifest_pair(target_placement, target_binding, "target")
         if (
@@ -137,7 +148,11 @@ class WeightLoadService:
         }
         operations_by_target: dict[RuntimeFragmentId, list[StoredLoadOperation]] = {}
         operation_indices = sorted(
-            index for executor in executors for index in executor.operation_indices
+            index
+            for executor in executors
+            for index in plan.transfer.operation_indices_for_executor(
+                executor, "target"
+            )
         )
         for index in operation_indices:
             operation = _require_stored_load_operation(plan.transfer.operations[index])
@@ -165,49 +180,99 @@ class WeightLoadService:
         if not operations_by_target:
             return
 
-        targets = [local[fragment_id] for fragment_id in sorted(operations_by_target)]
-        with self.client.registration.registered(
-            targets, pre_registered=pre_registered
-        ):
-            batch: list[RangeRequest] = []
-            for target in targets:
-                operations = sorted(
-                    operations_by_target[target.fragment_id],
-                    key=lambda item: (
-                        item.target_offset,
-                        item.source.object_key,
-                        item.source_offset,
-                    ),
+        planned_targets = [
+            local[fragment_id] for fragment_id in sorted(operations_by_target)
+        ]
+        required_fragment_ids = tuple(
+            sorted(fragment.fragment_id for fragment in planned_targets)
+        )
+        lifetime_tokens: Optional[AllocationTokenSet] = None
+        if registration_lease is None:
+            try:
+                fresh_binding, lifetime_tokens = acquire_weight_binding_token(
+                    transfer_id=transfer_id or uuid4().hex,
+                    expected_binding=target_binding,
+                    required_fragment_ids=required_fragment_ids,
+                    side="target",
+                    providers=target_allocation_guards,
                 )
-                for operation in operations:
-                    for (
-                        source_offset,
-                        target_offset,
-                        nbytes,
-                    ) in operation.iter_segments():
-                        for chunk_offset in range(
-                            0, nbytes, self.client.max_range_bytes
+            except ValueError as error:
+                raise WeightStoreError(str(error)) from error
+        else:
+            fresh_binding = registration_lease.binding
+            registration_lease.validate(target_binding, planned_targets)
+
+        fresh_targets = {
+            fragment.fragment_id: fragment for fragment in fresh_binding.fragments
+        }
+        targets: list[RuntimeBindingFragment] = []
+        for planned_target in planned_targets:
+            current = fresh_targets.get(planned_target.fragment_id)
+            if current is None or not same_runtime_snapshot(current, planned_target):
+                raise WeightStoreError(
+                    f"stale target fragment: {planned_target.fragment_id}"
+                )
+            targets.append(current)
+
+        store_io_started = False
+        terminal_state = TerminalTransferState.ABORTED
+        try:
+            with self.client.registration.registered(
+                targets,
+                pre_registered_lease=registration_lease,
+                lifetime_tokens=lifetime_tokens,
+            ):
+                batch: list[RangeRequest] = []
+                for target in targets:
+                    operations = sorted(
+                        operations_by_target[target.fragment_id],
+                        key=lambda item: (
+                            item.target_offset,
+                            item.source.object_key,
+                            item.source_offset,
+                        ),
+                    )
+                    for operation in operations:
+                        for (
+                            source_offset,
+                            target_offset,
+                            nbytes,
+                        ) in operation.iter_segments(
+                            max_segments=self.client.max_region_segments
                         ):
-                            chunk_size = min(
-                                self.client.max_range_bytes,
-                                nbytes - chunk_offset,
-                            )
-                            batch.append(
-                                (
-                                    target,
-                                    operation.source.object_key,
-                                    target_offset + chunk_offset,
-                                    operation.source.object_offset
-                                    + source_offset
-                                    + chunk_offset,
-                                    chunk_size,
+                            for chunk_offset in range(
+                                0, nbytes, self.client.max_range_bytes
+                            ):
+                                chunk_size = min(
+                                    self.client.max_range_bytes,
+                                    nbytes - chunk_offset,
                                 )
-                            )
-                            if len(batch) == self.client.max_ranges_per_request:
-                                self._load_range_batch(batch)
-                                batch = []
-            if batch:
-                self._load_range_batch(batch)
+                                batch.append(
+                                    (
+                                        target,
+                                        operation.source.object_key,
+                                        target_offset + chunk_offset,
+                                        operation.source.object_offset
+                                        + source_offset
+                                        + chunk_offset,
+                                        chunk_size,
+                                    )
+                                )
+                                if len(batch) == self.client.max_ranges_per_request:
+                                    store_io_started = True
+                                    self._load_range_batch(batch)
+                                    batch = []
+                if batch:
+                    store_io_started = True
+                    self._load_range_batch(batch)
+            terminal_state = TerminalTransferState.COMPLETED
+        except BaseException:
+            if store_io_started:
+                terminal_state = TerminalTransferState.FAILED_DRAINED
+            raise
+        finally:
+            if lifetime_tokens is not None:
+                lifetime_tokens.release_after_terminal(terminal_state)
 
     def _load_range_batch(
         self,

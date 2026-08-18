@@ -287,6 +287,7 @@ def _build_packed_reader_fixture(
                 endpoint=source_endpoint,
                 storage_address=source_buffer.pointer,
                 storage_nbytes=source_buffer.size,
+                owner=source_buffer,
             )
         )
     source_buffer.write(bytes(source_expected))
@@ -353,6 +354,7 @@ def _build_packed_reader_fixture(
                     endpoint=target_endpoint,
                     storage_address=target_buffer.pointer,
                     storage_nbytes=target_buffer.size,
+                    owner=target_buffer,
                 )
             )
         target_groups[(0, tp_rank, 0, 0)] = list(

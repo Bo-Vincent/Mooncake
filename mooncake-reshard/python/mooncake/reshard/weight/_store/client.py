@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Optional
+from uuid import uuid4
 
 from ..manifest import (
     WeightPlacementManifest,
     WeightRuntimeBindingManifest,
 )
+from ...contracts import RuntimeFragmentId
 from ..storage_manifest import WeightManifest
+from ...transfer_engine.lifetime import TerminalTransferState
+from ..lifetime import (
+    WeightAllocationGuardProviders,
+    acquire_weight_binding_token,
+)
 from .contracts import UploadReceipt, WeightLoadPlan, WeightUploadPlan
 from .errors import WeightStoreError
 from .backend import (
@@ -16,7 +24,7 @@ from .backend import (
 )
 from .load import WeightLoadService
 from .payload import PayloadStoreOperations
-from .registration import StoreBufferRegistration
+from .registration import StoreBufferRegistration, StoreRegistrationLease
 from .session import WeightUploadSession
 from .upload import WeightUploadService
 
@@ -37,7 +45,7 @@ class WeightStore:
         store: object,
         *,
         key_prefix: str = "weights",
-        config_factory: StoreConfigFactory | None = None,
+        config_factory: Optional[StoreConfigFactory] = None,
         max_range_bytes: int = 64 * 1024 * 1024,
         max_ranges_per_request: int = 1024,
         max_region_segments: int = 1_000_000,
@@ -79,8 +87,10 @@ class WeightStore:
         source_placement: WeightPlacementManifest,
         source_binding: WeightRuntimeBindingManifest,
         *,
-        pre_registered: bool = False,
-        source_worker_id: str | None = None,
+        source_worker_id: Optional[str] = None,
+        source_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        registration_lease: Optional[StoreRegistrationLease] = None,
+        transfer_id: Optional[str] = None,
     ) -> tuple[UploadReceipt, ...]:
         _require_upload_plan(plan)
         return self._upload.upload(
@@ -88,7 +98,9 @@ class WeightStore:
             source_placement,
             source_binding,
             source_worker_id=source_worker_id,
-            pre_registered=pre_registered,
+            source_allocation_guards=source_allocation_guards,
+            registration_lease=registration_lease,
+            transfer_id=transfer_id,
         )
 
     def abort_upload(
@@ -128,8 +140,10 @@ class WeightStore:
         target_placement: WeightPlacementManifest,
         target_binding: WeightRuntimeBindingManifest,
         *,
-        pre_registered: bool = False,
-        target_worker_id: str | None = None,
+        target_worker_id: Optional[str] = None,
+        target_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        registration_lease: Optional[StoreRegistrationLease] = None,
+        transfer_id: Optional[str] = None,
     ) -> None:
         _require_load_plan(plan)
         self._load.load(
@@ -137,8 +151,56 @@ class WeightStore:
             target_placement,
             target_binding,
             target_worker_id=target_worker_id,
-            pre_registered=pre_registered,
+            target_allocation_guards=target_allocation_guards,
+            registration_lease=registration_lease,
+            transfer_id=transfer_id,
         )
+
+    def register_weight_buffers(
+        self,
+        binding: WeightRuntimeBindingManifest,
+        *,
+        fragment_ids: Sequence[RuntimeFragmentId],
+        allocation_guards: Optional[WeightAllocationGuardProviders],
+        side: str,
+        transfer_id: Optional[str] = None,
+    ) -> StoreRegistrationLease:
+        """Create a typed long-lived Store registration under a framework pin."""
+
+        if not isinstance(binding, WeightRuntimeBindingManifest):
+            raise WeightStoreError("binding must be a WeightRuntimeBindingManifest")
+        requested_ids = tuple(sorted(set(fragment_ids)))
+        if not requested_ids:
+            raise WeightStoreError("Store registration lease requires fragments")
+        try:
+            fresh_binding, tokens = acquire_weight_binding_token(
+                transfer_id=transfer_id or uuid4().hex,
+                expected_binding=binding,
+                required_fragment_ids=requested_ids,
+                side=side,
+                providers=allocation_guards,
+            )
+        except ValueError as error:
+            raise WeightStoreError(str(error)) from error
+        fragments_by_id = {
+            fragment.fragment_id: fragment for fragment in fresh_binding.fragments
+        }
+        try:
+            fragments = tuple(
+                fragments_by_id[fragment_id] for fragment_id in requested_ids
+            )
+        except KeyError as error:
+            tokens.release_after_terminal(TerminalTransferState.ABORTED)
+            raise WeightStoreError(
+                f"Store registration fragment is missing: {error.args[0]}"
+            ) from error
+        return self.registration.acquire_lease(fresh_binding, fragments, tokens)
+
+    def pending_registration_ids(self) -> tuple[str, ...]:
+        return self.registration.pending_registration_ids()
+
+    def drain_pending_registration(self, pending_registration_id: str) -> None:
+        self.registration.drain_pending_registration(pending_registration_id)
 
 
 __all__ = ["WeightStore", "WeightStoreError"]

@@ -24,9 +24,9 @@ from weight_gpu_e2e.buffers import (
     CudaBuffer,
     CudaRuntime,
     _parse_cuda_devices,
-    _registered_store_buffers,
 )
 from weight_gpu_e2e.execution import _cleanup_store_upload
+from weight_gpu_e2e.lifetime import allocation_guards_for_bindings
 
 
 @pytest.mark.skipif(
@@ -89,55 +89,54 @@ def test_gpu_store_moves_weights_across_dp_tp_pp_ep_together() -> None:
         assert result == 0
         upload_plan = None
         try:
-            all_buffers = [
-                *fixture.source_buffers.values(),
-                *fixture.target_buffers.values(),
-            ]
-            with _registered_store_buffers(store, all_buffers):
-                weight_store = WeightStore(
-                    store, config_factory=_native_store_config_factory
-                )
-                upload_plan = weight_store.prepare_upload(
-                    fixture.sources.placement,
-                    fixture.sources.bindings,
-                    namespace="all-axes-native-e2e",
-                )
-                receipts = tuple(
-                    receipt
-                    for source_placement, source_binding in fixture.sources.active_pairs()
-                    for receipt in weight_store.upload(
-                        upload_plan,
-                        source_placement,
-                        source_binding,
-                        pre_registered=True,
-                    )
-                )
-                persisted = weight_store.commit(upload_plan, receipts)
-                weight_store.finalize_upload_session(upload_plan)
-                loaded = weight_store.load_manifest(persisted.manifest_key)
-                logical = plan_stored_transfer_to_target_placement(
-                    loaded,
-                    fixture.targets.placement,
-                )
-                assert all(
-                    not hasattr(operation.target, "address")
-                    for operation in logical.operations
-                )
-                load_plan = WeightLoadPlan(
-                    manifest=loaded,
-                    transfer=bind_logical_transfer_plan(
-                        logical,
-                        fixture.targets.bindings,
+            weight_store = WeightStore(
+                store, config_factory=_native_store_config_factory
+            )
+            upload_plan = weight_store.prepare_upload(
+                fixture.sources.placement,
+                fixture.sources.bindings,
+                namespace="all-axes-native-e2e",
+            )
+            receipts = tuple(
+                receipt
+                for source_placement, source_binding in fixture.sources.active_pairs()
+                for receipt in weight_store.upload(
+                    upload_plan,
+                    source_placement,
+                    source_binding,
+                    source_allocation_guards=allocation_guards_for_bindings(
+                        (source_binding,)
                     ),
                 )
-                for target_placement, target_binding in fixture.targets.active_pairs():
-                    weight_store.load(
-                        load_plan,
-                        target_placement,
-                        target_binding,
-                        pre_registered=True,
-                    )
-                fixture.verify()
+            )
+            persisted = weight_store.commit(upload_plan, receipts)
+            weight_store.finalize_upload_session(upload_plan)
+            loaded = weight_store.load_manifest(persisted.manifest_key)
+            logical = plan_stored_transfer_to_target_placement(
+                loaded,
+                fixture.targets.placement,
+            )
+            assert all(
+                not hasattr(operation.target, "address")
+                for operation in logical.operations
+            )
+            load_plan = WeightLoadPlan(
+                manifest=loaded,
+                transfer=bind_logical_transfer_plan(
+                    logical,
+                    fixture.targets.bindings,
+                ),
+            )
+            for target_placement, target_binding in fixture.targets.active_pairs():
+                weight_store.load(
+                    load_plan,
+                    target_placement,
+                    target_binding,
+                    target_allocation_guards=allocation_guards_for_bindings(
+                        (target_binding,)
+                    ),
+                )
+            fixture.verify()
         finally:
             if upload_plan is not None:
                 _cleanup_store_upload(store, upload_plan)
@@ -205,63 +204,65 @@ def test_gpu_store_reshards_independent_experts_across_dimensions() -> None:
         assert result == 0
         upload_plan = None
         try:
-            all_buffers = [*fixture.source_buffers, *fixture.target_buffers]
-            with _registered_store_buffers(store, all_buffers):
-                weight_store = WeightStore(
-                    store, config_factory=_native_store_config_factory
+            weight_store = WeightStore(
+                store, config_factory=_native_store_config_factory
+            )
+            upload_plan = weight_store.prepare_upload(
+                fixture.sources.placement,
+                fixture.sources.bindings,
+                namespace="cross-dim-native-e2e",
+            )
+            assert len(upload_plan.operations) == 8
+            assert (
+                len(
+                    {
+                        operation.target.object_key
+                        for operation in upload_plan.operations
+                    }
                 )
-                upload_plan = weight_store.prepare_upload(
-                    fixture.sources.placement,
-                    fixture.sources.bindings,
-                    namespace="cross-dim-native-e2e",
-                )
-                assert len(upload_plan.operations) == 8
-                assert (
-                    len(
-                        {
-                            operation.target.object_key
-                            for operation in upload_plan.operations
-                        }
-                    )
-                    == 8
-                )
-                receipts = tuple(
-                    receipt
-                    for source_placement, source_binding in fixture.sources.active_pairs()
-                    for receipt in weight_store.upload(
-                        upload_plan,
-                        source_placement,
-                        source_binding,
-                        pre_registered=True,
-                    )
-                )
-                persisted = weight_store.commit(upload_plan, receipts)
-                weight_store.finalize_upload_session(upload_plan)
-                loaded = weight_store.load_manifest(persisted.manifest_key)
-                assert loaded == persisted
-                logical = plan_stored_transfer_to_target_placement(
-                    loaded,
-                    fixture.targets.placement,
-                )
-                assert all(
-                    not hasattr(operation.target, "address")
-                    for operation in logical.operations
-                )
-                load_plan = WeightLoadPlan(
-                    manifest=loaded,
-                    transfer=bind_logical_transfer_plan(
-                        logical,
-                        fixture.targets.bindings,
+                == 8
+            )
+            receipts = tuple(
+                receipt
+                for source_placement, source_binding in fixture.sources.active_pairs()
+                for receipt in weight_store.upload(
+                    upload_plan,
+                    source_placement,
+                    source_binding,
+                    source_allocation_guards=allocation_guards_for_bindings(
+                        (source_binding,)
                     ),
                 )
-                for target_placement, target_binding in fixture.targets.active_pairs():
-                    weight_store.load(
-                        load_plan,
-                        target_placement,
-                        target_binding,
-                        pre_registered=True,
-                    )
-                fixture.verify()
+            )
+            persisted = weight_store.commit(upload_plan, receipts)
+            weight_store.finalize_upload_session(upload_plan)
+            loaded = weight_store.load_manifest(persisted.manifest_key)
+            assert loaded == persisted
+            logical = plan_stored_transfer_to_target_placement(
+                loaded,
+                fixture.targets.placement,
+            )
+            assert all(
+                not hasattr(operation.target, "address")
+                for operation in logical.operations
+            )
+            load_plan = WeightLoadPlan(
+                manifest=loaded,
+                transfer=bind_logical_transfer_plan(
+                    logical,
+                    fixture.targets.bindings,
+                ),
+            )
+            for target_placement, target_binding in fixture.targets.active_pairs():
+                weight_store.load(
+                    load_plan,
+                    target_placement,
+                    target_binding,
+                    target_allocation_guards=allocation_guards_for_bindings(
+                        (target_binding,)
+                    ),
+                )
+            fixture.verify()
         finally:
             if upload_plan is not None:
                 _cleanup_store_upload(store, upload_plan)

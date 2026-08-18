@@ -128,12 +128,14 @@ def test_store_contract_uses_explicit_placement_and_binding() -> None:
     )
 
     upload_parameters = tuple(signature(WeightStore.upload).parameters)
-    assert upload_parameters[:5] == (
+    assert upload_parameters[:7] == (
         "self",
         "plan",
         "source_placement",
         "source_binding",
-        "pre_registered",
+        "source_worker_id",
+        "source_allocation_guards",
+        "registration_lease",
     )
 
     plan_load_parameters = tuple(signature(WeightStore.plan_load).parameters)
@@ -145,12 +147,14 @@ def test_store_contract_uses_explicit_placement_and_binding() -> None:
     )
 
     load_parameters = tuple(signature(WeightStore.load).parameters)
-    assert load_parameters[:5] == (
+    assert load_parameters[:7] == (
         "self",
         "plan",
         "target_placement",
         "target_binding",
-        "pre_registered",
+        "target_worker_id",
+        "target_allocation_guards",
+        "registration_lease",
     )
 
 

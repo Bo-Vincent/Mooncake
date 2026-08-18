@@ -1,4 +1,5 @@
 from .client import WeightStore, WeightStoreError
+from .registration import StoreRegistrationLease
 from .contracts import (
     UploadOperation,
     UploadReceipt,
@@ -16,6 +17,7 @@ __all__ = [
     "WeightLoadPlan",
     "WeightStore",
     "WeightStoreError",
+    "StoreRegistrationLease",
     "WeightUploadService",
     "WeightUploadSession",
     "WeightUploadPlan",
