@@ -89,13 +89,19 @@ without changing tensor geometry. Runtime binding supplies the physical
 addresses only after logical planning. A `LogicalTransferPlan` must cover every
 selected target fragment exactly once. Construction and the public bind boundary
 both enforce that rule: canonical `TransferRegion` values are checked as N-D
-logical boxes without row expansion, while legacy `CopyRange` values use a
-bounded segment scan and fail closed when its limit is exceeded.
+logical boxes without row expansion and fail closed when coverage is incomplete.
 
 Weight Store and TE adapters consume the same bound plan. Store persists weight
 payload fragments and their storage manifest; TE lowers regions into bounded
 physical transfer batches while preserving allocation, lease, generation, and
 completion fences.
+
+Runtime addresses alone do not authorize Store or TE I/O. A framework adapter
+must supply an allocation guard for every participating runtime binding. The
+guard pins the framework-owned allocation, returns a fresh binding while pinned,
+and is released only after terminal completion or explicit cleanup. Process-
+local allocation owners are intentionally excluded from serialized bindings and
+plans.
 
 The executable plan retains the complete target placement and re-checks exact
 coverage for every selected target fragment at its public construction

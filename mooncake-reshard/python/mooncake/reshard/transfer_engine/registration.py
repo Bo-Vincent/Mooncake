@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Generator, Protocol, Sequence
+from typing import Generator, Optional, Protocol, Sequence, Union
 
 from ..contracts import LeaseId, RuntimeBindingFragment, RuntimeFragmentId
 from .completion import (
@@ -10,6 +10,7 @@ from .completion import (
     TransferCompletionUnknownError,
     TransferEngineError,
 )
+from .lifetime import AllocationLifetimeToken, AllocationTokenSet
 
 
 class _RegistrationEngine(Protocol):
@@ -25,6 +26,7 @@ class _PendingResourceOwner(Protocol):
         *,
         registrations: Sequence[int],
         resources: Sequence[object],
+        allocation_tokens: Sequence[AllocationLifetimeToken] = (),
     ) -> None: ...
 
 
@@ -44,7 +46,7 @@ class BufferRegistrationLease:
     storage_nbytes: int
     storage_offset_bytes: int
     lease_generation: int
-    runtime_lease_id: LeaseId | None = None
+    runtime_lease_id: Optional[LeaseId] = None
 
     def __post_init__(self) -> None:
         if not self.fragment_id or not self.worker_id or not self.device:
@@ -138,7 +140,7 @@ def same_runtime_snapshot(
 
 
 def registration_map(
-    registrations: Sequence[BufferRegistrationLease] | None,
+    registrations: Optional[Sequence[BufferRegistrationLease]],
     label: str,
 ) -> dict[RuntimeFragmentId, BufferRegistrationLease]:
     if registrations is None:
@@ -183,19 +185,24 @@ def validate_registration(
 
 def _handoff_pending_resources(
     pending_owner: _PendingResourceOwner,
-    error: TransferCompletionUnknownError | _PendingCompletionWaitInterrupted,
+    error: Union[TransferCompletionUnknownError, _PendingCompletionWaitInterrupted],
     *,
     registrations: Sequence[int],
     resources: Sequence[object],
-) -> None:
+    lifetime_tokens: Optional[AllocationTokenSet] = None,
+) -> BaseException:
+    allocation_tokens = lifetime_tokens.tokens if lifetime_tokens is not None else ()
     pending_owner._retain_pending_resources(
         error.pending_transfer_id,
         registrations=registrations,
         resources=resources,
+        allocation_tokens=allocation_tokens,
     )
+    if lifetime_tokens is not None:
+        lifetime_tokens.handoff_to_pending()
     if isinstance(error, _PendingCompletionWaitInterrupted):
-        raise error.interruption from error
-    raise error
+        return error.interruption
+    return error
 
 
 @contextmanager
@@ -205,10 +212,11 @@ def registered_sources(
     fragments: Sequence[RuntimeBindingFragment],
     *,
     pre_registered: bool,
-    registrations: Sequence[BufferRegistrationLease] | None,
+    registrations: Optional[Sequence[BufferRegistrationLease]],
     lease_generation: int,
     runtime_lease_id: LeaseId,
     resources: Sequence[object],
+    lifetime_tokens: Optional[AllocationTokenSet] = None,
 ) -> Generator[None, None, None]:
     if pre_registered:
         registration_by_id = registration_map(registrations, "source")
@@ -226,11 +234,12 @@ def registered_sources(
             TransferCompletionUnknownError,
             _PendingCompletionWaitInterrupted,
         ) as error:
-            _handoff_pending_resources(
+            raise _handoff_pending_resources(
                 pending_owner,
                 error,
                 registrations=(),
                 resources=resources,
+                lifetime_tokens=lifetime_tokens,
             )
         return
     if registrations is not None:
@@ -240,7 +249,7 @@ def registered_sources(
 
     sizes_by_address = _registered_allocations(fragments, "source")
     owned: list[int] = []
-    primary_error: BaseException | None = None
+    primary_error: Optional[BaseException] = None
     try:
         for address, nbytes in sizes_by_address.items():
             try:
@@ -265,14 +274,15 @@ def registered_sources(
             _PendingCompletionWaitInterrupted,
         ),
     ):
-        _handoff_pending_resources(
+        raise _handoff_pending_resources(
             pending_owner,
             primary_error,
             registrations=owned,
             resources=resources,
+            lifetime_tokens=lifetime_tokens,
         )
 
-    failures: list[tuple[int, str | int]] = []
+    failures: list[tuple[int, Union[str, int]]] = []
     for address in reversed(owned):
         try:
             result = engine.unregister_memory(address)
@@ -302,6 +312,7 @@ def registered_targets(
     *,
     pre_registered: bool,
     resources: Sequence[object],
+    lifetime_tokens: Optional[AllocationTokenSet] = None,
 ) -> Generator[None, None, None]:
     if pre_registered:
         try:
@@ -310,17 +321,18 @@ def registered_targets(
             TransferCompletionUnknownError,
             _PendingCompletionWaitInterrupted,
         ) as error:
-            _handoff_pending_resources(
+            raise _handoff_pending_resources(
                 pending_owner,
                 error,
                 registrations=(),
                 resources=resources,
+                lifetime_tokens=lifetime_tokens,
             )
         return
 
     sizes_by_address = _registered_allocations(fragments, "target")
     owned: list[int] = []
-    primary_error: BaseException | None = None
+    primary_error: Optional[BaseException] = None
     try:
         for address, nbytes in sizes_by_address.items():
             try:
@@ -345,14 +357,15 @@ def registered_targets(
             _PendingCompletionWaitInterrupted,
         ),
     ):
-        _handoff_pending_resources(
+        raise _handoff_pending_resources(
             pending_owner,
             primary_error,
             registrations=owned,
             resources=resources,
+            lifetime_tokens=lifetime_tokens,
         )
 
-    failures: list[tuple[int, str | int]] = []
+    failures: list[tuple[int, Union[str, int]]] = []
     for address in reversed(owned):
         try:
             result = engine.unregister_memory(address)

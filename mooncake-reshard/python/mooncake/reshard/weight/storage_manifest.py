@@ -6,7 +6,9 @@ import json
 from dataclasses import asdict, dataclass
 from math import prod
 from collections.abc import Mapping, Sequence
-from typing import TypeAlias, cast
+from typing import Optional, Union, cast
+
+from .._typing import TypeAlias
 
 from .._compat import _strict_zip
 from ..contracts import ResourceId, ResourceKind, RevisionId, StoredFragmentId, TensorId
@@ -32,8 +34,8 @@ StoredAliasDescriptorKey: TypeAlias = tuple[
     int,
     tuple[int, ...],
     tuple[ParallelAxis, ...],
-    int | None,
-    int | None,
+    Optional[int],
+    Optional[int],
     str,
 ]
 StoredAliasGeometryKey: TypeAlias = tuple[
@@ -174,7 +176,7 @@ class WeightManifest:
         )
 
     @classmethod
-    def from_json(cls, value: str | bytes | bytearray) -> WeightManifest:
+    def from_json(cls, value: Union[str, bytes, bytearray]) -> WeightManifest:
         def reject_constant(constant: str) -> None:
             raise ValueError(f"non-finite JSON number is unsupported: {constant}")
 
@@ -339,7 +341,12 @@ def _require_mapping(value: object, label: str) -> Mapping[str, object]:
     return {cast(str, key): item for key, item in raw.items()}
 
 
-def _optional_integer(value: object, label: str, *, minimum: int) -> int | None:
+def _optional_integer(
+    value: object,
+    label: str,
+    *,
+    minimum: int,
+) -> Optional[int]:
     if value is None:
         return None
     return _require_integer(value, label, minimum=minimum)

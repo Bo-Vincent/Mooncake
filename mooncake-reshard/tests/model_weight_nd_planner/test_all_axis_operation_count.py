@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from mooncake.reshard.weight.manifest import ParallelRank, SplitAxis
-from mooncake.reshard.weight.planner import TransferRegion
+from mooncake.reshard.weight.planner import (
+    PlanningLimits,
+    TransferRegion,
+    plan_placement_transfer,
+)
 
 from .helpers import (
     assert_plan_copies_logical_contents,
@@ -121,3 +127,40 @@ def test_cross_dim_planner_keeps_operation_count_at_region_granularity() -> None
     assert len(plan.operations) == 64
     assert {operation.segment_count for operation in plan.operations} == {8192}
     assert all(isinstance(operation, TransferRegion) for operation in plan.operations)
+
+
+def test_cross_dim_planner_rejects_total_region_budget_before_materialization() -> None:
+    source_tensor = tensor_descriptor(
+        "layers.0.experts.w1",
+        global_shape=(8, 8, 8),
+        shard_dims=(0,),
+        parallel_axes=(SplitAxis(kind="ep", dim=0),),
+    )
+    target_tensor = tensor_descriptor(
+        source_tensor.tensor_id,
+        global_shape=source_tensor.global_shape,
+        shard_dims=(2,),
+    )
+    sources = build_manifests(
+        "source-budget",
+        [
+            (source_tensor, ParallelRank(ep=rank), (rank, 0, 0), (1, 8, 8))
+            for rank in range(8)
+        ],
+        address_base=0x100000000,
+    )
+    targets = build_manifests(
+        "target-budget",
+        [
+            (target_tensor, ParallelRank(tp=rank), (0, 0, rank), (8, 8, 1))
+            for rank in range(8)
+        ],
+        address_base=0x300000000,
+    )
+
+    with pytest.raises(ValueError, match="max_transfer_regions"):
+        plan_placement_transfer(
+            sources.placement,
+            targets.placement,
+            planning_limits=PlanningLimits(max_transfer_regions=63),
+        )

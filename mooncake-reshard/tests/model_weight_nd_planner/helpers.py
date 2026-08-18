@@ -249,7 +249,9 @@ def assert_plan_copies_logical_contents(
     for operation in plan.operations:
         source = source_payloads[operation.source.fragment_id]
         target = target_payloads[operation.target.fragment_id]
-        for source_offset, target_offset, nbytes in operation.iter_segments():
+        for source_offset, target_offset, nbytes in operation.iter_segments(
+            max_segments=operation.segment_count
+        ):
             target[target_offset : target_offset + nbytes] = source[
                 source_offset : source_offset + nbytes
             ]

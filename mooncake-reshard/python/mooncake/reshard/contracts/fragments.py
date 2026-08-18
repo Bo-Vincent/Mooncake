@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Optional, cast
 
 from .ids import PlacementFragmentId, RuntimeFragmentId
 
@@ -29,7 +29,7 @@ class RuntimeBindingFragment:
     storage_address: int
     storage_nbytes: int
     storage_offset_bytes: int
-    owner: object | None = field(default=None, compare=False, repr=False)
+    owner: Optional[object] = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -80,6 +80,34 @@ class RuntimeBindingFragment:
             )
         if self.storage_offset_bytes > self.storage_nbytes - self.nbytes:
             raise ValueError("runtime view exceeds storage allocation bounds")
+
+    def __reduce__(self):
+        """Keep framework-owned allocation references out of process wire state.
+
+        ``owner`` is intentionally process-local. A receiving runtime must obtain
+        a fresh binding under its framework allocation guard before it can submit
+        Store or TE I/O; serializing an arbitrary Python owner would weaken that
+        boundary and is not reliable across processes.
+        """
+
+        return (
+            type(self),
+            (
+                self.placement_fragment_id,
+                self.fragment_id,
+                self.address,
+                self.nbytes,
+                self.worker_id,
+                self.endpoint,
+                self.device,
+                self.itemsize,
+                self.local_shape,
+                self.strides_bytes,
+                self.storage_address,
+                self.storage_nbytes,
+                self.storage_offset_bytes,
+            ),
+        )
 
 
 def _require_integer(value: object, name: str, *, minimum: int = 0) -> int:

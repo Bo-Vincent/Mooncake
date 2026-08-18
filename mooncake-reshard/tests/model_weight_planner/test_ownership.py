@@ -12,6 +12,7 @@ from mooncake.reshard.weight import (
     OwnershipAxis,
     ReplicatedAxis,
     SplitAxis,
+    plan_placement_transfer,
 )
 from mooncake.reshard.weight._planner.ownership import (
     complete_parallel_source_replicas,
@@ -24,6 +25,7 @@ from .helpers import (
     combine_runtime_inputs,
     descriptor,
     distribute_tp_shards_across_ep_ranks,
+    global_placement_from_fragments,
     operation_for_target,
     plan_transfer,
     plan_transfer_to_local_target,
@@ -94,7 +96,10 @@ def test_target_dp_replicas_on_distinct_devices_are_not_deduplicated() -> None:
         "cuda:0",
         "cuda:1",
     }
-    assert all(executor.operation_indices for executor in plan.target_executors)
+    assert all(
+        plan.operation_indices_for_executor(executor, "target")
+        for executor in plan.target_executors
+    )
 
 
 def test_ep_ownership_is_derived_from_parallel_axis_semantics() -> None:
@@ -119,6 +124,147 @@ def test_ep_ownership_is_derived_from_parallel_axis_semantics() -> None:
 
     assert parallel_tensor_owner(ownership_tensor, fragment) == (("ep", 3),)
     assert parallel_tensor_owner(split_tensor, fragment) == ()
+
+
+def test_dp_ownership_is_rejected_at_the_canonical_planner_boundary() -> None:
+    """MoE-DP needs framework ownership metadata that V3 does not yet define."""
+
+    tensor_a = replace(
+        descriptor(),
+        tensor_id="layers.0.weight",
+        shard_dims=(),
+        expert_id=None,
+        parallel_axes=(OwnershipAxis(kind="dp"),),
+    )
+    tensor_b = replace(
+        descriptor(),
+        tensor_id="layers.1.weight",
+        shard_dims=(),
+        expert_id=None,
+        parallel_axes=(OwnershipAxis(kind="dp"),),
+    )
+
+    def fragment(tensor, dp_rank: int, prefix: str) -> PlacementFragment:
+        return PlacementFragment(
+            placement_fragment_id=f"{prefix}-{tensor.tensor_id}-dp{dp_rank}",
+            tensor_id=tensor.tensor_id,
+            global_offset=(0, 0),
+            local_shape=tensor.global_shape,
+            nbytes=64,
+            rank=ParallelRank(dp=dp_rank),
+        )
+
+    source_fragments = (
+        fragment(tensor_a, 0, "source"),
+        fragment(tensor_b, 1, "source"),
+    )
+    target_fragments = (
+        fragment(tensor_a, 0, "target"),
+        fragment(tensor_b, 1, "target"),
+    )
+    source = global_placement_from_fragments(
+        resource_id="qwen3.5-0.8b",
+        revision="step-42",
+        placement_set_id="source-dp-owners",
+        tensors=(tensor_a, tensor_b),
+        fragments=source_fragments,
+    )
+    target = global_placement_from_fragments(
+        resource_id="qwen3.5-0.8b",
+        revision="step-42",
+        placement_set_id="target-dp-owners",
+        tensors=(tensor_a, tensor_b),
+        fragments=target_fragments,
+    )
+
+    with pytest.raises(ValueError, match="DP ownership reshard is not supported"):
+        plan_placement_transfer(source, target)
+
+
+def test_pipeline_routes_keep_distinct_virtual_stages_on_one_pp_rank() -> None:
+    tensor_a = replace(
+        descriptor(),
+        tensor_id="layers.0.weight",
+        shard_dims=(),
+        expert_id=None,
+        parallel_axes=(OwnershipAxis(kind="pp"),),
+    )
+    tensor_b = replace(
+        descriptor(),
+        tensor_id="layers.1.weight",
+        shard_dims=(),
+        expert_id=None,
+        parallel_axes=(OwnershipAxis(kind="pp"),),
+    )
+    source_fragments = (
+        PlacementFragment(
+            placement_fragment_id="source-stage-0",
+            tensor_id=tensor_a.tensor_id,
+            global_offset=(0, 0),
+            local_shape=tensor_a.global_shape,
+            nbytes=64,
+            rank=ParallelRank(pp=0),
+            pipeline_stage_id=0,
+        ),
+        PlacementFragment(
+            placement_fragment_id="source-stage-1",
+            tensor_id=tensor_b.tensor_id,
+            global_offset=(0, 0),
+            local_shape=tensor_b.global_shape,
+            nbytes=64,
+            rank=ParallelRank(pp=0),
+            pipeline_stage_id=1,
+        ),
+    )
+    target_fragments = (
+        PlacementFragment(
+            placement_fragment_id="target-stage-2",
+            tensor_id=tensor_a.tensor_id,
+            global_offset=(0, 0),
+            local_shape=tensor_a.global_shape,
+            nbytes=64,
+            rank=ParallelRank(pp=0),
+            pipeline_stage_id=2,
+        ),
+        PlacementFragment(
+            placement_fragment_id="target-stage-3",
+            tensor_id=tensor_b.tensor_id,
+            global_offset=(0, 0),
+            local_shape=tensor_b.global_shape,
+            nbytes=64,
+            rank=ParallelRank(pp=0),
+            pipeline_stage_id=3,
+        ),
+    )
+    source = runtime_inputs_from_groups(
+        resource_id="qwen3.5-0.8b",
+        revision="step-42",
+        placement_set_id="source-pipeline-stages",
+        tensors=(tensor_a, tensor_b),
+        groups=(("source", source_fragments, ()),),
+    )
+    target = runtime_inputs_from_groups(
+        resource_id="qwen3.5-0.8b",
+        revision="step-42",
+        placement_set_id="target-pipeline-stages",
+        tensors=(tensor_a, tensor_b),
+        groups=(("target", target_fragments, ()),),
+    )
+
+    logical = plan_placement_transfer(source.placement, target.placement)
+
+    assert {
+        (
+            route.source_pp,
+            route.source_pipeline_stage_id,
+            route.target_pp,
+            route.target_pipeline_stage_id,
+        )
+        for route in logical.pipeline_routes
+    } == {
+        (0, 0, 0, 2),
+        (0, 1, 0, 3),
+    }
 
 
 def test_all_parallel_axes_change_in_one_plan() -> None:

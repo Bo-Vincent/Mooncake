@@ -20,6 +20,7 @@ from weight_all_axes_e2e.execution import (
     _execute_te_fixture,
 )
 from weight_gpu_e2e.buffers import ManagedBuffer
+from weight_gpu_e2e.lifetime import allocation_guards_for_bindings
 
 
 @pytest.mark.skipif(
@@ -115,6 +116,12 @@ def test_te_reader_tcp_pulls_packed_tp1_weights_into_tp2_targets() -> None:
                         runtime_lease_id=target_binding.lease_id,
                     )
                     for fragment in target_binding.fragments
+                ),
+                source_allocation_guards=allocation_guards_for_bindings(
+                    sources.bindings
+                ),
+                target_allocation_guards=allocation_guards_for_bindings(
+                    (target_binding,)
                 ),
             )
 

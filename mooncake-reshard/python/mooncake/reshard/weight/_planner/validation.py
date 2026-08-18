@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import dataclass
-from math import prod
-from typing import Iterable, Sequence, TypeAlias
+from typing import Iterable, Optional, Sequence, Union
+
+from ..._typing import TypeAlias
 
 from ..._compat import _strict_zip
 from ...contracts import ParticipantId, PlacementFragmentId, TensorId
+from ...geometry import regions_exactly_cover
 from ..manifest import (
     PlacementFragment,
     TensorDescriptor,
@@ -14,73 +16,16 @@ from ..manifest import (
 from ..storage_manifest import StoredFragment
 from .contracts import (
     BoundWeightFragment,
-    CopyRange,
     ExecutableTransferOperation,
     LogicalTransferOperation,
     LogicalTransferPlan,
     TransferPlan,
-    TransferRegion,
 )
 from .attestation import RuntimeBindingAttestation
-from .geometry import _box_contains
-from .ownership import _boxes_exactly_cover, _boxes_overlap
 
 
 IdentityKey: TypeAlias = tuple[object, ...]
 TargetAddressSpace: TypeAlias = tuple[str, str, str]
-_MAX_LOGICAL_TARGET_SEGMENT_CHECKS = 1_000_000
-
-
-CoverageOperation: TypeAlias = LogicalTransferOperation | ExecutableTransferOperation
-
-
-def _logical_boxes_strictly_cover_target(
-    target: PlacementFragment,
-    operations: Iterable[CoverageOperation],
-) -> bool:
-    """Validate N-D target coverage without expanding rows or elements."""
-
-    boxes = tuple(
-        (operation.overlap_offset, operation.overlap_shape)
-        for operation in operations
-        if isinstance(operation, TransferRegion)
-    )
-    if not boxes or any(
-        not _box_contains(
-            target.global_offset,
-            target.local_shape,
-            offset,
-            shape,
-        )
-        for offset, shape in boxes
-    ):
-        return False
-    if sum(prod(shape) for _, shape in boxes) != prod(target.local_shape):
-        return False
-    return not _boxes_overlap(boxes)
-
-
-def _copy_ranges_strictly_cover_target(
-    target: PlacementFragment,
-    operations: Iterable[CoverageOperation],
-) -> bool:
-    """Check legacy byte-range plans without unbounded segment expansion."""
-
-    segments: list[tuple[int, int]] = []
-    for operation in operations:
-        for _, target_offset, nbytes in operation.iter_segments():
-            if len(segments) >= _MAX_LOGICAL_TARGET_SEGMENT_CHECKS:
-                raise ValueError("logical target segment scan budget exceeded")
-            segments.append((target_offset, target_offset + nbytes))
-
-    if not segments:
-        return False
-    cursor = 0
-    for begin, end in sorted(segments):
-        if begin != cursor:
-            return False
-        cursor = end
-    return cursor == target.nbytes
 
 
 def _validate_logical_target_coverage(logical_plan: LogicalTransferPlan) -> None:
@@ -94,12 +39,12 @@ def _validate_logical_target_coverage(logical_plan: LogicalTransferPlan) -> None
         for part in logical_plan.target_placement.parts
         for fragment in part.fragments
     }
-    operation_indices_by_participant: dict[ParticipantId, list[int]] = {}
+    operation_participants: set[ParticipantId] = set()
     operations_by_fragment: dict[
         PlacementFragmentId, list[LogicalTransferOperation]
     ] = {}
 
-    for index, operation in enumerate(logical_plan.operations):
+    for operation in logical_plan.operations:
         target = operation.target
         if not isinstance(target, PlacementFragment):
             raise ValueError("logical transfer operation target must be a placement")
@@ -116,9 +61,7 @@ def _validate_logical_target_coverage(logical_plan: LogicalTransferPlan) -> None
         operations_by_fragment.setdefault(target.placement_fragment_id, []).append(
             operation
         )
-        operation_indices_by_participant.setdefault(target_participant_id, []).append(
-            index
-        )
+        operation_participants.add(target_participant_id)
 
     if not logical_plan.target_executors:
         raise ValueError("logical plan has no target executor metadata")
@@ -141,10 +84,7 @@ def _validate_logical_target_coverage(logical_plan: LogicalTransferPlan) -> None
             raise ValueError(
                 "logical target executor fragments differ from target placement"
             )
-        expected_indices = tuple(
-            operation_indices_by_participant.get(executor.participant_id, ())
-        )
-        if executor.operation_indices != expected_indices:
+        if not logical_plan.operation_indices_for_executor(executor, "target"):
             raise ValueError(
                 "logical target executor operations differ from target placement"
             )
@@ -152,16 +92,12 @@ def _validate_logical_target_coverage(logical_plan: LogicalTransferPlan) -> None
             {fragment.placement_fragment_id: fragment for fragment in part.fragments}
         )
 
-    if seen_participants != set(operation_indices_by_participant):
+    if seen_participants != operation_participants:
         raise ValueError("logical target executors differ from planned operations")
 
     for fragment_id, target in selected_fragments.items():
         operations = operations_by_fragment.get(fragment_id, ())
-        if all(isinstance(operation, TransferRegion) for operation in operations):
-            complete = _logical_boxes_strictly_cover_target(target, operations)
-        else:
-            complete = _copy_ranges_strictly_cover_target(target, operations)
-        if not complete:
+        if not regions_exactly_cover(target, operations):
             raise ValueError(
                 f"logical target fragment is not fully covered: {fragment_id}"
             )
@@ -180,8 +116,8 @@ def _validate_bound_target_coverage(plan: TransferPlan) -> None:
     operations_by_fragment: dict[
         PlacementFragmentId, list[ExecutableTransferOperation]
     ] = {}
-    operation_indices_by_participant: dict[ParticipantId, list[int]] = {}
-    for index, operation in enumerate(plan.operations):
+    operation_participants: set[ParticipantId] = set()
+    for operation in plan.operations:
         target = operation.target
         attestation = target.attestation
         if (
@@ -199,7 +135,7 @@ def _validate_bound_target_coverage(plan: TransferPlan) -> None:
         operations_by_fragment.setdefault(target.placement_fragment_id, []).append(
             operation
         )
-        operation_indices_by_participant.setdefault(participant_id, []).append(index)
+        operation_participants.add(participant_id)
 
     if not plan.target_executors:
         raise ValueError("bound plan has no target executor metadata")
@@ -236,12 +172,7 @@ def _validate_bound_target_coverage(plan: TransferPlan) -> None:
             raise ValueError(
                 "bound target executor fragments differ from target placement"
             )
-        expected_indices = tuple(
-            index
-            for index, operation in enumerate(plan.operations)
-            if operation.target.fragment_id in executor.fragment_ids
-        )
-        if executor.operation_indices != expected_indices:
+        if not plan.operation_indices_for_executor(executor, "target"):
             raise ValueError(
                 "bound target executor operations differ from target placement"
             )
@@ -250,16 +181,12 @@ def _validate_bound_target_coverage(plan: TransferPlan) -> None:
             {fragment.placement_fragment_id: fragment for fragment in part.fragments}
         )
 
-    if selected_participants != set(operation_indices_by_participant):
+    if selected_participants != operation_participants:
         raise ValueError("bound target executors differ from planned operations")
 
     for fragment_id, target in selected_fragments.items():
         operations = operations_by_fragment.get(fragment_id, ())
-        if all(isinstance(operation, TransferRegion) for operation in operations):
-            complete = _logical_boxes_strictly_cover_target(target, operations)
-        else:
-            complete = _copy_ranges_strictly_cover_target(target, operations)
-        if not complete:
+        if not regions_exactly_cover(target, operations):
             raise ValueError(
                 f"bound target fragment is not fully covered: {fragment_id}"
             )
@@ -307,19 +234,9 @@ def _validate_tensor_subset(
         )
 
 
-def _operation_loop_geometry(
-    operation: ExecutableTransferOperation, side: str
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    if isinstance(operation, TransferRegion):
-        strides = (
-            operation.source_strides if side == "source" else operation.target_strides
-        )
-        return operation.outer_loop_counts, strides
-    stride = operation.source_stride if side == "source" else operation.target_stride
-    return (operation.repeat,), (stride,)
-
-
-def _is_complete_alias_group(fragment: BoundWeightFragment | StoredFragment) -> bool:
+def _is_complete_alias_group(
+    fragment: Union[BoundWeightFragment, StoredFragment],
+) -> bool:
     return len(fragment.aliases) > 1 and fragment.tensor_id in fragment.aliases
 
 
@@ -342,16 +259,14 @@ def _is_safe_declared_alias_overlap(
         or left.source.aliases != right.source.aliases
         or left_target.aliases != right_target.aliases
         or left.source.aliases != left_target.aliases
-        or type(left) is not type(right)
         or left.source.global_offset != right.source.global_offset
         or left.source.local_shape != right.source.local_shape
         or left.source_offset != right.source_offset
         or left.target_offset != right.target_offset
         or left.nbytes != right.nbytes
-        or _operation_loop_geometry(left, "source")
-        != _operation_loop_geometry(right, "source")
-        or _operation_loop_geometry(left, "target")
-        != _operation_loop_geometry(right, "target")
+        or left.outer_loop_counts != right.outer_loop_counts
+        or left.source_strides != right.source_strides
+        or left.target_strides != right.target_strides
         or left_target.global_offset != right_target.global_offset
         or left_target.local_shape != right_target.local_shape
         or left_target.address != right_target.address
@@ -364,14 +279,8 @@ def _is_safe_declared_alias_overlap(
         or not isinstance(right_attestation, RuntimeBindingAttestation)
         or left_attestation.placement != right_attestation.placement
         or left_attestation.binding != right_attestation.binding
-        or (
-            isinstance(left, TransferRegion)
-            and isinstance(right, TransferRegion)
-            and (
-                left.overlap_offset != right.overlap_offset
-                or left.overlap_shape != right.overlap_shape
-            )
-        )
+        or left.overlap_offset != right.overlap_offset
+        or left.overlap_shape != right.overlap_shape
     ):
         return False
     return True
@@ -379,10 +288,15 @@ def _is_safe_declared_alias_overlap(
 
 def _target_physical_bounds(operation: ExecutableTransferOperation) -> tuple[int, int]:
     begin = operation.target.address + operation.target_offset
-    counts, strides = _operation_loop_geometry(operation, "target")
     end = (
         begin
-        + sum((count - 1) * stride for count, stride in _strict_zip(counts, strides))
+        + sum(
+            (count - 1) * stride
+            for count, stride in _strict_zip(
+                operation.outer_loop_counts,
+                operation.target_strides,
+            )
+        )
         + operation.nbytes
     )
     return begin, end
@@ -401,8 +315,10 @@ class _SegmentScanBudget:
 
 def _absolute_target_segments(
     operation: ExecutableTransferOperation,
+    *,
+    max_segments: int,
 ) -> Iterable[tuple[int, int]]:
-    for _, target_offset, nbytes in operation.iter_segments():
+    for _, target_offset, nbytes in operation.iter_segments(max_segments=max_segments):
         begin = operation.target.address + target_offset
         yield begin, begin + nbytes
 
@@ -412,7 +328,13 @@ def _budgeted_target_segments(
     operation: ExecutableTransferOperation,
     budget: _SegmentScanBudget,
 ) -> Iterable[tuple[int, int, int]]:
-    for begin, end in _absolute_target_segments(operation):
+    for begin, end in _absolute_target_segments(
+        operation,
+        # The plan constructor already enforces its per-region bound. This
+        # scanner owns a separate aggregate budget and must account segments
+        # incrementally so its public error remains deterministic.
+        max_segments=operation.segment_count,
+    ):
         budget.consume()
         yield begin, end, operation_index
 
@@ -437,18 +359,14 @@ def _target_fragment_scan_key(
 
 def _complete_target_fragment_segment(
     indexed_operations: Sequence[tuple[int, ExecutableTransferOperation]],
-) -> tuple[int, int, int] | None:
-    if not indexed_operations or not all(
-        isinstance(operation, TransferRegion) for _, operation in indexed_operations
-    ):
+) -> Optional[tuple[int, int, int]]:
+    if not indexed_operations:
         return None
     target = indexed_operations[0][1].target
-    boxes = tuple(
-        (operation.overlap_offset, operation.overlap_shape)
-        for _, operation in indexed_operations
-        if isinstance(operation, TransferRegion)
-    )
-    if not _boxes_exactly_cover(target.global_offset, target.local_shape, boxes):
+    if not regions_exactly_cover(
+        target,
+        tuple(operation for _, operation in indexed_operations),
+    ):
         return None
     return target.address, target.address + target.nbytes, indexed_operations[0][0]
 
@@ -462,14 +380,6 @@ def _validate_target_physical_ranges(
         raise ValueError("max_segment_checks must be a positive integer")
     by_address_space: dict[TargetAddressSpace, list[ExecutableTransferOperation]] = {}
     for operation in operations:
-        if (
-            isinstance(operation, CopyRange)
-            and operation.repeat > 1
-            and operation.target_stride < operation.nbytes
-        ):
-            raise ValueError(
-                f"conflicting target physical range: {operation.target.fragment_id}"
-            )
         by_address_space.setdefault(
             (
                 operation.target.instance_id,
@@ -514,7 +424,7 @@ def _validate_target_physical_ranges(
         ordered_segments = heapq.merge(*segment_streams)
         previous_begin = -1
         previous_end = -1
-        previous_operation_index: int | None = None
+        previous_operation_index: Optional[int] = None
         for begin, end, operation_index in ordered_segments:
             if begin < previous_end:
                 if previous_operation_index is None:

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Sequence, TypeAlias
+from typing import TYPE_CHECKING, Optional, Sequence
+
+from ..._typing import TypeAlias
 from urllib.parse import quote
 from uuid import uuid4
 
 from .._planner.ownership import (
     complete_parallel_source_replicas,
     parallel_tensor_owner,
+    require_supported_dp_semantics,
 )
 from ...contracts import (
     ResourceId,
@@ -25,10 +28,16 @@ from ..manifest import (
     WeightRuntimeBindingManifest,
 )
 from ..storage_manifest import StoredFragment, WeightManifest
+from ...transfer_engine.lifetime import AllocationTokenSet, TerminalTransferState
+from ..lifetime import (
+    WeightAllocationGuardProviders,
+    acquire_weight_binding_token,
+)
 from .contracts import UploadOperation, UploadReceipt, WeightUploadPlan
 from .errors import WeightStoreError
 from .payload import PayloadStoreOperations
 from .session import WeightUploadSession
+from .registration import StoreRegistrationLease
 from .validation import (
     pair_manifests,
     same_runtime_snapshot,
@@ -81,6 +90,7 @@ def _collect_upload_sources(
     tensor_by_id: dict[TensorId, TensorDescriptor] = {
         tensor.tensor_id: tensor for tensor in placement.tensors
     }
+    require_supported_dp_semantics(tuple(tensor_by_id.values()))
     sources: list[UploadSource] = []
     runtime_fragment_ids: set[RuntimeFragmentId] = set()
     for placement, binding in pairs:
@@ -273,8 +283,10 @@ class WeightUploadService:
         source_placement: WeightPlacementManifest,
         source_binding: WeightRuntimeBindingManifest,
         *,
-        pre_registered: bool = False,
-        source_worker_id: str | None = None,
+        source_worker_id: Optional[str] = None,
+        source_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        registration_lease: Optional[StoreRegistrationLease] = None,
+        transfer_id: Optional[str] = None,
     ) -> tuple[UploadReceipt, ...]:
         validate_manifest_pair(source_placement, source_binding, "source")
         if source_placement.resource_id != plan.manifest.resource_id or (
@@ -367,28 +379,88 @@ class WeightUploadService:
                 )
             local_operations.append((operation, current))
         self.session.require_writable(plan)
-        sources = [current for _, current in local_operations]
-        object_keys = [operation.target.object_key for operation, _ in local_operations]
-        with self.client.registration.registered(
-            sources, pre_registered=pre_registered
-        ):
-            for begin in range(
-                0, len(local_operations), self.client.max_ranges_per_request
-            ):
-                batch = local_operations[
-                    begin : begin + self.client.max_ranges_per_request
-                ]
-                results = self.client.store.batch_put_from(
-                    [operation.target.object_key for operation, _ in batch],
-                    [current.address for _, current in batch],
-                    [current.nbytes for _, current in batch],
-                    self.client.config_factory(
-                        [plan.manifest.group_id] * len(batch), "payload"
-                    ),
+        required_fragment_ids = tuple(
+            sorted(
+                {
+                    operation.source_binding.fragment_id
+                    for operation, _ in local_operations
+                }
+            )
+        )
+        lifetime_tokens: Optional[AllocationTokenSet] = None
+        if registration_lease is None:
+            try:
+                fresh_binding, lifetime_tokens = acquire_weight_binding_token(
+                    transfer_id=transfer_id or uuid4().hex,
+                    expected_binding=source_binding,
+                    required_fragment_ids=required_fragment_ids,
+                    side="source",
+                    providers=source_allocation_guards,
                 )
-                if len(results) != len(batch) or any(result != 0 for result in results):
-                    raise WeightStoreError(f"batch_put_from failed: {results}")
-            self.payloads.require_complete_payloads(object_keys)
+            except ValueError as error:
+                raise WeightStoreError(str(error)) from error
+        else:
+            fresh_binding = registration_lease.binding
+            registration_lease.validate(
+                source_binding,
+                tuple(current for _, current in local_operations),
+            )
+
+        fresh_local = {
+            fragment.fragment_id: fragment for fragment in fresh_binding.fragments
+        }
+        refreshed_operations: list[tuple[UploadOperation, RuntimeBindingFragment]] = []
+        for operation, _ in local_operations:
+            current = fresh_local.get(operation.source_binding.fragment_id)
+            if current is None or not same_runtime_snapshot(
+                current,
+                operation.source_binding,
+            ):
+                raise WeightStoreError(
+                    f"stale source fragment: {operation.source_binding.fragment_id}"
+                )
+            refreshed_operations.append((operation, current))
+
+        sources = [current for _, current in refreshed_operations]
+        object_keys = [
+            operation.target.object_key for operation, _ in refreshed_operations
+        ]
+        store_io_started = False
+        terminal_state = TerminalTransferState.ABORTED
+        try:
+            with self.client.registration.registered(
+                sources,
+                pre_registered_lease=registration_lease,
+                lifetime_tokens=lifetime_tokens,
+            ):
+                for begin in range(
+                    0, len(refreshed_operations), self.client.max_ranges_per_request
+                ):
+                    batch = refreshed_operations[
+                        begin : begin + self.client.max_ranges_per_request
+                    ]
+                    store_io_started = True
+                    results = self.client.store.batch_put_from(
+                        [operation.target.object_key for operation, _ in batch],
+                        [current.address for _, current in batch],
+                        [current.nbytes for _, current in batch],
+                        self.client.config_factory(
+                            [plan.manifest.group_id] * len(batch), "payload"
+                        ),
+                    )
+                    if len(results) != len(batch) or any(
+                        result != 0 for result in results
+                    ):
+                        raise WeightStoreError(f"batch_put_from failed: {results}")
+                self.payloads.require_complete_payloads(object_keys)
+            terminal_state = TerminalTransferState.COMPLETED
+        except BaseException:
+            if store_io_started:
+                terminal_state = TerminalTransferState.FAILED_DRAINED
+            raise
+        finally:
+            if lifetime_tokens is not None:
+                lifetime_tokens.release_after_terminal(terminal_state)
         self.session.require_writable(plan, cleanup_keys=object_keys)
         return tuple(
             UploadReceipt(
@@ -396,5 +468,5 @@ class WeightUploadService:
                 object_key=operation.target.object_key,
                 worker_id=current.worker_id,
             )
-            for operation, current in local_operations
+            for operation, current in refreshed_operations
         )

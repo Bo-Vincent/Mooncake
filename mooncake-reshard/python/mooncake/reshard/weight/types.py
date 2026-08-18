@@ -7,7 +7,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from math import prod
-from typing import Literal, TypeVar, cast
+from typing import Literal, Optional, TypeVar, Union, cast
 
 from ..contracts import PlacementFragmentId, TensorId
 from ..contracts import RuntimeBindingFragment as _RuntimeBindingFragment
@@ -83,7 +83,7 @@ class OwnershipAxis:
         _validate_parallel_axis_kind(self.kind)
 
 
-ParallelAxis = SplitAxis | ReplicatedAxis | OwnershipAxis
+ParallelAxis = Union[SplitAxis, ReplicatedAxis, OwnershipAxis]
 
 
 @dataclass(frozen=True)
@@ -97,8 +97,8 @@ class TensorDescriptor:
     shard_dims: tuple[int, ...]
     layout_fingerprint: str
     parallel_axes: tuple[ParallelAxis, ...]
-    layer_id: int | None = None
-    expert_id: int | None = None
+    layer_id: Optional[int] = None
+    expert_id: Optional[int] = None
 
     def __post_init__(self) -> None:
         shape = _require_integer_tuple(self.global_shape, "global_shape", minimum=1)
@@ -209,6 +209,7 @@ class PlacementFragment:
     local_shape: tuple[int, ...]
     nbytes: int
     rank: ParallelRank
+    pipeline_stage_id: Optional[int]
     aliases: tuple[TensorId, ...]
     placement_fragment_id: PlacementFragmentId
 
@@ -219,8 +220,9 @@ class PlacementFragment:
         local_shape: tuple[int, ...],
         nbytes: int,
         rank: ParallelRank,
+        pipeline_stage_id: Optional[int] = None,
         aliases: tuple[TensorId, ...] = (),
-        placement_fragment_id: PlacementFragmentId | None = None,
+        placement_fragment_id: Optional[PlacementFragmentId] = None,
     ) -> None:
         normalized_offset = _require_integer_tuple(
             global_offset,
@@ -236,6 +238,8 @@ class PlacementFragment:
         _require_u64(nbytes, "nbytes", minimum=1)
         if not isinstance(rank, ParallelRank):
             raise ValueError("rank must be a ParallelRank")  # noqa: TRY004
+        if pipeline_stage_id is not None:
+            _require_integer(pipeline_stage_id, "pipeline_stage_id", minimum=0)
         normalized_aliases = _normalize_aliases(aliases)
         if normalized_aliases:
             if len(normalized_aliases) < 2:
@@ -255,6 +259,7 @@ class PlacementFragment:
                 local_shape=normalized_shape,
                 nbytes=nbytes,
                 rank=rank,
+                pipeline_stage_id=pipeline_stage_id,
                 aliases=normalized_aliases,
             )
         object.__setattr__(self, "tensor_id", tensor_id)
@@ -262,6 +267,7 @@ class PlacementFragment:
         object.__setattr__(self, "local_shape", normalized_shape)
         object.__setattr__(self, "nbytes", nbytes)
         object.__setattr__(self, "rank", rank)
+        object.__setattr__(self, "pipeline_stage_id", pipeline_stage_id)
         object.__setattr__(self, "aliases", normalized_aliases)
         object.__setattr__(self, "placement_fragment_id", resolved_fragment_id)
 
@@ -282,7 +288,7 @@ def _require_integer(
     value: object,
     name: str,
     *,
-    minimum: int | None = None,
+    minimum: Optional[int] = None,
 ) -> int:
     if type(value) is not int:
         raise ValueError(f"{name} must be an integer")
@@ -352,6 +358,7 @@ def _canonical_placement_fragment_id(
     local_shape: tuple[int, ...],
     nbytes: int,
     rank: ParallelRank,
+    pipeline_stage_id: Optional[int],
     aliases: tuple[TensorId, ...],
 ) -> PlacementFragmentId:
     content = {
@@ -363,6 +370,8 @@ def _canonical_placement_fragment_id(
         "rank": asdict(rank),
         "aliases": aliases,
     }
+    if pipeline_stage_id is not None:
+        content["pipeline_stage_id"] = pipeline_stage_id
     encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
     return PlacementFragmentId(f"sha256:{hashlib.sha256(encoded).hexdigest()}")
 

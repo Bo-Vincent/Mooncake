@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from ...contracts import ParticipantId
 from ..manifest import WeightPlacementManifest
 from ..storage_manifest import WeightManifest
-from .contracts import LogicalTransferPlan
+from .contracts import LogicalTransferPlan, PlanningLimits
 from .core import (
     _collect_placements,
     _logical_transfer_plan,
@@ -14,6 +16,8 @@ from .core import (
 def plan_placement_transfer(
     source_placement: WeightPlacementManifest,
     target_placement: WeightPlacementManifest,
+    *,
+    planning_limits: Optional[PlanningLimits] = None,
 ) -> LogicalTransferPlan:
     """Plan a reshard between two complete address-free placements."""
 
@@ -40,6 +44,7 @@ def plan_placement_transfer(
         source_fragments,
         target_tensors,
         target_fragments,
+        planning_limits=planning_limits,
     )
     return _logical_transfer_plan(
         transfer,
@@ -53,7 +58,9 @@ def plan_placement_transfer(
 def plan_placement_transfer_to_local_target(
     source_placement: WeightPlacementManifest,
     target_placement: WeightPlacementManifest,
-    target_participant_id: ParticipantId | None = None,
+    target_participant_id: Optional[ParticipantId] = None,
+    *,
+    planning_limits: Optional[PlanningLimits] = None,
 ) -> LogicalTransferPlan:
     """Plan one target executor using address-free source and target layouts."""
 
@@ -94,6 +101,7 @@ def plan_placement_transfer_to_local_target(
         target_tensors,
         target_fragments,
         local_target=True,
+        planning_limits=planning_limits,
     )
     result = _logical_transfer_plan(
         transfer,
@@ -111,6 +119,8 @@ def plan_placement_transfer_to_local_target(
 def plan_stored_transfer_to_target_placement(
     source_manifest: WeightManifest,
     target_placement: WeightPlacementManifest,
+    *,
+    planning_limits: Optional[PlanningLimits] = None,
 ) -> LogicalTransferPlan:
     """Plan a Store-backed transfer into address-free target placements."""
 
@@ -133,6 +143,7 @@ def plan_stored_transfer_to_target_placement(
         source_manifest.fragments,
         target_tensors,
         target_fragments,
+        planning_limits=planning_limits,
     )
     return _logical_transfer_plan(
         transfer,

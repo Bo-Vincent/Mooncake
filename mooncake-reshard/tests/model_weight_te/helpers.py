@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from math import prod
+from typing import Sequence
 
 from mooncake.reshard.weight.manifest import (
     ParallelRank,
@@ -13,6 +14,11 @@ from mooncake.reshard.weight.manifest import (
     WeightRuntimeBindingManifest,
 )
 from mooncake.reshard.weight.te import MemoryRegistrationLease
+from mooncake.reshard.weight._te.lifetime import (
+    AcquiredWeightBinding,
+    weight_allocation_fence,
+)
+from mooncake.reshard.transfer_engine.lifetime import TerminalTransferState
 
 from global_placement_helpers import global_placement
 from model_weight_planner.helpers import (
@@ -59,6 +65,48 @@ class FakeTransferEngine:
         if self.read_result is not None:
             return self.read_result
         return -5 if endpoint == self.fail_endpoint else 0
+
+
+class FakeAllocationLifetimeToken:
+    def __init__(self, fence) -> None:
+        self._fence = fence
+        self.released_states: list[TerminalTransferState] = []
+
+    @property
+    def fence(self):
+        return self._fence
+
+    def release_after_terminal(self, terminal_state: TerminalTransferState) -> None:
+        self.released_states.append(terminal_state)
+
+
+class FakeWeightAllocationGuard:
+    def __init__(self, binding: WeightRuntimeBindingManifest) -> None:
+        self.binding = binding
+        self.acquisitions: list[tuple[str, tuple[str, ...]]] = []
+        self.tokens: list[FakeAllocationLifetimeToken] = []
+
+    def acquire(
+        self,
+        *,
+        transfer_id: str,
+        expected_binding: WeightRuntimeBindingManifest,
+        required_fragment_ids: tuple[str, ...],
+    ) -> AcquiredWeightBinding:
+        assert expected_binding == self.binding
+        self.acquisitions.append((transfer_id, tuple(required_fragment_ids)))
+        token = FakeAllocationLifetimeToken(
+            weight_allocation_fence(
+                self.binding,
+                required_fragment_ids,
+                token_id=(
+                    f"{self.binding.instance_id}-{self.binding.participant_id}-"
+                    f"{len(self.tokens)}"
+                ),
+            )
+        )
+        self.tokens.append(token)
+        return AcquiredWeightBinding(binding=self.binding, token=token)
 
 
 class FakeBatchTransferTicket:
@@ -241,6 +289,23 @@ def registration_leases(inputs: RuntimeInputs) -> tuple[MemoryRegistrationLease,
     )
 
 
+def allocation_guards(
+    inputs: RuntimeInputs,
+) -> dict[tuple[str, str], FakeWeightAllocationGuard]:
+    return allocation_guards_for_bindings(inputs.bindings)
+
+
+def allocation_guards_for_bindings(
+    bindings: Sequence[WeightRuntimeBindingManifest],
+) -> dict[tuple[str, str], FakeWeightAllocationGuard]:
+    return {
+        (binding.instance_id, binding.participant_id): FakeWeightAllocationGuard(
+            binding
+        )
+        for binding in bindings
+    }
+
+
 def participant_inputs(inputs: RuntimeInputs, index: int) -> RuntimeInputs:
     return RuntimeInputs(inputs.placement, (inputs.bindings[index],))
 
@@ -280,6 +345,8 @@ def execute_sink(
     source_binding_index: int = 0,
     **kwargs,
 ):
+    kwargs.setdefault("source_allocation_guards", allocation_guards(source))
+    kwargs.setdefault("target_allocation_guards", allocation_guards(targets))
     return sink.execute(
         plan,
         source.placement,
@@ -299,6 +366,8 @@ def execute_reader(
     target_binding_index: int = 0,
     **kwargs,
 ):
+    kwargs.setdefault("source_allocation_guards", allocation_guards(sources))
+    kwargs.setdefault("target_allocation_guards", allocation_guards(target))
     return reader.execute(
         plan,
         sources.placement,

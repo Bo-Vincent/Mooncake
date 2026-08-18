@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 from ...contracts import (
     ParticipantId,
@@ -9,9 +9,9 @@ from ...contracts import (
     PlacementId,
     ResourceId,
     RevisionId,
-    RuntimeFragmentId,
     TensorId,
 )
+from ...geometry import boxes_exactly_cover
 from ..binding import validate_runtime_binding
 from ..placement import WeightPlacementManifest
 from ..runtime import WeightRuntimeBindingManifest
@@ -20,12 +20,11 @@ from ..types import ParallelRank, PlacementFragment, TensorDescriptor
 from . import geometry
 from .contracts import (
     BoundWeightFragment,
-    ExecutableTransferOperation,
     ExecutorTransferPlan,
     LogicalTransferPlan,
     LogicalTransferOperation,
-    PipelineRouteGroup,
     PlacementExecutorPlan,
+    PlanningLimits,
     RuntimeLeaseSnapshot,
     TransferPlan,
     TransferRegion,
@@ -33,11 +32,11 @@ from .contracts import (
 from .attestation import RuntimeBindingAttestation
 from .fragments import LogicalSourceFragment, LogicalTargetFragment
 from .ownership import (
-    _boxes_exactly_cover,
     _validate_local_target_inventory,
     _validate_target_coverage,
     complete_parallel_source_replicas,
     parallel_tensor_owner,
+    require_supported_dp_semantics,
 )
 from .validation import (
     _validate_tensor_compatibility,
@@ -51,6 +50,7 @@ class _PlannedTransfer:
     resource_id: ResourceId
     revision: RevisionId
     operations: tuple[LogicalTransferOperation, ...]
+    planning_limits: PlanningLimits
 
 
 def _collect_placements(
@@ -97,10 +97,7 @@ def _collect_placements(
 def _build_executor_plans(
     placements: Sequence[WeightPlacementManifest],
     bindings: Sequence[WeightRuntimeBindingManifest],
-    operations: Sequence[ExecutableTransferOperation],
     side: str,
-    *,
-    include_inactive: bool = False,
 ) -> tuple[ExecutorTransferPlan, ...]:
     if side not in ("source", "target"):
         raise ValueError(f"invalid executor side: {side}")
@@ -112,15 +109,6 @@ def _build_executor_plans(
 
     result: list[ExecutorTransferPlan] = []
     executor_keys: set[tuple[ParallelRank, str]] = set()
-    operation_indices_by_fragment: dict[RuntimeFragmentId, list[int]] = {}
-    for index, operation in enumerate(operations):
-        fragment = operation.source if side == "source" else operation.target
-        if not isinstance(fragment, BoundWeightFragment):
-            raise ValueError(
-                f"{side} executor plan requires runtime-bound operation fragments"
-            )
-        fragment_id = fragment.fragment_id
-        operation_indices_by_fragment.setdefault(fragment_id, []).append(index)
     for placement in placements:
         for part in placement.parts:
             binding = binding_by_participant.get(
@@ -156,13 +144,6 @@ def _build_executor_plans(
             for fragment in fragments:
                 fragments_by_worker.setdefault(fragment.worker_id, []).append(fragment)
             for worker_id, worker_fragments in sorted(fragments_by_worker.items()):
-                active_fragments = tuple(
-                    fragment
-                    for fragment in worker_fragments
-                    if fragment.fragment_id in operation_indices_by_fragment
-                )
-                if not active_fragments and not include_inactive:
-                    continue
                 ordered_fragments = sorted(
                     worker_fragments,
                     key=lambda fragment: fragment.fragment_id,
@@ -175,13 +156,6 @@ def _build_executor_plans(
                 executor_keys.add(executor_key)
                 fragment_ids = tuple(
                     fragment.fragment_id for fragment in ordered_fragments
-                )
-                operation_indices = tuple(
-                    sorted(
-                        index
-                        for fragment_id in fragment_ids
-                        for index in operation_indices_by_fragment.get(fragment_id, ())
-                    )
                 )
                 result.append(
                     ExecutorTransferPlan(
@@ -197,7 +171,6 @@ def _build_executor_plans(
                             RuntimeLeaseSnapshot.from_fragment(fragment)
                             for fragment in ordered_fragments
                         ),
-                        operation_indices=operation_indices,
                         attestation=attestation,
                     )
                 )
@@ -211,7 +184,7 @@ def _build_placement_executor_plans(
     manifests: Sequence[WeightPlacementManifest],
     operations: Sequence[LogicalTransferOperation],
     side: str,
-    participant_ids: frozenset[ParticipantId] | None = None,
+    participant_ids: Optional[frozenset[ParticipantId]] = None,
 ) -> tuple[PlacementExecutorPlan, ...]:
     if side not in ("source", "target"):
         raise ValueError(f"invalid placement executor side: {side}")
@@ -243,14 +216,10 @@ def _build_placement_executor_plans(
             fragment_ids = tuple(
                 sorted(fragment.placement_fragment_id for fragment in fragments)
             )
-            operation_indices = tuple(
-                sorted(
-                    index
-                    for fragment_id in fragment_ids
-                    for index in operation_indices_by_fragment.get(fragment_id, ())
-                )
-            )
-            if not operation_indices:
+            if not any(
+                fragment_id in operation_indices_by_fragment
+                for fragment_id in fragment_ids
+            ):
                 continue
             result.append(
                 PlacementExecutorPlan(
@@ -258,7 +227,6 @@ def _build_placement_executor_plans(
                     participant_id=part.participant_id,
                     rank=rank,
                     placement_fragment_ids=fragment_ids,
-                    operation_indices=operation_indices,
                 )
             )
     result.sort(
@@ -299,39 +267,15 @@ def resolve_executor_plans(
     current_executors = _build_executor_plans(
         (placement,),
         (binding,),
-        plan.operations,
         side,
-    )
-    expected_active = tuple(
-        executor for executor in expected_executors if executor.operation_indices
-    )
-    expected_inactive = tuple(
-        executor for executor in expected_executors if not executor.operation_indices
     )
     executor_keys = [
         (executor.rank, executor.worker_id) for executor in expected_executors
     ]
     if len(executor_keys) != len(set(executor_keys)):
         raise ValueError(f"{side} executor snapshot has duplicate rank and worker")
-    if current_executors != expected_active:
+    if current_executors != expected_executors:
         raise ValueError(f"{side} executor snapshot mismatch")
-    if expected_inactive:
-        inactive_candidates = {
-            (executor.rank, executor.worker_id): executor
-            for executor in _build_executor_plans(
-                (placement,),
-                (binding,),
-                plan.operations,
-                side,
-                include_inactive=True,
-            )
-            if not executor.operation_indices
-        }
-        if any(
-            inactive_candidates.get((executor.rank, executor.worker_id)) != executor
-            for executor in expected_inactive
-        ):
-            raise ValueError(f"{side} executor snapshot mismatch")
     return expected_executors
 
 
@@ -356,13 +300,16 @@ def _plan_transfer(
     target_fragments: Sequence[LogicalTargetFragment],
     *,
     local_target: bool = False,
+    planning_limits: Optional[PlanningLimits] = None,
 ) -> _PlannedTransfer:
+    planning_limits = planning_limits or PlanningLimits()
     if local_target:
         _validate_tensor_subset(source_tensors, target_tensors)
         _validate_local_target_inventory(target_tensors, target_fragments)
     else:
         _validate_tensor_sets(source_tensors, target_tensors)
         _validate_target_coverage(target_tensors, target_fragments)
+    require_supported_dp_semantics((*source_tensors.values(), *target_tensors.values()))
     placement_source_fragments = tuple(
         fragment
         for fragment in source_fragments
@@ -393,7 +340,7 @@ def _plan_transfer(
             target_dp: source_dp_ranks[target_dp % len(source_dp_ranks)]
             for target_dp in {fragment.rank.dp for fragment in target_fragments}
         }
-        if parallel_sources
+        if parallel_sources and source_dp_ranks
         else {}
     )
     candidates: dict[
@@ -415,6 +362,7 @@ def _plan_transfer(
     }
 
     operations: list[TransferRegion[LogicalSourceFragment, LogicalTargetFragment]] = []
+    total_lowered_segments = 0
     for target in sorted(target_fragments, key=lambda item: item.fragment_id):
         target_tensor = target_tensors[target.tensor_id]
         source_tensor = source_tensors.get(target.tensor_id)
@@ -450,10 +398,18 @@ def _plan_transfer(
             overlap = geometry._overlap_box(representative, target)
             if overlap is None:
                 continue
+            if (
+                len(operations) + len(overlaps) + 1
+                > planning_limits.max_transfer_regions
+            ):
+                raise ValueError(
+                    "logical transfer plan exceeds max_transfer_regions: "
+                    f"{planning_limits.max_transfer_regions}"
+                )
             overlaps.append((*overlap, selected))
         overlaps.sort(key=lambda item: (item[0], item[1], item[2].fragment_id))
 
-        if not _boxes_exactly_cover(
+        if not boxes_exactly_cover(
             target.global_offset,
             target.local_shape,
             tuple((offset, shape) for offset, shape, _ in overlaps),
@@ -461,16 +417,29 @@ def _plan_transfer(
             raise ValueError(
                 f"target fragment is not fully covered: {target.fragment_id}"
             )
-        operations.extend(
-            geometry._transfer_region(
+        for overlap_offset, overlap_shape, source in overlaps:
+            region = geometry._transfer_region(
                 target_tensor,
                 source,
                 target,
                 overlap_offset,
                 overlap_shape,
             )
-            for overlap_offset, overlap_shape, source in overlaps
-        )
+            if region.segment_count > planning_limits.max_segments_per_region:
+                raise ValueError(
+                    "logical transfer region exceeds max_segments_per_region: "
+                    f"{region.segment_count} > "
+                    f"{planning_limits.max_segments_per_region}"
+                )
+            next_total_lowered_segments = total_lowered_segments + region.segment_count
+            if next_total_lowered_segments > planning_limits.max_total_lowered_segments:
+                raise ValueError(
+                    "logical transfer plan exceeds max_total_lowered_segments: "
+                    f"{next_total_lowered_segments} > "
+                    f"{planning_limits.max_total_lowered_segments}"
+                )
+            operations.append(region)
+            total_lowered_segments = next_total_lowered_segments
 
     operations.sort(
         key=lambda item: (
@@ -484,38 +453,7 @@ def _plan_transfer(
         resource_id=resource_id,
         revision=revision,
         operations=tuple(operations),
-    )
-
-
-def _build_pipeline_routes(
-    operations: Sequence[LogicalTransferOperation | ExecutableTransferOperation],
-) -> tuple[PipelineRouteGroup, ...]:
-    indices_by_route: dict[tuple[int | None, int], list[int]] = {}
-    for index, operation in enumerate(operations):
-        source_pp = (
-            operation.source.rank.pp
-            if isinstance(
-                operation.source,
-                (BoundWeightFragment, PlacementFragment),
-            )
-            else None
-        )
-        indices_by_route.setdefault((source_pp, operation.target.rank.pp), []).append(
-            index
-        )
-    return tuple(
-        PipelineRouteGroup(
-            source_pp=source_pp,
-            target_pp=target_pp,
-            operation_indices=tuple(indices),
-        )
-        for (source_pp, target_pp), indices in sorted(
-            indices_by_route.items(),
-            key=lambda item: (
-                -1 if item[0][0] is None else item[0][0],
-                item[0][1],
-            ),
-        )
+        planning_limits=planning_limits,
     )
 
 
@@ -524,10 +462,10 @@ def _logical_transfer_plan(
     *,
     source_tensors: dict[TensorId, TensorDescriptor],
     target_tensors: dict[TensorId, TensorDescriptor],
-    source_placement: WeightPlacementManifest | None,
+    source_placement: Optional[WeightPlacementManifest],
     target_placement: WeightPlacementManifest,
-    source_participant_ids: frozenset[ParticipantId] | None = None,
-    target_participant_ids: frozenset[ParticipantId] | None = None,
+    source_participant_ids: Optional[frozenset[ParticipantId]] = None,
+    target_participant_ids: Optional[frozenset[ParticipantId]] = None,
 ) -> LogicalTransferPlan:
     operations = transfer.operations
     return LogicalTransferPlan(
@@ -542,6 +480,7 @@ def _logical_transfer_plan(
             sorted(target_tensors.values(), key=lambda item: item.tensor_id)
         ),
         operations=operations,
+        planning_limits=transfer.planning_limits,
         source_executors=(
             _build_placement_executor_plans(
                 (source_placement,),
@@ -558,7 +497,6 @@ def _logical_transfer_plan(
             "target",
             target_participant_ids,
         ),
-        pipeline_routes=_build_pipeline_routes(operations),
     )
 
 

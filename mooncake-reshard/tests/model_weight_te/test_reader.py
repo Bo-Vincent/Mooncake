@@ -10,6 +10,7 @@ from mooncake.reshard.weight.te import (
 )
 
 from .helpers import (
+    allocation_guards,
     FakeTransferEngine,
     RuntimeInputs,
     manifests,
@@ -45,6 +46,8 @@ def test_te_reader_pulls_local_target_ranges_without_source_rpc() -> None:
         source_registrations=registration_leases(sources),
         target_pre_registered=True,
         target_registrations=registration_leases(target),
+        source_allocation_guards=allocation_guards(sources),
+        target_allocation_guards=allocation_guards(target),
     )
 
     assert receipts[0].source_endpoint == "source-t0:12345"
@@ -71,6 +74,8 @@ def test_te_reader_lowers_bound_fragments_to_scatter_allocation_ranges() -> None
         source_registrations=registration_leases(sources),
         target_pre_registered=True,
         target_registrations=registration_leases(target),
+        source_allocation_guards=allocation_guards(sources),
+        target_allocation_guards=allocation_guards(target),
     )
 
     assert engine.calls == [
@@ -111,6 +116,8 @@ def test_te_reader_wraps_target_registration_exception() -> None:
             target.placement,
             target.bindings[0],
             source_registrations=registration_leases(sources),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
 
@@ -132,6 +139,8 @@ def test_te_reader_requires_generation_bound_source_registration_leases() -> Non
             target.bindings[0],
             target_pre_registered=True,
             target_registrations=target_leases,
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
     stale_generation = list(registration_leases(sources))
@@ -146,6 +155,8 @@ def test_te_reader_requires_generation_bound_source_registration_leases() -> Non
             source_registrations=stale_generation,
             target_pre_registered=True,
             target_registrations=target_leases,
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
     stale_runtime_lease = list(registration_leases(sources))
@@ -163,6 +174,8 @@ def test_te_reader_requires_generation_bound_source_registration_leases() -> Non
             source_registrations=stale_runtime_lease,
             target_pre_registered=True,
             target_registrations=target_leases,
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
 
@@ -196,6 +209,8 @@ def test_te_reader_rejects_source_registration_snapshot_mismatch(
             source_registrations=leases,
             target_pre_registered=True,
             target_registrations=registration_leases(target),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
 
@@ -221,6 +236,8 @@ def test_te_reader_requires_registrations_only_for_used_source_fragments() -> No
         source_registrations=source_registrations,
         target_pre_registered=True,
         target_registrations=registration_leases(target),
+        source_allocation_guards=allocation_guards(sources),
+        target_allocation_guards=allocation_guards(target),
     )
 
     assert sum(receipt.nbytes for receipt in receipts) == 2
@@ -244,6 +261,8 @@ def test_te_reader_requires_complete_planned_source_executor_set() -> None:
             source_registrations=registration_leases(partial_sources),
             target_pre_registered=True,
             target_registrations=registration_leases(target),
+            source_allocation_guards=allocation_guards(partial_sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
 
@@ -266,6 +285,8 @@ def test_te_reader_surfaces_source_endpoint_failure() -> None:
             source_registrations=registration_leases(sources),
             target_pre_registered=True,
             target_registrations=registration_leases(target),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
 
@@ -288,6 +309,8 @@ def test_te_reader_rejects_positive_nonzero_transfer_status() -> None:
             source_registrations=registration_leases(sources),
             target_pre_registered=True,
             target_registrations=registration_leases(target),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
 
@@ -308,6 +331,8 @@ def test_te_reader_rejects_leases_without_pre_registered_mode() -> None:
             target.bindings[0],
             source_registrations=registration_leases(sources),
             target_registrations=registration_leases(target),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(target),
         )
 
     assert engine.register_calls == []

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import prod
-from typing import TYPE_CHECKING, Sequence, TypeAlias
+from typing import TYPE_CHECKING, Optional, Sequence, Union
+
+from ..._typing import TypeAlias
 
 from ..._compat import _strict_zip
 from ...contracts import TensorId
@@ -16,24 +18,6 @@ from .fragments import (
 
 if TYPE_CHECKING:
     from .contracts import TransferRegion
-
-
-def _box_contains(
-    outer_offset: tuple[int, ...],
-    outer_shape: tuple[int, ...],
-    inner_offset: tuple[int, ...],
-    inner_shape: tuple[int, ...],
-) -> bool:
-    return all(
-        outer_begin <= inner_begin
-        and inner_begin + inner_extent <= outer_begin + outer_extent
-        for outer_begin, outer_extent, inner_begin, inner_extent in _strict_zip(
-            outer_offset,
-            outer_shape,
-            inner_offset,
-            inner_shape,
-        )
-    )
 
 
 def _fragment_itemsize(fragment: GeometryFragment) -> int:
@@ -77,17 +61,17 @@ def _validate_outer_strides(
 
 
 GeometryKey: TypeAlias = tuple[TensorId, tuple[int, ...], tuple[int, ...]]
-SourceSortKey: TypeAlias = (
-    tuple[int, int, int, int, str]
-    | tuple[
+SourceSortKey: TypeAlias = Union[
+    tuple[int, int, int, int, str],
+    tuple[
         int,
         int,
         int,
         int,
         str,
         str,
-    ]
-)
+    ],
+]
 
 
 def _geometry_key(fragment: LogicalSourceFragment) -> GeometryKey:
@@ -118,13 +102,13 @@ class _CandidateIntervalNode:
     center: int
     crossing_by_begin: tuple[_CandidateInterval, ...]
     crossing_by_end: tuple[_CandidateInterval, ...]
-    left: _CandidateIntervalNode | None = None
-    right: _CandidateIntervalNode | None = None
+    left: Optional[_CandidateIntervalNode] = None
+    right: Optional[_CandidateIntervalNode] = None
 
     @classmethod
     def build(
         cls, intervals: Sequence[_CandidateInterval]
-    ) -> _CandidateIntervalNode | None:
+    ) -> Optional[_CandidateIntervalNode]:
         if not intervals:
             return None
         center = sorted((interval.begin + interval.end) // 2 for interval in intervals)[
@@ -241,7 +225,7 @@ class _CandidateBoxIndex:
 def _overlap_box(
     source: GeometryFragment,
     target: GeometryFragment,
-) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+) -> Optional[tuple[tuple[int, ...], tuple[int, ...]]]:
     overlap_offset = tuple(
         max(source_begin, target_begin)
         for source_begin, target_begin in _strict_zip(

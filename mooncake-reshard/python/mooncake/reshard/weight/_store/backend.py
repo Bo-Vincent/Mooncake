@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from importlib import import_module
-from typing import Literal, Protocol, TypeAlias, cast
+from typing import Literal, Optional, Protocol, cast
+
+from ..._typing import TypeAlias
 
 from .errors import WeightStoreError
 
@@ -76,7 +78,7 @@ class StoreBackend:
             raise WeightStoreError(f"is_exist returned invalid status for {key}")
         return result
 
-    def batch_is_exist(self, keys: Sequence[str]) -> tuple[int, ...] | None:
+    def batch_is_exist(self, keys: Sequence[str]) -> Optional[tuple[int, ...]]:
         candidate = self._optional_method("batch_is_exist")
         if candidate is None:
             return None
@@ -141,7 +143,10 @@ class StoreBackend:
             raise WeightStoreError(f"Store backend does not implement {method_name}")
         return method
 
-    def _optional_method(self, method_name: str) -> Callable[..., object] | None:
+    def _optional_method(
+        self,
+        method_name: str,
+    ) -> Optional[Callable[..., object]]:
         try:
             candidate = getattr(self._raw, method_name, None)
         except Exception as error:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, Union
 
 from ...contracts import (
     ParticipantId,
@@ -20,7 +20,6 @@ from ..manifest import (
 from ..storage_manifest import StoredFragment
 from .contracts import (
     BoundWeightFragment,
-    CopyRange,
     ExecutableTransferOperation,
     LogicalTransferOperation,
     LogicalTransferPlan,
@@ -30,7 +29,6 @@ from .contracts import (
 )
 from .core import (
     _build_executor_plans,
-    _build_pipeline_routes,
     _collect_placements,
 )
 from .attestation import RuntimeBindingAttestation
@@ -244,23 +242,11 @@ def _required_participants(
 
 def _bind_operation(
     operation: LogicalTransferOperation,
-    source: BoundWeightFragment | StoredFragment,
+    source: Union[BoundWeightFragment, StoredFragment],
     target: BoundWeightFragment,
 ) -> ExecutableTransferOperation:
     """Rebuild a logical value object with the bound execution fragments."""
 
-    if isinstance(operation, CopyRange):
-        return CopyRange(
-            tensor_id=operation.tensor_id,
-            source=source,
-            target=target,
-            source_offset=operation.source_offset,
-            target_offset=operation.target_offset,
-            nbytes=operation.nbytes,
-            repeat=operation.repeat,
-            source_stride=operation.source_stride,
-            target_stride=operation.target_stride,
-        )
     if isinstance(operation, TransferRegion):
         return TransferRegion(
             tensor_id=operation.tensor_id,
@@ -376,13 +362,12 @@ def bind_logical_transfer_plan(
         weight_generation=logical_plan.target_placement.weight_generation,
         target_placement=logical_plan.target_placement,
         operations=bound_operations,
+        planning_limits=logical_plan.planning_limits,
         source_executors=(
             _build_executor_plans(
                 source_placements,
                 source_binding_values,
-                bound_operations,
                 "source",
-                include_inactive=True,
             )
             if source_binding_values
             else ()
@@ -390,11 +375,8 @@ def bind_logical_transfer_plan(
         target_executors=_build_executor_plans(
             (logical_plan.target_placement,),
             target_binding_values,
-            bound_operations,
             "target",
-            include_inactive=True,
         ),
-        pipeline_routes=_build_pipeline_routes(bound_operations),
     )
 
 

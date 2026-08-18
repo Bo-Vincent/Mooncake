@@ -1,73 +1,14 @@
 from __future__ import annotations
 
-from math import prod
 from typing import Sequence
 
-from ..._compat import _strict_zip
 from ...contracts import TensorId
+from ...geometry import boxes_exactly_cover
 from ..manifest import OwnershipAxis, PlacementFragment, TensorDescriptor
 from .contracts import (
     RuntimeTensorOwner,
 )
 from .fragments import LogicalSourceFragment, LogicalTargetFragment
-from .geometry import _box_contains
-
-
-def _boxes_overlap(
-    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
-) -> bool:
-    if len(boxes) < 2:
-        return False
-    ndim = len(boxes[0][0])
-    sweep_dim = max(
-        range(ndim),
-        key=lambda dim: len(
-            {(offset[dim], offset[dim] + shape[dim]) for offset, shape in boxes}
-        ),
-    )
-    ordered = sorted(boxes, key=lambda item: item[0][sweep_dim])
-    active: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
-    for offset, shape in ordered:
-        begin = offset[sweep_dim]
-        active = [
-            candidate
-            for candidate in active
-            if candidate[0][sweep_dim] + candidate[1][sweep_dim] > begin
-        ]
-        if any(
-            all(
-                left_begin < right_begin + right_extent
-                and right_begin < left_begin + left_extent
-                for left_begin, left_extent, right_begin, right_extent in _strict_zip(
-                    candidate_offset,
-                    candidate_shape,
-                    offset,
-                    shape,
-                )
-            )
-            for candidate_offset, candidate_shape in active
-        ):
-            return True
-        active.append((offset, shape))
-    return False
-
-
-def _boxes_exactly_cover(
-    container_offset: tuple[int, ...],
-    container_shape: tuple[int, ...],
-    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
-) -> bool:
-    unique_boxes = tuple(dict.fromkeys(boxes))
-    if not unique_boxes:
-        return False
-    if any(
-        not _box_contains(container_offset, container_shape, offset, shape)
-        for offset, shape in unique_boxes
-    ):
-        return False
-    if sum(prod(shape) for _, shape in unique_boxes) != prod(container_shape):
-        return False
-    return not _boxes_overlap(unique_boxes)
 
 
 def _fragments_fully_cover_tensor(
@@ -80,7 +21,7 @@ def _fragments_fully_cover_tensor(
         if fragment.tensor_id == tensor.tensor_id
     }
     boxes = tuple(geometries)
-    return _boxes_exactly_cover(
+    return boxes_exactly_cover(
         (0,) * len(tensor.global_shape), tensor.global_shape, boxes
     )
 
@@ -93,6 +34,37 @@ def parallel_tensor_owner(
         for axis in tensor.parallel_axes
         if isinstance(axis, OwnershipAxis)
     )
+
+
+def has_dp_ownership(tensor: TensorDescriptor) -> bool:
+    """Return whether DP names tensor ownership instead of replica identity."""
+
+    return any(
+        isinstance(axis, OwnershipAxis) and axis.kind == "dp"
+        for axis in tensor.parallel_axes
+    )
+
+
+def require_supported_dp_semantics(
+    tensors: Sequence[TensorDescriptor],
+) -> None:
+    """Reject MoE-DP ownership until a semantic owner resolver is introduced.
+
+    Normal data parallelism is represented by ``ReplicatedAxis("dp")`` and is
+    supported. ``OwnershipAxis("dp")`` means different DP ranks can own
+    different logical parameters; selecting or expanding those parameters
+    requires framework-provided ownership semantics, not rank arithmetic in
+    the canonical planner.
+    """
+
+    unsupported = sorted(
+        tensor.tensor_id for tensor in tensors if has_dp_ownership(tensor)
+    )
+    if unsupported:
+        raise ValueError(
+            "DP ownership reshard is not supported in this version: "
+            + ", ".join(unsupported)
+        )
 
 
 def _validate_target_coverage(
@@ -108,9 +80,26 @@ def _validate_target_coverage(
         fragments_by_dp_and_tensor.setdefault(fragment.rank.dp, {}).setdefault(
             fragment.tensor_id, []
         ).append(fragment)
-    dp_ranks = sorted(fragments_by_dp_and_tensor)
-    for dp_rank in dp_ranks:
-        for tensor in target_tensors.values():
+    for tensor in target_tensors.values():
+        if has_dp_ownership(tensor):
+            fragments_by_owner: dict[
+                RuntimeTensorOwner, list[LogicalTargetFragment]
+            ] = {}
+            for by_tensor in fragments_by_dp_and_tensor.values():
+                for fragment in by_tensor.get(tensor.tensor_id, ()):
+                    fragments_by_owner.setdefault(
+                        parallel_tensor_owner(tensor, fragment), []
+                    ).append(fragment)
+            if not fragments_by_owner or any(
+                not _fragments_fully_cover_tensor(tensor, fragments)
+                for fragments in fragments_by_owner.values()
+            ):
+                raise ValueError(
+                    f"target tensor is not fully covered by its DP owner: "
+                    f"{tensor.tensor_id}"
+                )
+            continue
+        for dp_rank in sorted(fragments_by_dp_and_tensor):
             fragments_by_owner: dict[
                 RuntimeTensorOwner, list[LogicalTargetFragment]
             ] = {}
@@ -141,10 +130,15 @@ def complete_parallel_source_replicas(
         fragments_by_dp_and_tensor.setdefault(dp_rank, {}).setdefault(
             fragment.tensor_id, []
         ).append(fragment)
+    replica_tensors = tuple(
+        tensor for tensor in source_tensors.values() if not has_dp_ownership(tensor)
+    )
+    if not replica_tensors:
+        return {}
     for dp_rank in sorted(fragments_by_dp_and_tensor):
         owner_by_tensor: dict[TensorId, RuntimeTensorOwner] = {}
         complete = True
-        for tensor in source_tensors.values():
+        for tensor in replica_tensors:
             fragments_by_owner: dict[RuntimeTensorOwner, list[PlacementFragment]] = {}
             for fragment in fragments_by_dp_and_tensor[dp_rank].get(
                 tensor.tensor_id, ()
@@ -192,5 +186,7 @@ def _validate_local_target_inventory(
 
 __all__ = [
     "complete_parallel_source_replicas",
+    "has_dp_ownership",
     "parallel_tensor_owner",
+    "require_supported_dp_semantics",
 ]

@@ -6,11 +6,11 @@ from .api import (
 from .binding import bind_logical_transfer_plan
 from .contracts import (
     BoundWeightFragment,
-    CopyRange,
     ExecutableTransferOperation,
     ExecutorTransferPlan,
     LiveTransferOperation,
     LogicalTransferPlan,
+    PlanningLimits,
     LogicalTransferOperation,
     PipelineRouteGroup,
     PlacementExecutorPlan,
@@ -29,11 +29,11 @@ from .ownership import (
 
 __all__ = [
     "BoundWeightFragment",
-    "CopyRange",
     "ExecutableTransferOperation",
     "ExecutorTransferPlan",
     "LiveTransferOperation",
     "LogicalTransferPlan",
+    "PlanningLimits",
     "LogicalTransferOperation",
     "PipelineRouteGroup",
     "PlacementExecutorPlan",

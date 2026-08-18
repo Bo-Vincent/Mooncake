@@ -380,6 +380,11 @@ def test_fp8_w31_to_w13_reshard_preserves_component_identity_and_bytes() -> None
     )
     assert len(plan.operations) == 32
     assert (
-        sum(1 for operation in plan.operations for _ in operation.iter_segments()) == 32
+        sum(
+            1
+            for operation in plan.operations
+            for _ in operation.iter_segments(max_segments=operation.segment_count)
+        )
+        == 32
     )
     assert_plan_copies_logical_contents(plan, sources, targets)

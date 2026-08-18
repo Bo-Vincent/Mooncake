@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, Union, cast
 
 from ..storage_manifest import WeightManifest
 from .contracts import UploadReceipt, WeightUploadPlan
@@ -36,7 +36,7 @@ def _decision_payload(plan: WeightUploadPlan, decision: str) -> bytes:
     ).encode()
 
 
-def _decode_decision(value: bytes | bytearray | str) -> _UploadDecision:
+def _decode_decision(value: Union[bytes, bytearray, str]) -> _UploadDecision:
     def reject_constant(constant: str) -> None:
         raise ValueError(f"non-finite JSON number is unsupported: {constant}")
 
@@ -163,8 +163,8 @@ class WeightUploadSession:
         if existing is not None:
             return self._resolve_manifest_commit(plan, existing, payload_keys)
 
-        put_error: Exception | None = None
-        result: int | None = None
+        put_error: Optional[Exception] = None
+        result: Optional[int] = None
         try:
             result = self.client.store.put(
                 plan.manifest.manifest_key,
@@ -213,8 +213,8 @@ class WeightUploadSession:
         raise WeightStoreError(detail)
 
     def _claim_upload(self, plan: WeightUploadPlan, decision: str) -> None:
-        put_error: Exception | None = None
-        result: int | None = None
+        put_error: Optional[Exception] = None
+        result: Optional[int] = None
         try:
             result = self.client.store.put(
                 plan.control_key,
@@ -234,7 +234,7 @@ class WeightUploadSession:
         if persisted.decision != decision:
             raise WeightStoreError(f"weight upload already chose {persisted.decision}")
 
-    def _current_upload_decision(self, plan: WeightUploadPlan) -> str | None:
+    def _current_upload_decision(self, plan: WeightUploadPlan) -> Optional[str]:
         persisted = self._load_decision_if_present(plan.control_key)
         if persisted is None:
             return None
@@ -248,7 +248,10 @@ class WeightUploadSession:
         if persisted.plan_digest != _plan_digest(plan.manifest):
             raise WeightStoreError("upload decision belongs to another plan")
 
-    def _load_decision_if_present(self, control_key: str) -> _UploadDecision | None:
+    def _load_decision_if_present(
+        self,
+        control_key: str,
+    ) -> Optional[_UploadDecision]:
         exists = self.client.store.is_exist(control_key)
         if exists == 0:
             return None
@@ -261,7 +264,10 @@ class WeightUploadSession:
         except Exception as error:
             raise WeightStoreError(f"invalid upload decision: {control_key}") from error
 
-    def _load_manifest_if_present(self, manifest_key: str) -> WeightManifest | None:
+    def _load_manifest_if_present(
+        self,
+        manifest_key: str,
+    ) -> Optional[WeightManifest]:
         exists = self.client.store.is_exist(manifest_key)
         if exists == 0:
             return None

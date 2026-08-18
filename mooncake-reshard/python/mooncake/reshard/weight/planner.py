@@ -8,11 +8,11 @@ from ._planner.api import (
 from ._planner.binding import bind_logical_transfer_plan
 from ._planner.contracts import (
     BoundWeightFragment,
-    CopyRange,
     ExecutableTransferOperation,
     ExecutorTransferPlan,
     LiveTransferOperation,
     LogicalTransferPlan,
+    PlanningLimits,
     LogicalTransferOperation,
     PipelineRouteGroup,
     PlacementExecutorPlan,
@@ -28,11 +28,11 @@ from ._planner.attestation import RuntimeBindingAttestation
 
 __all__ = [
     "BoundWeightFragment",
-    "CopyRange",
     "ExecutableTransferOperation",
     "ExecutorTransferPlan",
     "LiveTransferOperation",
     "LogicalTransferPlan",
+    "PlanningLimits",
     "LogicalTransferOperation",
     "PipelineRouteGroup",
     "PlacementExecutorPlan",

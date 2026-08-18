@@ -26,6 +26,7 @@ from mooncake.reshard.weight import (
 )
 
 from global_placement_helpers import global_placement, runtime_fragment
+from model_weight_te.helpers import allocation_guards_for_bindings
 
 
 class Buffer:
@@ -285,6 +286,8 @@ class PlacementExecutionE2ETest(unittest.TestCase):
                     runtime_lease_id=source_binding.lease_id,
                 ),
             ),
+            source_allocation_guards=allocation_guards_for_bindings((source_binding,)),
+            target_allocation_guards=allocation_guards_for_bindings((target_binding,)),
         )
 
         self.assertEqual(target_buffer.read(), bytes(range(4, 8)))
@@ -335,6 +338,7 @@ class PlacementExecutionE2ETest(unittest.TestCase):
             WeightLoadPlan(manifest=source, transfer=transfer),
             target_placement,
             target_binding,
+            target_allocation_guards=allocation_guards_for_bindings((target_binding,)),
         )
 
         self.assertEqual(target_buffer.read(), payload)
@@ -616,6 +620,12 @@ class PlacementExecutionE2ETest(unittest.TestCase):
                 target_placement,
                 target_binding,
                 source_registrations=source_registrations,
+                source_allocation_guards=allocation_guards_for_bindings(
+                    source_bindings
+                ),
+                target_allocation_guards=allocation_guards_for_bindings(
+                    (target_binding,)
+                ),
             )
             self.assertEqual(sum(receipt.nbytes for receipt in receipts), buffer.size)
             self.assertEqual(buffer.read(), expected)
