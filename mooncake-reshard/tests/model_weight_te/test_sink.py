@@ -5,11 +5,14 @@ from dataclasses import replace
 import pytest
 
 from mooncake.reshard.weight.te import (
+    TransferCompletionUnknownError,
     MooncakeTransferEngineSink,
     TransferEngineError,
 )
 
 from .helpers import (
+    allocation_guards,
+    allocation_guards_for_bindings,
     FakeTransferEngine,
     RuntimeInputs,
     manifests,
@@ -43,6 +46,8 @@ def test_te_sink_executes_local_source_ranges_without_staging_buffer() -> None:
         targets.placement,
         targets.bindings,
         target_registrations=registration_leases(targets),
+        source_allocation_guards=allocation_guards(sources),
+        target_allocation_guards=allocation_guards(targets),
     )
 
     assert receipts[0].source_worker_id == "source-t0"
@@ -67,6 +72,8 @@ def test_te_sink_lowers_bound_fragments_to_scatter_allocation_ranges() -> None:
         targets.placement,
         targets.bindings,
         target_registrations=registration_leases(targets),
+        source_allocation_guards=allocation_guards(sources),
+        target_allocation_guards=allocation_guards(targets),
     )
 
     assert engine.calls == [
@@ -146,6 +153,8 @@ def test_te_sink_lowers_nonzero_views_to_scatter_allocations() -> None:
         targets.placement,
         targets.bindings,
         target_registrations=registration_leases(targets),
+        source_allocation_guards=allocation_guards(sources),
+        target_allocation_guards=allocation_guards(targets),
     )
 
     assert engine.register_calls == [(0xF000, 0x2000)]
@@ -193,6 +202,8 @@ def test_te_sink_requires_generation_bound_target_registration_leases() -> None:
             sources.bindings[0],
             targets.placement,
             targets.bindings,
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(targets),
         )
 
     stale_leases = list(registration_leases(targets))
@@ -205,6 +216,8 @@ def test_te_sink_requires_generation_bound_target_registration_leases() -> None:
             targets.placement,
             targets.bindings,
             target_registrations=tuple(stale_leases),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(targets),
         )
 
 
@@ -223,10 +236,12 @@ def test_te_sink_surfaces_endpoint_failure() -> None:
             targets.placement,
             targets.bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(targets),
         )
 
 
-def test_te_sink_wraps_write_exception() -> None:
+def test_te_sink_quarantines_write_exception_without_completion_ticket() -> None:
     sources = manifests(tp=2, prefix="source", address_base=0x10000)
     targets = manifests(tp=4, prefix="target", address_base=0x40000)
     plan = plan_transfer(sources, targets)
@@ -237,17 +252,24 @@ def test_te_sink_wraps_write_exception() -> None:
 
     engine.batch_transfer_sync_write = fail_write
 
-    with pytest.raises(TransferEngineError, match="write exploded"):
-        MooncakeTransferEngineSink(engine).execute(
+    sink = MooncakeTransferEngineSink(engine)
+    with pytest.raises(TransferCompletionUnknownError) as raised:
+        sink.execute(
             plan,
             sources.placement,
             sources.bindings[0],
             targets.placement,
             targets.bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(targets),
         )
 
-    assert engine.unregister_calls == [0x10000]
+    assert engine.unregister_calls == []
+    assert (
+        sink.pending_transfer_status(raised.value.pending_transfer_id)
+        == "COMPLETION_UNKNOWN_RESTART_REQUIRED"
+    )
 
 
 def test_te_sink_rejects_stale_source_generation() -> None:
@@ -264,6 +286,8 @@ def test_te_sink_rejects_stale_source_generation() -> None:
             targets.placement,
             targets.bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards_for_bindings((stale_binding,)),
+            target_allocation_guards=allocation_guards(targets),
         )
 
 
@@ -291,6 +315,8 @@ def test_te_sink_rejects_generation_scoped_source_id_rollover() -> None:
             targets.placement,
             targets.bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards_for_bindings((current_binding,)),
+            target_allocation_guards=allocation_guards(targets),
         )
 
 
@@ -316,6 +342,8 @@ def test_te_sink_rejects_stale_target_address_and_generation() -> None:
             targets.placement,
             current_bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards_for_bindings(current_bindings),
         )
 
 
@@ -340,6 +368,8 @@ def test_te_sink_rejects_generation_scoped_target_id_rollover() -> None:
             targets.placement,
             current_bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards_for_bindings(current_bindings),
         )
 
 
@@ -361,6 +391,8 @@ def test_te_sink_rejects_revision_mismatch(side: str) -> None:
             targets.placement,
             targets.bindings,
             target_registrations=registration_leases(targets),
+            source_allocation_guards=allocation_guards(sources),
+            target_allocation_guards=allocation_guards(targets),
         )
 
 
@@ -385,6 +417,8 @@ def test_te_receipt_identifies_worker_instead_of_serving_instance() -> None:
         targets.placement,
         targets.bindings,
         target_registrations=registration_leases(targets),
+        source_allocation_guards=allocation_guards(source),
+        target_allocation_guards=allocation_guards(targets),
     )
 
     assert receipts[0].source_worker_id == "source-t0"

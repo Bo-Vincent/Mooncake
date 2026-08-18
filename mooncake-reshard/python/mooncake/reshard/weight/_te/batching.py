@@ -13,6 +13,7 @@ def iter_transfer_batches(
     ],
     *,
     max_batch_operations: int,
+    max_region_segments: int,
 ) -> Iterator[TransferBatch]:
     """Preserve allocation boundaries while bounding physical operations."""
 
@@ -24,7 +25,9 @@ def iter_transfer_batches(
         target_offsets: list[int] = []
         sizes: list[int] = []
 
-        for source_offset, target_offset, nbytes in operation.iter_segments():
+        for source_offset, target_offset, nbytes in operation.iter_segments(
+            max_segments=max_region_segments
+        ):
             source_offsets.append(source_offset)
             target_offsets.append(target_offset)
             sizes.append(nbytes)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from typing import Optional
 
 from .manifest import (
     PlacementManifest,
@@ -19,7 +20,7 @@ class ResourceAdapter(ABC):
     resource_kind: ResourceKind
     placement_type: type[PlacementManifest]
     binding_type: type[RuntimeBindingManifest]
-    stored_manifest_type: type[StoredResourceManifest] | None = None
+    stored_manifest_type: Optional[type[StoredResourceManifest]] = None
 
     @abstractmethod
     def validate_binding(

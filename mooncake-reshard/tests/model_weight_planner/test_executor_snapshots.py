@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import replace
+import inspect
 import pickle
 from types import SimpleNamespace
 
 import pytest
 
 from mooncake.reshard.contracts import ResourceId, RevisionId
+import mooncake.reshard.weight._planner.contracts as planner_contracts
 from mooncake.reshard.weight import (
     bind_logical_transfer_plan,
     plan_placement_transfer,
@@ -15,7 +17,9 @@ from mooncake.reshard.weight import (
 )
 from mooncake.reshard.weight._planner.core import resolve_executor_plans
 from mooncake.reshard.weight._planner.contracts import (
-    CopyRange,
+    ExecutorTransferPlan,
+    LogicalTransferPlan,
+    PlacementExecutorPlan,
     TransferPlan,
     TransferRegion,
 )
@@ -25,6 +29,85 @@ from .helpers import RuntimeInputs, plan_transfer, rebuild_placement, tp_manifes
 
 def _replace_bindings(inputs: RuntimeInputs, bindings) -> RuntimeInputs:
     return RuntimeInputs(inputs.placement, tuple(bindings))
+
+
+def test_execution_views_derive_operation_indices_and_pipeline_routes() -> None:
+    assert "operation_indices" not in inspect.signature(ExecutorTransferPlan).parameters
+    assert (
+        "operation_indices" not in inspect.signature(PlacementExecutorPlan).parameters
+    )
+    assert "pipeline_routes" not in inspect.signature(LogicalTransferPlan).parameters
+    assert "pipeline_routes" not in inspect.signature(TransferPlan).parameters
+
+    source = tp_manifests(
+        tp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    target = tp_manifests(
+        tp=1,
+        pp_rank=1,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    plan = plan_transfer(source, target)
+
+    assert plan.operation_indices_for_executor(
+        plan.source_executors[0], "source"
+    ) == tuple(range(len(plan.operations)))
+    assert plan.operation_indices_for_executor(
+        plan.target_executors[0], "target"
+    ) == tuple(range(len(plan.operations)))
+    assert [(route.source_pp, route.target_pp) for route in plan.pipeline_routes] == [
+        (0, 1)
+    ]
+
+
+def test_bound_plan_materializes_private_operation_views_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    original = planner_contracts._build_operation_views
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(planner_contracts, "_build_operation_views", counted)
+    source = tp_manifests(
+        tp=2,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+    target = tp_manifests(
+        tp=4,
+        pp_rank=1,
+        ep_rank=0,
+        address_base=0x40000,
+        worker_prefix="target",
+    )
+    plan = plan_transfer(source, target)
+
+    assert calls == 2
+    for _ in range(3):
+        for executor in plan.source_executors:
+            assert plan.operation_indices_for_executor(executor, "source")
+        for executor in plan.target_executors:
+            assert plan.operation_indices_for_executor(executor, "target")
+        assert plan.pipeline_routes
+    assert calls == 2
+    assert "_operation_views" not in plan.__getstate__()
+
+    restored = pickle.loads(pickle.dumps(plan))
+    assert restored.operation_indices_for_executor(
+        restored.target_executors[0], "target"
+    )
 
 
 def test_bound_plan_snapshots_only_the_selected_source_dp_replica() -> None:
@@ -110,9 +193,7 @@ def test_binding_preserves_n_dim_region_geometry() -> None:
     )
 
     assert len(plan.operations) == len(logical.operations)
-    for logical_operation, live_operation in zip(
-        logical.operations, plan.operations, strict=True
-    ):
+    for logical_operation, live_operation in zip(logical.operations, plan.operations):
         assert live_operation.tensor_id == logical_operation.tensor_id
         assert live_operation.source_offset == logical_operation.source_offset
         assert live_operation.target_offset == logical_operation.target_offset
@@ -158,27 +239,8 @@ def test_bind_rejects_logical_plan_with_target_coverage_gap() -> None:
         for index, operation in enumerate(logical.operations)
         if not (operation.target.rank.tp == 0 and operation.source.rank.tp == 0)
     )
-    remapped_indices = {old: new for new, old in enumerate(kept_indices)}
-
-    def remap(items):
-        return tuple(
-            replace(
-                item,
-                operation_indices=tuple(
-                    remapped_indices[index]
-                    for index in item.operation_indices
-                    if index in remapped_indices
-                ),
-            )
-            for item in items
-            if any(index in remapped_indices for index in item.operation_indices)
-        )
-
     truncated_values = {
         "operations": tuple(logical.operations[index] for index in kept_indices),
-        "source_executors": remap(logical.source_executors),
-        "target_executors": remap(logical.target_executors),
-        "pipeline_routes": remap(logical.pipeline_routes),
     }
 
     with pytest.raises(ValueError, match="target fragment is not fully covered"):
@@ -221,29 +283,10 @@ def test_public_transfer_plan_rejects_bound_target_coverage_gap() -> None:
         for index, operation in enumerate(plan.operations)
         if operation.source.rank.tp == 1
     )
-    remapped_indices = {old: new for new, old in enumerate(kept_indices)}
-
-    def remap(items):
-        return tuple(
-            replace(
-                item,
-                operation_indices=tuple(
-                    remapped_indices[index]
-                    for index in item.operation_indices
-                    if index in remapped_indices
-                ),
-            )
-            for item in items
-            if any(index in remapped_indices for index in item.operation_indices)
-        )
-
     with pytest.raises(ValueError, match="bound target fragment is not fully covered"):
         replace(
             plan,
             operations=tuple(plan.operations[index] for index in kept_indices),
-            source_executors=remap(plan.source_executors),
-            target_executors=remap(plan.target_executors),
-            pipeline_routes=remap(plan.pipeline_routes),
         )
 
 
@@ -270,7 +313,6 @@ def test_public_transfer_plan_rejects_empty_target_selection() -> None:
             operations=(),
             source_executors=(),
             target_executors=(),
-            pipeline_routes=(),
         )
 
 
@@ -305,9 +347,9 @@ def test_bind_accepts_a_complete_local_target_plan() -> None:
     assert {operation.target.rank.tp for operation in plan.operations} == {0}
 
 
-def test_logical_plan_rejects_legacy_ranges_that_do_not_cover_target() -> None:
+def test_logical_plan_rejects_regions_that_do_not_cover_target() -> None:
     source = tp_manifests(
-        tp=1,
+        tp=2,
         pp_rank=0,
         ep_rank=0,
         address_base=0x10000,
@@ -321,18 +363,8 @@ def test_logical_plan_rejects_legacy_ranges_that_do_not_cover_target() -> None:
         worker_prefix="target",
     )
     logical = plan_placement_transfer(source.placement, target.placement)
-    region = logical.operations[0]
-    legacy_gap = CopyRange(
-        tensor_id=region.tensor_id,
-        source=region.source,
-        target=region.target,
-        source_offset=region.source_offset,
-        target_offset=region.target_offset,
-        nbytes=region.nbytes - 2,
-    )
-
     with pytest.raises(ValueError, match="target fragment is not fully covered"):
-        replace(logical, operations=(legacy_gap,))
+        replace(logical, operations=(logical.operations[0],))
 
 
 def test_bind_rejects_duck_typed_logical_plan() -> None:
@@ -667,22 +699,15 @@ def test_public_transfer_plan_rejects_attested_overlapping_target_ranges() -> No
     )
     plan = plan_transfer(source, target)
     operation = plan.operations[0]
-    overlapping = CopyRange(
-        tensor_id=operation.tensor_id,
-        source=operation.source,
-        target=operation.target,
-        source_offset=operation.source_offset,
-        target_offset=operation.target_offset + 2,
-        nbytes=operation.nbytes - 2,
-    )
-
     with pytest.raises(ValueError, match="conflicting target physical range"):
         TransferPlan(
             resource_id=plan.resource_id,
             revision=plan.revision,
             weight_generation=plan.weight_generation,
             target_placement=target.placement,
-            operations=(operation, overlapping),
+            operations=(operation, operation),
+            source_executors=plan.source_executors,
+            target_executors=plan.target_executors,
         )
 
 

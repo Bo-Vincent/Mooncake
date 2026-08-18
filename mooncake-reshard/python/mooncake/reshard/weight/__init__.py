@@ -20,9 +20,9 @@ from .manifest import (
 from .serde import weight_placement_from_json, weight_placement_to_json
 from .planner import (
     BoundWeightFragment,
-    CopyRange,
     ExecutorTransferPlan,
     LogicalTransferPlan,
+    PlanningLimits,
     PipelineRouteGroup,
     PlacementExecutorPlan,
     RuntimeLeaseSnapshot,
@@ -38,6 +38,7 @@ from .planner import (
 )
 from .storage_manifest import StoredFragment, WeightManifest
 from .store import (
+    StoreRegistrationLease,
     UploadOperation,
     UploadReceipt,
     WeightLoadPlan,
@@ -53,6 +54,8 @@ from .te import (
     MooncakeTransferEngineSink,
     TransferCompletionUnknownError,
     TransferEngineError,
+    WeightAllocationGuardProvider,
+    WeightAllocationGuardProviders,
 )
 
 
@@ -93,11 +96,12 @@ __all__ = [
     "weight_placement_from_json",
     "weight_placement_to_json",
     "StoredFragment",
+    "StoreRegistrationLease",
     "WeightManifest",
     "BoundWeightFragment",
-    "CopyRange",
     "ExecutorTransferPlan",
     "LogicalTransferPlan",
+    "PlanningLimits",
     "PipelineRouteGroup",
     "PlacementExecutorPlan",
     "RuntimeLeaseSnapshot",
@@ -123,4 +127,6 @@ __all__ = [
     "MooncakeTransferEngineSink",
     "TransferCompletionUnknownError",
     "TransferEngineError",
+    "WeightAllocationGuardProvider",
+    "WeightAllocationGuardProviders",
 ]

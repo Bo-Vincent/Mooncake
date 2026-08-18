@@ -223,7 +223,7 @@ def test_public_transfer_plan_rejects_duck_typed_executor_metadata() -> None:
         target_address=0x40000,
         column=0,
     )
-    fake_executor = SimpleNamespace(operation_indices=(0,))
+    fake_executor = SimpleNamespace()
 
     with pytest.raises(ValueError, match="canonical executor metadata"):
         TransferPlan(

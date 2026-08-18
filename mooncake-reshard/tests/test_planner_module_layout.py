@@ -20,7 +20,6 @@ from mooncake.reshard.weight._planner.binding import (
 )
 from mooncake.reshard.weight._planner.contracts import (
     BoundWeightFragment,
-    CopyRange,
     ExecutorTransferPlan,
     LogicalTransferPlan,
     PipelineRouteGroup,
@@ -131,7 +130,6 @@ def _binding(
 
 def test_planner_responsibility_modules_preserve_public_identity() -> None:
     assert planner.BoundWeightFragment is BoundWeightFragment
-    assert planner.CopyRange is CopyRange
     assert planner.ExecutorTransferPlan is ExecutorTransferPlan
     assert planner.LogicalTransferPlan is LogicalTransferPlan
     assert planner.PipelineRouteGroup is PipelineRouteGroup

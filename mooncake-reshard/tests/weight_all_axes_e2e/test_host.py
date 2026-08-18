@@ -4,6 +4,8 @@ import pickle
 
 import pytest
 
+from weight_gpu_e2e.lifetime import allocation_guards_for_bindings
+
 from mooncake.reshard.weight import (
     MemoryRegistrationLease,
     MooncakeTransferEngineReader,
@@ -59,8 +61,10 @@ def test_reader_fixture_pulls_packed_tp1_weights_into_tp2_targets() -> None:
     )
 
     def execute_reader(plan, sources, target):
+        source_owner_bindings = sources.bindings
+        target_owner_bindings = target.bindings
         plan, sources, target = _wire_safe_reader_payload(plan, sources, target)
-        pickle.dumps((plan, sources, target))
+        plan, sources, target = pickle.loads(pickle.dumps((plan, sources, target)))
         target_placement, target_binding = target.single()
         return MooncakeTransferEngineReader(engine).execute(
             plan,
@@ -85,6 +89,14 @@ def test_reader_fixture_pulls_packed_tp1_weights_into_tp2_targets() -> None:
                     runtime_lease_id=target_binding.lease_id,
                 )
                 for fragment in target_binding.fragments
+            ),
+            source_allocation_guards=allocation_guards_for_bindings(
+                sources.bindings,
+                owner_bindings=source_owner_bindings,
+            ),
+            target_allocation_guards=allocation_guards_for_bindings(
+                (target_binding,),
+                owner_bindings=target_owner_bindings,
             ),
         )
 
@@ -131,6 +143,8 @@ def test_reader_fixture_reshards_independent_experts_across_dimensions() -> None
                 )
                 for fragment in target_binding.fragments
             ),
+            source_allocation_guards=allocation_guards_for_bindings(sources.bindings),
+            target_allocation_guards=allocation_guards_for_bindings((target_binding,)),
         )
 
     with (

@@ -6,8 +6,11 @@ from ._te import (
     MemoryRegistrationLease,
     MooncakeTransferEngineReader,
     MooncakeTransferEngineSink,
+    TransferCompletionFailedError,
     TransferCompletionUnknownError,
     TransferEngineError,
+    WeightAllocationGuardProvider,
+    WeightAllocationGuardProviders,
 )
 
 __all__ = [
@@ -17,5 +20,8 @@ __all__ = [
     "MooncakeTransferEngineReader",
     "MooncakeTransferEngineSink",
     "TransferCompletionUnknownError",
+    "TransferCompletionFailedError",
     "TransferEngineError",
+    "WeightAllocationGuardProvider",
+    "WeightAllocationGuardProviders",
 ]

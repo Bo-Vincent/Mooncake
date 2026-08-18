@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from weight_gpu_e2e.lifetime import allocation_guards_for_bindings
+
 from mooncake.reshard.weight import (
     DirectReadReceipt,
     MemoryRegistrationLease,
@@ -179,6 +181,12 @@ def _execute_cross_dim_sink_fixture(
             target_registrations=target_registrations,
             source_pre_registered=True,
             source_registrations=source_registrations,
+            source_allocation_guards=allocation_guards_for_bindings(
+                fixture.sources.bindings
+            ),
+            target_allocation_guards=allocation_guards_for_bindings(
+                fixture.targets.bindings
+            ),
         )
     )
 
@@ -242,6 +250,12 @@ def _execute_te_fixture(
             target_registrations=target_registrations,
             source_pre_registered=True,
             source_registrations=source_registrations,
+            source_allocation_guards=allocation_guards_for_bindings(
+                fixture.sources.bindings
+            ),
+            target_allocation_guards=allocation_guards_for_bindings(
+                fixture.targets.bindings
+            ),
         )
     )
     assert sum(receipt.nbytes for receipt in receipts) == (

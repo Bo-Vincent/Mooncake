@@ -127,7 +127,9 @@ def test_shard_dim_one_generates_row_ranges() -> None:
     assert operations[0].repeat == 2
     assert operations[0].source_stride == 8
     assert operations[0].target_stride == 4
-    assert list(operations[0].iter_segments()) == [
+    assert list(
+        operations[0].iter_segments(max_segments=operations[0].segment_count)
+    ) == [
         (0, 0, 4),
         (8, 4, 4),
     ]

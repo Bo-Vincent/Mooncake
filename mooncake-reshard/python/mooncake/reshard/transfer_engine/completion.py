@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, Sequence
+from typing import Any, Sequence, Union
 from uuid import uuid4
+
+from .lifetime import (
+    AllocationLifetimeToken,
+    TerminalTransferState,
+    release_tokens_after_terminal,
+)
 
 
 class TransferEngineError(RuntimeError):
@@ -14,6 +20,10 @@ class TransferCompletionUnknownError(TransferEngineError):
     def __init__(self, message: str, *, pending_transfer_id: str) -> None:
         super().__init__(message)
         self.pending_transfer_id = pending_transfer_id
+
+
+class TransferCompletionFailedError(TransferEngineError):
+    """Native transfer reached a known terminal failure state."""
 
 
 class _CompletionUnknown(RuntimeError):
@@ -77,6 +87,7 @@ class _PendingTransfer:
     ticket: Any
     registrations: set[int]
     resources: tuple[Any, ...]
+    allocation_tokens: tuple[AllocationLifetimeToken, ...]
     restart_required: bool
     resources_handed_off: bool = False
     draining: bool = False
@@ -117,13 +128,15 @@ def _batch_transfer_with_completion_fence(
     arguments: tuple[Any, ...],
     max_drain_attempts: int,
     drain_timeout_ms: int,
-) -> int | str:
+) -> Union[int, str]:
     ticket_method = getattr(engine, ticket_method_name, None)
     if not callable(ticket_method):
         try:
             result = getattr(engine, legacy_method_name)(*arguments)
-        except Exception:
-            raise
+        except Exception as error:
+            # A legacy call does not return a drainable completion token. Once
+            # it throws, the caller cannot prove whether DMA was submitted.
+            raise _CompletionUnknown(_UndrainableCompletionUnknownTicket()) from error
         except BaseException as error:
             raise _CompletionWaitInterrupted(
                 _UndrainableCompletionUnknownTicket(),
@@ -135,8 +148,11 @@ def _batch_transfer_with_completion_fence(
 
     try:
         ticket = ticket_method(*arguments)
-    except Exception:
-        raise
+    except Exception as error:
+        # A ticket-bearing entry point can also cross the native submission
+        # boundary before throwing. With no ticket to drain, fail closed and
+        # require engine restart rather than releasing caller allocations.
+        raise _CompletionUnknown(_UndrainableCompletionUnknownTicket()) from error
     except BaseException as error:
         # The call may have crossed the native submission boundary before the
         # interruption. Without a returned ticket, only restart is safe.
@@ -177,6 +193,7 @@ class PendingTransferManager:
                 ticket=ticket,
                 registrations=set(),
                 resources=(),
+                allocation_tokens=(),
                 restart_required=getattr(ticket, "restart_required", False),
             )
         return pending_transfer_id
@@ -187,6 +204,7 @@ class PendingTransferManager:
         *,
         registrations: Sequence[int],
         resources: Sequence[Any],
+        allocation_tokens: Sequence[AllocationLifetimeToken] = (),
     ) -> None:
         with _pending_transfer_lock:
             pending = _pending_transfers.get(pending_transfer_id)
@@ -205,6 +223,14 @@ class PendingTransferManager:
                 )
             pending.registrations.update(registrations)
             pending.resources += tuple(resources)
+            token_ids = {token.fence.token_id for token in pending.allocation_tokens}
+            for token in allocation_tokens:
+                if token.fence.token_id in token_ids:
+                    raise TransferEngineError(
+                        "pending transfer has duplicate allocation lifetime token"
+                    )
+                token_ids.add(token.fence.token_id)
+            pending.allocation_tokens += tuple(allocation_tokens)
             pending.resources_handed_off = True
 
     def _reserve_submission(self) -> None:
@@ -329,11 +355,34 @@ class PendingTransferManager:
                     if current is not None:
                         current.registrations = failed_addresses
                 else:
-                    _pending_transfers.pop(pending_transfer_id, None)
+                    current = _pending_transfers.get(pending_transfer_id)
+                    if current is None:
+                        raise TransferEngineError(
+                            f"pending transfer does not exist: {pending_transfer_id}"
+                        )
+                    allocation_tokens = current.allocation_tokens
+                    current.allocation_tokens = ()
             if failures:
                 raise TransferEngineError(
                     f"pending transfer registration cleanup failed: {failures}"
                 )
+            terminal_state = (
+                TerminalTransferState.COMPLETED
+                if status_name == "COMPLETED"
+                else TerminalTransferState.FAILED_DRAINED
+            )
+            try:
+                release_tokens_after_terminal(allocation_tokens, terminal_state)
+            except Exception as error:
+                with _pending_transfer_lock:
+                    current = _pending_transfers.get(pending_transfer_id)
+                    if current is not None:
+                        current.allocation_tokens = allocation_tokens
+                raise TransferEngineError(
+                    f"pending transfer allocation lifetime release failed: {error}"
+                ) from error
+            with _pending_transfer_lock:
+                _pending_transfers.pop(pending_transfer_id, None)
             return status_name
         finally:
             with _pending_transfer_lock:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence, cast
+from typing import Sequence, Union, cast
 
 from ..manifest import (
     RuntimeBindingFragment,
@@ -23,16 +23,44 @@ def validate_lowering_limits(
     *,
     max_batch_operations: int,
     max_region_segments: int,
+    max_total_lowered_segments: int,
     max_completion_drain_attempts: int,
     completion_drain_timeout_ms: int,
 ) -> None:
     if (
         max_batch_operations <= 0
         or max_region_segments <= 0
+        or max_total_lowered_segments <= 0
         or max_completion_drain_attempts <= 0
         or completion_drain_timeout_ms < 0
     ):
         raise ValueError("transfer lowering limits must be positive")
+
+
+def validate_lowering_budget(
+    operations: Sequence[object],
+    *,
+    max_region_segments: int,
+    max_total_lowered_segments: int,
+) -> None:
+    """Reject an executable lowering before any range expansion starts."""
+
+    total_segments = 0
+    for operation in operations:
+        segment_count = getattr(operation, "segment_count", None)
+        if type(segment_count) is not int or segment_count <= 0:
+            raise TransferEngineError("transfer operation has invalid segment_count")
+        if segment_count > max_region_segments:
+            raise TransferEngineError(
+                "transfer region exceeds max_region_segments: "
+                f"{segment_count} > {max_region_segments}"
+            )
+        total_segments += segment_count
+        if total_segments > max_total_lowered_segments:
+            raise TransferEngineError(
+                "transfer plan exceeds max_total_lowered_segments: "
+                f"{total_segments} > {max_total_lowered_segments}"
+            )
 
 
 def validate_plan_identity(
@@ -70,7 +98,7 @@ def validate_manifest_pair(
 
 
 def runtime_binding_fragment(
-    fragment: RuntimeBindingFragment | BoundWeightFragment,
+    fragment: Union[RuntimeBindingFragment, BoundWeightFragment],
 ) -> RuntimeBindingFragment:
     if isinstance(fragment, RuntimeBindingFragment):
         return fragment
@@ -156,3 +184,31 @@ def resolve_runtime_executors(
     label: str,
 ) -> tuple[ExecutorTransferPlan, ...]:
     return resolve_executor_plans(plan, placement, binding, label)
+
+
+def validate_selected_executor_snapshot(
+    plan: TransferPlan,
+    placement: WeightPlacementManifest,
+    binding: WeightRuntimeBindingManifest,
+    label: str,
+) -> tuple[ExecutorTransferPlan, ...]:
+    """Validate a planned participant before its framework guard is acquired.
+
+    The guard is the allocation-lifetime authority, but it must never be asked
+    to pin an arbitrary participant or fragment set. This check uses only the
+    manifest snapshot and plan identity; the executor repeats the same check
+    against the fresh binding returned under the framework pin.
+    """
+
+    expected_participants = {
+        executor.participant_id
+        for executor in (
+            plan.source_executors if label == "source" else plan.target_executors
+        )
+    }
+    if binding.participant_id not in expected_participants:
+        return ()
+    try:
+        return resolve_runtime_executors(plan, placement, binding, label)
+    except (KeyError, ValueError) as error:
+        raise TransferEngineError(str(error)) from error

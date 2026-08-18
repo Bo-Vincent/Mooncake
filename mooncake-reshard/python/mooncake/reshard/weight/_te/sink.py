@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
+from uuid import uuid4
 
 from ...contracts import LeaseId, RuntimeFragmentId
 from ...transfer_engine import (
     MooncakeTransferEngineExecutor,
+    TransferCompletionFailedError,
     TransferBatch,
     TransferDirection,
     TransferEngineError,
@@ -21,9 +23,11 @@ from .batching import iter_transfer_batches
 from .execution import (
     pair_manifests,
     resolve_runtime_executors,
+    validate_selected_executor_snapshot,
     require_live_transfer_operation,
     runtime_binding_fragment,
     validate_execution_input_types,
+    validate_lowering_budget,
     validate_lowering_limits,
     validate_manifest_pair,
 )
@@ -34,6 +38,12 @@ from .registration import (
     same_runtime_snapshot,
     validate_registration,
 )
+from .lifetime import (
+    WeightAllocationGuardProviders,
+    acquire_weight_lifetime_tokens,
+)
+from ...transfer_engine.lifetime import AllocationTokenSet, TerminalTransferState
+from ...transfer_engine.lifetime import AllocationLifetimeToken
 
 
 @dataclass(frozen=True)
@@ -51,12 +61,14 @@ class MooncakeTransferEngineSink:
         *,
         max_batch_operations: int = 1024,
         max_region_segments: int = 1_000_000,
+        max_total_lowered_segments: int = 10_000_000,
         max_completion_drain_attempts: int = 3,
         completion_drain_timeout_ms: int = 1000,
     ) -> None:
         validate_lowering_limits(
             max_batch_operations=max_batch_operations,
             max_region_segments=max_region_segments,
+            max_total_lowered_segments=max_total_lowered_segments,
             max_completion_drain_attempts=max_completion_drain_attempts,
             completion_drain_timeout_ms=completion_drain_timeout_ms,
         )
@@ -70,6 +82,7 @@ class MooncakeTransferEngineSink:
         self._engine_identity = self._pending.engine_identity
         self.max_batch_operations = max_batch_operations
         self.max_region_segments = max_region_segments
+        self.max_total_lowered_segments = max_total_lowered_segments
         self.max_completion_drain_attempts = max_completion_drain_attempts
         self.completion_drain_timeout_ms = completion_drain_timeout_ms
 
@@ -81,10 +94,13 @@ class MooncakeTransferEngineSink:
         target_placement: WeightPlacementManifest,
         target_bindings: Sequence[WeightRuntimeBindingManifest],
         *,
-        source_worker_id: str | None = None,
-        target_registrations: Sequence[MemoryRegistrationLease] | None = None,
+        source_worker_id: Optional[str] = None,
+        target_registrations: Optional[Sequence[MemoryRegistrationLease]] = None,
         source_pre_registered: bool = False,
-        source_registrations: Sequence[MemoryRegistrationLease] | None = None,
+        source_registrations: Optional[Sequence[MemoryRegistrationLease]] = None,
+        source_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        target_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        transfer_id: Optional[str] = None,
     ) -> tuple[DirectTransferReceipt, ...]:
         validate_execution_input_types(
             plan,
@@ -93,18 +109,91 @@ class MooncakeTransferEngineSink:
             target_placement,
             target_bindings,
         )
-        with self.transfer_executor.submission():
-            return self._execute_reserved(
+        # This preflight is diagnostic only. The executor repeats validation
+        # after framework guards return a freshly pinned binding snapshot.
+        validate_manifest_pair(plan, source_placement, source_binding, "source")
+        validate_selected_executor_snapshot(
+            plan,
+            source_placement,
+            source_binding,
+            "source",
+        )
+        for binding in target_bindings:
+            validate_manifest_pair(plan, target_placement, binding, "target")
+            validate_selected_executor_snapshot(
                 plan,
-                source_placement,
-                source_binding,
                 target_placement,
-                target_bindings,
-                source_worker_id=source_worker_id,
-                target_registrations=target_registrations,
-                source_pre_registered=source_pre_registered,
-                source_registrations=source_registrations,
+                binding,
+                "target",
             )
+        with self.transfer_executor.submission():
+            transfer_id = transfer_id or uuid4().hex
+            source_keys = {
+                (executor.instance_id, executor.participant_id)
+                for executor in plan.source_executors
+            }
+            target_keys = {
+                (executor.instance_id, executor.participant_id)
+                for executor in plan.target_executors
+            }
+            source_tokens: Optional[AllocationTokenSet] = None
+            target_tokens: Optional[AllocationTokenSet] = None
+            lifetime_tokens: Optional[AllocationTokenSet] = None
+            terminal_state = TerminalTransferState.ABORTED
+            try:
+                acquired_sources, source_tokens = acquire_weight_lifetime_tokens(
+                    transfer_id=transfer_id,
+                    plan=plan,
+                    bindings=(source_binding,)
+                    if (source_binding.instance_id, source_binding.participant_id)
+                    in source_keys
+                    else (),
+                    side="source",
+                    providers=source_allocation_guards,
+                )
+                acquired_targets, target_tokens = acquire_weight_lifetime_tokens(
+                    transfer_id=transfer_id,
+                    plan=plan,
+                    bindings=tuple(
+                        binding
+                        for binding in target_bindings
+                        if (binding.instance_id, binding.participant_id) in target_keys
+                    ),
+                    side="target",
+                    providers=target_allocation_guards,
+                )
+                lifetime_tokens = AllocationTokenSet(
+                    (*source_tokens.tokens, *target_tokens.tokens)
+                )
+                if len(acquired_sources) != 1:
+                    raise TransferEngineError(
+                        "source allocation guards did not acquire one local binding"
+                    )
+                result = self._execute_reserved(
+                    plan,
+                    source_placement,
+                    acquired_sources[0],
+                    target_placement,
+                    acquired_targets,
+                    source_worker_id=source_worker_id,
+                    target_registrations=target_registrations,
+                    source_pre_registered=source_pre_registered,
+                    source_registrations=source_registrations,
+                    lifetime_tokens=lifetime_tokens,
+                )
+                terminal_state = TerminalTransferState.COMPLETED
+                return result
+            except TransferCompletionFailedError:
+                terminal_state = TerminalTransferState.FAILED_DRAINED
+                raise
+            finally:
+                if lifetime_tokens is not None:
+                    lifetime_tokens.release_after_terminal(terminal_state)
+                else:
+                    if target_tokens is not None:
+                        target_tokens.release_after_terminal(terminal_state)
+                    if source_tokens is not None:
+                        source_tokens.release_after_terminal(terminal_state)
 
     def _execute_reserved(
         self,
@@ -114,10 +203,11 @@ class MooncakeTransferEngineSink:
         target_placement: WeightPlacementManifest,
         target_bindings: Sequence[WeightRuntimeBindingManifest],
         *,
-        source_worker_id: str | None = None,
-        target_registrations: Sequence[MemoryRegistrationLease] | None = None,
+        source_worker_id: Optional[str] = None,
+        target_registrations: Optional[Sequence[MemoryRegistrationLease]] = None,
         source_pre_registered: bool = False,
-        source_registrations: Sequence[MemoryRegistrationLease] | None = None,
+        source_registrations: Optional[Sequence[MemoryRegistrationLease]] = None,
+        lifetime_tokens: Optional[AllocationTokenSet] = None,
     ) -> tuple[DirectTransferReceipt, ...]:
         validate_manifest_pair(plan, source_placement, source_binding, "source")
         try:
@@ -181,7 +271,7 @@ class MooncakeTransferEngineSink:
         local_operations = [
             require_live_transfer_operation(plan.operations[index])
             for executor in source_executors
-            for index in executor.operation_indices
+            for index in plan.operation_indices_for_executor(executor, "source")
         ]
         if not local_operations:
             return ()
@@ -250,6 +340,16 @@ class MooncakeTransferEngineSink:
                 (operation, operation.source, operation.target)
             )
 
+        validate_lowering_budget(
+            tuple(
+                operation
+                for operations in operations_by_endpoint.values()
+                for operation, _, _ in operations
+            ),
+            max_region_segments=self.max_region_segments,
+            max_total_lowered_segments=self.max_total_lowered_segments,
+        )
+
         with registered_sources(
             self.engine,
             self,
@@ -266,6 +366,7 @@ class MooncakeTransferEngineSink:
                 source_registrations,
                 target_registrations,
             ),
+            lifetime_tokens=lifetime_tokens,
         ):
             receipts: list[DirectTransferReceipt] = []
             for endpoint in sorted(operations_by_endpoint):
@@ -282,6 +383,7 @@ class MooncakeTransferEngineSink:
                     endpoint,
                     operations,
                     max_batch_operations=self.max_batch_operations,
+                    max_region_segments=self.max_region_segments,
                 ):
                     self._transfer_batch(batch)
                     operation_count += batch.operation_count
@@ -314,11 +416,13 @@ class MooncakeTransferEngineSink:
         *,
         registrations: Sequence[int],
         resources: Sequence[Any],
+        allocation_tokens: Sequence[AllocationLifetimeToken] = (),
     ) -> None:
         self._pending._retain_pending_resources(
             pending_transfer_id,
             registrations=registrations,
             resources=resources,
+            allocation_tokens=allocation_tokens,
         )
 
     def _reserve_submission(self) -> None:

@@ -5,75 +5,18 @@ from math import prod
 
 import pytest
 
+import mooncake.reshard.weight._planner.contracts as planner_contracts
 from mooncake.reshard.weight._planner.contracts import (
     BoundWeightFragment,
-    CopyRange,
     TransferRegion,
 )
-from mooncake.reshard.weight._planner.validation import _operation_loop_geometry
 from mooncake.reshard.weight.manifest import ParallelRank
 
-from .helpers import bound_fragment, tp_manifests
+from .helpers import bound_fragment
 
 
-def test_copy_range_rejects_fragment_overflow_and_non_integer_offsets() -> None:
-    source = tp_manifests(
-        tp=1,
-        pp_rank=0,
-        ep_rank=0,
-        address_base=0x10000,
-        worker_prefix="source",
-    )[0].fragments[0]
-    target = tp_manifests(
-        tp=1,
-        pp_rank=0,
-        ep_rank=0,
-        address_base=0x20000,
-        worker_prefix="target",
-    )[0].fragments[0]
-
-    with pytest.raises(ValueError, match="source fragment"):
-        CopyRange(
-            tensor_id=source.tensor_id,
-            source=source,
-            target=target,
-            source_offset=1,
-            target_offset=0,
-            nbytes=source.nbytes,
-        )
-
-    with pytest.raises(ValueError, match="target fragment"):
-        CopyRange(
-            tensor_id=source.tensor_id,
-            source=source,
-            target=target,
-            source_offset=0,
-            target_offset=0,
-            nbytes=1,
-            repeat=2,
-            source_stride=1,
-            target_stride=target.nbytes,
-        )
-
-    with pytest.raises(ValueError, match="integer"):
-        CopyRange(
-            tensor_id=source.tensor_id,
-            source=source,
-            target=target,
-            source_offset=False,
-            target_offset=0,
-            nbytes=1,
-        )
-
-    with pytest.raises(ValueError, match="tensor mismatch"):
-        CopyRange(
-            tensor_id="different.tensor",
-            source=source,
-            target=target,
-            source_offset=0,
-            target_offset=0,
-            nbytes=1,
-        )
+def test_canonical_contract_exposes_only_nd_transfer_regions() -> None:
+    assert not hasattr(planner_contracts, "CopyRange")
 
 
 def n_dim_fragment(
@@ -186,7 +129,12 @@ def test_transfer_region_describes_cross_dim_logical_overlap(
     assert region.target_strides == target_strides
     assert region.segment_count == prod(outer_loop_counts)
     assert region.total_bytes == prod(overlap_shape) * 2
-    assert len(tuple(region.iter_segments())) == region.segment_count
+    assert (
+        len(tuple(region.iter_segments(max_segments=region.segment_count)))
+        == region.segment_count
+    )
+    with pytest.raises(ValueError, match="exceeds max_segments"):
+        tuple(region.iter_segments(max_segments=region.segment_count - 1))
 
     # TransferPlan is the live, runtime-attested boundary. This test only
     # exercises address-free N-D region geometry.
@@ -219,7 +167,7 @@ def test_transfer_region_mixed_radix_iteration_and_n_dim_bounds() -> None:
         target_strides=(48,),
     )
 
-    assert tuple(region.iter_segments()) == (
+    assert tuple(region.iter_segments(max_segments=region.segment_count)) == (
         (32, 48, 48),
         (128, 96, 48),
     )
@@ -256,34 +204,3 @@ def test_transfer_region_rejects_noncanonical_same_volume_geometry() -> None:
             source_strides=(96, 16),
             target_strides=(80, 16),
         )
-
-
-def test_copy_range_single_repeat_preserves_stride_identity() -> None:
-    source = tp_manifests(
-        tp=1,
-        pp_rank=0,
-        ep_rank=0,
-        address_base=0x10000,
-        worker_prefix="source",
-    )[0].fragments[0]
-    target = tp_manifests(
-        tp=1,
-        pp_rank=0,
-        ep_rank=0,
-        address_base=0x20000,
-        worker_prefix="target",
-    )[0].fragments[0]
-    operation = CopyRange(
-        tensor_id=source.tensor_id,
-        source=source,
-        target=target,
-        source_offset=0,
-        target_offset=0,
-        nbytes=2,
-        repeat=1,
-        source_stride=17,
-        target_stride=19,
-    )
-
-    assert _operation_loop_geometry(operation, "source") == ((1,), (17,))
-    assert _operation_loop_geometry(operation, "target") == ((1,), (19,))

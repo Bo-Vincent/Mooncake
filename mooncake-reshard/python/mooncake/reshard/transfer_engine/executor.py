@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 from .completion import (
     PendingTransferManager,
+    TransferCompletionFailedError,
     TransferCompletionUnknownError,
     TransferEngineError,
     _CompletionUnknown,
@@ -16,6 +17,7 @@ from .completion import (
     _batch_transfer_with_completion_fence,
 )
 from .contracts import TransferBatch, TransferBatchReceipt, TransferDirection
+from .lifetime import AllocationLifetimeToken
 
 
 class MooncakeTransferEngineExecutor:
@@ -184,7 +186,7 @@ class MooncakeTransferEngineExecutor:
                 f"batch transfer {failure_label} failed: {error}"
             ) from error
         if result != 0:
-            raise TransferEngineError(
+            raise TransferCompletionFailedError(
                 f"batch transfer {failure_label} failed: {result}"
             )
         return TransferBatchReceipt(
@@ -200,11 +202,13 @@ class MooncakeTransferEngineExecutor:
         *,
         registrations: Sequence[int],
         resources: Sequence[Any],
+        allocation_tokens: Sequence[AllocationLifetimeToken] = (),
     ) -> None:
         self.pending_manager._retain_pending_resources(
             pending_transfer_id,
             registrations=registrations,
             resources=resources,
+            allocation_tokens=allocation_tokens,
         )
 
     def _retain_pending_resources(
@@ -213,11 +217,13 @@ class MooncakeTransferEngineExecutor:
         *,
         registrations: Sequence[int],
         resources: Sequence[Any],
+        allocation_tokens: Sequence[AllocationLifetimeToken] = (),
     ) -> None:
         self.retain_pending_resources(
             pending_transfer_id,
             registrations=registrations,
             resources=resources,
+            allocation_tokens=allocation_tokens,
         )
 
     def pending_transfer_ids(self) -> tuple[str, ...]:

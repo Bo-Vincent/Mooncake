@@ -25,7 +25,12 @@ from mooncake.reshard.weight.planner import (
     bind_logical_transfer_plan,
     plan_placement_transfer,
 )
+from mooncake.reshard.weight.lifetime import (
+    AcquiredWeightBinding,
+    weight_allocation_fence,
+)
 from mooncake.reshard.weight.store import WeightStore
+from mooncake.reshard.transfer_engine.lifetime import TerminalTransferState
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,74 @@ class RuntimeInputs:
 
     def __getitem__(self, index: int) -> RuntimeInputs:
         return RuntimeInputs(self.placement, (self.bindings[index],))
+
+
+class _TestAllocationToken:
+    def __init__(self, fence) -> None:
+        self._fence = fence
+        self.released_states = []
+
+    @property
+    def fence(self):
+        return self._fence
+
+    def release_after_terminal(self, terminal_state: TerminalTransferState) -> None:
+        self.released_states.append(terminal_state)
+
+
+class _TestAllocationGuard:
+    def __init__(self, binding: WeightRuntimeBindingManifest) -> None:
+        self.binding = binding
+        self.tokens: list[_TestAllocationToken] = []
+
+    def acquire(
+        self,
+        *,
+        transfer_id: str,
+        expected_binding: WeightRuntimeBindingManifest,
+        required_fragment_ids: tuple[str, ...],
+    ) -> AcquiredWeightBinding:
+        assert transfer_id
+        assert expected_binding == self.binding
+        token = _TestAllocationToken(
+            weight_allocation_fence(
+                self.binding,
+                required_fragment_ids,
+                token_id=(
+                    f"{self.binding.instance_id}-{self.binding.participant_id}-"
+                    f"{','.join(sorted(required_fragment_ids))}"
+                ),
+            )
+        )
+        self.tokens.append(token)
+        return AcquiredWeightBinding(binding=self.binding, token=token)
+
+
+def allocation_guards_for_bindings(
+    bindings: tuple[WeightRuntimeBindingManifest, ...],
+) -> dict[tuple[str, str], _TestAllocationGuard]:
+    return {
+        (binding.instance_id, binding.participant_id): _TestAllocationGuard(binding)
+        for binding in bindings
+    }
+
+
+class GuardedWeightStore(WeightStore):
+    """Test-only caller adapter that explicitly supplies framework pins."""
+
+    def upload(self, plan, source_placement, source_binding, **kwargs):
+        kwargs.setdefault(
+            "source_allocation_guards",
+            allocation_guards_for_bindings((source_binding,)),
+        )
+        return super().upload(plan, source_placement, source_binding, **kwargs)
+
+    def load(self, plan, target_placement, target_binding, **kwargs):
+        kwargs.setdefault(
+            "target_allocation_guards",
+            allocation_guards_for_bindings((target_binding,)),
+        )
+        return super().load(plan, target_placement, target_binding, **kwargs)
 
 
 def with_empty_participant(
@@ -641,7 +714,7 @@ def make_weight_store(
     max_region_segments: int = 1_000_000,
 ):
     current = store or InMemoryStore()
-    return current, WeightStore(
+    return current, GuardedWeightStore(
         current,
         config_factory=lambda group_ids, record_type: FakeReplicateConfig(
             list(group_ids),

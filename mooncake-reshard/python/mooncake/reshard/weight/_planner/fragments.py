@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypeAlias
+from typing import Optional, Union
+
+from ..._typing import TypeAlias
 
 from ...contracts import (
     LeaseId,
@@ -29,8 +31,8 @@ class BoundWeightFragment:
     instance_id: RuntimeInstanceId
     runtime_lease_id: LeaseId
     lease_generation: int
-    owner: object | None = field(default=None, compare=False, repr=False)
-    attestation: RuntimeBindingAttestation | None = field(
+    owner: Optional[object] = field(default=None, compare=False, repr=False)
+    attestation: Optional[RuntimeBindingAttestation] = field(
         default=None,
         compare=False,
         repr=False,
@@ -75,6 +77,22 @@ class BoundWeightFragment:
                     "bound fragment runtime fence differs from attestation"
                 )
 
+    def __reduce__(self):
+        """Serialize attested runtime evidence without a local allocation owner."""
+
+        return (
+            type(self),
+            (
+                self.placement,
+                self.binding,
+                self.instance_id,
+                self.runtime_lease_id,
+                self.lease_generation,
+                None,
+                self.attestation,
+            ),
+        )
+
     @property
     def placement_fragment_id(self) -> PlacementFragmentId:
         return self.placement.placement_fragment_id
@@ -102,6 +120,10 @@ class BoundWeightFragment:
     @property
     def rank(self) -> ParallelRank:
         return self.placement.rank
+
+    @property
+    def pipeline_stage_id(self) -> Optional[int]:
+        return self.placement.pipeline_stage_id
 
     @property
     def aliases(self) -> tuple[TensorId, ...]:
@@ -139,15 +161,19 @@ class BoundWeightFragment:
 # These aliases are intentionally stage-specific. A placement is immutable and
 # address-free; a bound fragment carries runtime lease/address state; a stored
 # fragment is a Store object range. Executors may only see the last two kinds.
-LogicalSourceFragment: TypeAlias = PlacementFragment | StoredFragment
+LogicalSourceFragment: TypeAlias = Union[PlacementFragment, StoredFragment]
 LogicalTargetFragment: TypeAlias = PlacementFragment
-ExecutableSourceFragment: TypeAlias = BoundWeightFragment | StoredFragment
+ExecutableSourceFragment: TypeAlias = Union[BoundWeightFragment, StoredFragment]
 ExecutableTargetFragment: TypeAlias = BoundWeightFragment
 LiveSourceFragment: TypeAlias = BoundWeightFragment
 LiveTargetFragment: TypeAlias = BoundWeightFragment
 StoredLoadSourceFragment: TypeAlias = StoredFragment
 StoredLoadTargetFragment: TypeAlias = BoundWeightFragment
-GeometryFragment: TypeAlias = PlacementFragment | StoredFragment | BoundWeightFragment
+GeometryFragment: TypeAlias = Union[
+    PlacementFragment,
+    StoredFragment,
+    BoundWeightFragment,
+]
 
 
 __all__ = [

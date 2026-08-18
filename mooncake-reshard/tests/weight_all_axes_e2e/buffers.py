@@ -2,21 +2,39 @@ from __future__ import annotations
 
 import ctypes
 import multiprocessing
+import os
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from multiprocessing.connection import Connection
-from typing import Callable, Iterator
+from threading import Thread
+from typing import Callable, Iterator, Optional, Sequence
 
 from mooncake.reshard._compat import _strict_zip
+from mooncake.reshard.transfer_engine.lifetime import TerminalTransferState
 from mooncake.reshard.weight import (
-    BoundWeightFragment,
     DirectReadReceipt,
     MemoryRegistrationLease,
     MooncakeTransferEngineReader,
     TransferPlan,
+    WeightRuntimeBindingManifest,
+)
+from mooncake.reshard.weight.lifetime import (
+    AcquiredWeightBinding,
+    weight_allocation_fence,
 )
 from weight_all_axes_e2e.fixtures import RuntimeInputs
 from weight_gpu_e2e.buffers import CudaBuffer, CudaRuntime
+from weight_gpu_e2e.lifetime import allocation_guards_for_bindings
+
+
+def _e2e_debug(event: str) -> None:
+    if os.getenv("MOONCAKE_WEIGHT_E2E_DEBUG") == "1":
+        print(
+            f"[weight-e2e pid={os.getpid()}] {event}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 class HostBuffer:
@@ -122,47 +140,176 @@ def _wire_safe_reader_payload(
     sources: RuntimeInputs,
     target: RuntimeInputs,
 ) -> tuple[TransferPlan, RuntimeInputs, RuntimeInputs]:
-    """Drop process-local owners while retaining runtime address evidence."""
+    """Return the normal payload; fragment pickle reducers drop local owners."""
 
-    def wire_binding(binding):
-        return replace(
+    return plan, sources, target
+
+
+class _RemoteSourceAllocationToken:
+    """Target-side token backed by the source framework's guard RPC."""
+
+    def __init__(
+        self,
+        connection: Connection,
+        binding: WeightRuntimeBindingManifest,
+        fragment_ids: Sequence[str],
+        token_id: str,
+    ) -> None:
+        self._connection = connection
+        self._token_id = token_id
+        self._fence = weight_allocation_fence(
             binding,
-            fragments=tuple(
-                replace(fragment, owner=None) for fragment in binding.fragments
+            fragment_ids,
+            token_id=token_id,
+        )
+        self._released = False
+
+    @property
+    def fence(self):
+        return self._fence
+
+    def release_after_terminal(self, terminal_state: TerminalTransferState) -> None:
+        if self._released:
+            return
+        _e2e_debug(f"source-guard release send token={self._token_id}")
+        self._connection.send(("release", self._token_id, terminal_state.value))
+        response = self._connection.recv()
+        if response[0] == "error":
+            raise RuntimeError(response[1])
+        if response != ("released", self._token_id):
+            raise RuntimeError("source allocation guard release response is invalid")
+        _e2e_debug(f"source-guard release received token={self._token_id}")
+        self._released = True
+
+
+class _RemoteSourceBindingGuard:
+    """Framework adapter proxy; the source process owns the real allocation."""
+
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def acquire(
+        self,
+        *,
+        transfer_id: str,
+        expected_binding: WeightRuntimeBindingManifest,
+        required_fragment_ids: Sequence[str],
+    ) -> AcquiredWeightBinding:
+        _e2e_debug(
+            "source-guard acquire send "
+            f"participant={expected_binding.participant_id}"
+        )
+        self._connection.send(
+            (
+                "acquire",
+                transfer_id,
+                expected_binding,
+                tuple(required_fragment_ids),
+            )
+        )
+        response = self._connection.recv()
+        if response[0] == "error":
+            raise RuntimeError(response[1])
+        if response[0] != "acquired" or type(response[1]) is not str:
+            raise RuntimeError("source allocation guard acquire response is invalid")
+        _e2e_debug(
+            "source-guard acquire received "
+            f"participant={expected_binding.participant_id}"
+        )
+        return AcquiredWeightBinding(
+            binding=expected_binding,
+            token=_RemoteSourceAllocationToken(
+                self._connection,
+                expected_binding,
+                required_fragment_ids,
+                response[1],
             ),
         )
 
-    def wire_fragment(fragment):
-        if not isinstance(fragment, BoundWeightFragment):
-            return fragment
-        binding = replace(fragment.binding, owner=None)
-        return replace(fragment, binding=binding, owner=None)
 
-    return (
-        replace(
-            plan,
-            operations=tuple(
-                replace(
-                    operation,
-                    source=wire_fragment(operation.source),
-                    target=wire_fragment(operation.target),
-                )
-                for operation in plan.operations
-            ),
-        ),
-        replace(
-            sources,
-            bindings=tuple(wire_binding(binding) for binding in sources.bindings),
-        ),
-        replace(
-            target,
-            bindings=tuple(wire_binding(binding) for binding in target.bindings),
-        ),
-    )
+def _binding_with_local_owners(
+    binding: WeightRuntimeBindingManifest,
+    buffers: Sequence[CudaBuffer],
+) -> WeightRuntimeBindingManifest:
+    buffers_by_address = {buffer.pointer: buffer for buffer in buffers}
+    fragments = []
+    for fragment in binding.fragments:
+        owner = buffers_by_address.get(fragment.storage_address)
+        if owner is None:
+            raise RuntimeError(
+                f"target allocation is missing for storage {fragment.storage_address}"
+            )
+        fragments.append(replace(fragment, owner=owner))
+    return replace(binding, fragments=tuple(fragments))
+
+
+def _serve_source_allocation_guards(
+    connection: Connection,
+    owner_bindings: Sequence[WeightRuntimeBindingManifest],
+) -> None:
+    tokens = {}
+    try:
+        _e2e_debug("source-guard server started")
+        while True:
+            try:
+                request = connection.recv()
+            except (EOFError, OSError):
+                return
+            if request[0] == "stop":
+                _e2e_debug("source-guard server stopped")
+                connection.send(("stopped",))
+                return
+            try:
+                if request[0] == "acquire":
+                    _, transfer_id, expected_binding, fragment_ids = request
+                    key = (
+                        expected_binding.instance_id,
+                        expected_binding.participant_id,
+                    )
+                    provider = allocation_guards_for_bindings(
+                        (expected_binding,),
+                        owner_bindings=owner_bindings,
+                    ).get(key)
+                    if provider is None:
+                        raise RuntimeError(
+                            "source allocation guard provider is missing"
+                        )
+                    acquired = provider.acquire(
+                        transfer_id=transfer_id,
+                        expected_binding=expected_binding,
+                        required_fragment_ids=fragment_ids,
+                    )
+                    token_id = acquired.token.fence.token_id
+                    if token_id in tokens:
+                        raise RuntimeError(
+                            "source allocation guard token is duplicated"
+                        )
+                    tokens[token_id] = acquired.token
+                    _e2e_debug(f"source-guard server acquired token={token_id}")
+                    connection.send(("acquired", token_id))
+                elif request[0] == "release":
+                    _, token_id, terminal_state = request
+                    token = tokens.pop(token_id, None)
+                    if token is None:
+                        raise RuntimeError("source allocation guard token is unknown")
+                    token.release_after_terminal(TerminalTransferState(terminal_state))
+                    _e2e_debug(f"source-guard server released token={token_id}")
+                    connection.send(("released", token_id))
+                else:
+                    raise RuntimeError(
+                        f"unknown source allocation guard command: {request[0]}"
+                    )
+            except BaseException as error:
+                connection.send(("error", repr(error)))
+    finally:
+        for token in tokens.values():
+            token.release_after_terminal(TerminalTransferState.ABORTED)
+        connection.close()
 
 
 def _cuda_target_worker(
     connection: Connection,
+    source_guard_connection: Connection,
     local_hostname: str,
     protocol: str,
     device: str,
@@ -172,6 +319,7 @@ def _cuda_target_worker(
 
     engine = TransferEngine()
     buffers = []
+    source_guard_active = False
     runtimes = {target: CudaRuntime(target) for target in target_devices}
     try:
         result = engine.initialize(
@@ -183,6 +331,7 @@ def _cuda_target_worker(
         if result != 0:
             raise RuntimeError(f"target TransferEngine initialize failed: {result}")
         connection.send(("ready", f"{local_hostname}:{engine.get_rpc_port()}"))
+        _e2e_debug("target worker ready")
         while True:
             command = connection.recv()
             if command[0] == "allocate":
@@ -205,8 +354,13 @@ def _cuda_target_worker(
                 _, index, offset, nbytes = command
                 connection.send(("data", buffers[index].read_range(offset, nbytes)))
             elif command[0] == "execute_reader":
+                _e2e_debug("target worker received execute_reader")
                 _, plan, sources, target = command
                 target_placement, target_binding = target.single()
+                target_binding = _binding_with_local_owners(target_binding, buffers)
+                _e2e_debug("target worker rebound local target owners")
+                _e2e_debug("target worker entering reader.execute")
+                source_guard_active = True
                 receipts = MooncakeTransferEngineReader(engine).execute(
                     plan,
                     sources.placement,
@@ -231,9 +385,26 @@ def _cuda_target_worker(
                         )
                         for fragment in target_binding.fragments
                     ),
+                    source_allocation_guards={
+                        (binding.instance_id, binding.participant_id): (
+                            _RemoteSourceBindingGuard(source_guard_connection)
+                        )
+                        for binding in sources.bindings
+                    },
+                    target_allocation_guards=allocation_guards_for_bindings(
+                        (target_binding,)
+                    ),
                 )
+                _e2e_debug("target worker reader.execute completed")
                 connection.send(("executed", receipts))
             elif command[0] == "shutdown":
+                if source_guard_active:
+                    source_guard_connection.send(("stop",))
+                    stopped = source_guard_connection.recv()
+                    if stopped != ("stopped",):
+                        raise RuntimeError(
+                            "source allocation guard server did not stop"
+                        )
                 break
             else:
                 raise RuntimeError(f"unknown target command: {command[0]}")
@@ -249,6 +420,7 @@ def _cuda_target_worker(
     except BaseException as exc:
         connection.send(("error", repr(exc)))
     finally:
+        source_guard_connection.close()
         connection.close()
 
 
@@ -271,10 +443,12 @@ def _remote_cuda_target(
 ]:
     context = multiprocessing.get_context("spawn")
     parent_connection, child_connection = context.Pipe()
+    source_guard_parent, source_guard_child = context.Pipe()
     process = context.Process(
         target=_cuda_target_worker,
         args=(
             child_connection,
+            source_guard_child,
             local_hostname,
             protocol,
             device,
@@ -283,12 +457,15 @@ def _remote_cuda_target(
     )
     process.start()
     child_connection.close()
+    source_guard_child.close()
     response = parent_connection.recv()
     if response[0] == "error":
         process.join(timeout=10)
         raise RuntimeError(response[1])
     assert response[0] == "ready"
     target_endpoint = response[1]
+    guard_server: Optional[Thread] = None
+    source_binding_identity: Optional[tuple[tuple[str, str, int, str], ...]] = None
 
     def allocate(size: int) -> RemoteCudaBuffer:
         parent_connection.send(("allocate", size))
@@ -308,13 +485,38 @@ def _remote_cuda_target(
         sources: RuntimeInputs,
         target: RuntimeInputs,
     ) -> tuple[DirectReadReceipt, ...]:
+        nonlocal guard_server, source_binding_identity
+        current_identity = tuple(
+            sorted(
+                (
+                    binding.instance_id,
+                    binding.participant_id,
+                    binding.generation,
+                    binding.lease_id,
+                )
+                for binding in sources.bindings
+            )
+        )
+        if guard_server is None:
+            source_binding_identity = current_identity
+            guard_server = Thread(
+                target=_serve_source_allocation_guards,
+                args=(source_guard_parent, sources.bindings),
+                daemon=True,
+            )
+            guard_server.start()
+        elif source_binding_identity != current_identity:
+            raise RuntimeError("remote target cannot change source guard binding")
+        _e2e_debug("parent sending execute_reader")
         parent_connection.send(
             ("execute_reader", *_wire_safe_reader_payload(plan, sources, target))
         )
+        _e2e_debug("parent waiting for execute_reader result")
         response = parent_connection.recv()
         if response[0] == "error":
             raise RuntimeError(response[1])
         assert response[0] == "executed"
+        _e2e_debug("parent received execute_reader result")
         return response[1]
 
     try:
@@ -326,7 +528,12 @@ def _remote_cuda_target(
             if stopped[0] == "error":
                 raise RuntimeError(stopped[1])
             assert stopped[0] == "stopped"
+        if guard_server is not None:
+            guard_server.join(timeout=10)
+            if guard_server.is_alive():
+                raise RuntimeError("source allocation guard server did not stop")
         parent_connection.close()
+        source_guard_parent.close()
         process.join(timeout=20)
         if process.is_alive():
             process.terminate()
