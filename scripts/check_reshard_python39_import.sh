@@ -17,7 +17,13 @@ case "${version}" in
         ;;
 esac
 
-PYTHONPATH=mooncake-reshard/python "${python_bin}" -c '
+if ! grep -Fq "typing_extensions>=4.0; python_version < '3.10'" \
+    mooncake-wheel/pyproject.toml; then
+    echo "Python 3.9 reshard imports require a declared typing_extensions dependency" >&2
+    exit 1
+fi
+
+PYTHONPATH="mooncake-reshard/python${PYTHONPATH:+:${PYTHONPATH}}" "${python_bin}" -c '
 from mooncake.reshard.weight import (
     ExecutorTransferPlan,
     LogicalTransferPlan,
