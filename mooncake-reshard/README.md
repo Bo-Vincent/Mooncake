@@ -129,7 +129,10 @@ other overlaps fail closed.
   complete logical placement;
 - `weight/runtime.py` and `weight/binding.py` define per-participant live
   bindings;
-- `weight/_planner/` implements N-D planning and late binding;
+- `weight/_planner/` implements N-D planning and late binding, split between
+  logical planning (`contracts.py`, `core.py`, `validation.py`, `geometry.py`,
+  `ownership.py`, `api.py`) and runtime binding (`bound_contracts.py`,
+  `bound_validation.py`, `binding.py`, `fragments.py`, `attestation.py`);
 - `weight/_store/` and `weight/_te/` implement Store and TE adapters;
 - `weight/manifest.py`, `weight/planner.py`, `weight/store.py`, and
   `weight/te.py` preserve the public import surface.

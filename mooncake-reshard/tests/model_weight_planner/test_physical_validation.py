@@ -5,13 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from mooncake.reshard.weight._planner.bound_contracts import TransferPlan
+from mooncake.reshard.weight._planner.bound_validation import (
+    _validate_target_physical_ranges,
+)
 from mooncake.reshard.weight._planner.contracts import (
     LogicalTransferPlan,
-    TransferPlan,
     TransferRegion,
-)
-from mooncake.reshard.weight._planner.validation import (
-    _validate_target_physical_ranges,
 )
 from mooncake.reshard.weight.manifest import ParallelRank
 

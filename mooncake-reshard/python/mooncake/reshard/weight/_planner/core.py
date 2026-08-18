@@ -12,24 +12,17 @@ from ...contracts import (
     TensorId,
 )
 from ...geometry import boxes_exactly_cover
-from ..binding import validate_runtime_binding
 from ..placement import WeightPlacementManifest
-from ..runtime import WeightRuntimeBindingManifest
 from ..storage_manifest import StoredFragment
 from ..types import ParallelRank, PlacementFragment, TensorDescriptor
 from . import geometry
 from .contracts import (
-    BoundWeightFragment,
-    ExecutorTransferPlan,
     LogicalTransferPlan,
     LogicalTransferOperation,
     PlacementExecutorPlan,
     PlanningLimits,
-    RuntimeLeaseSnapshot,
-    TransferPlan,
     TransferRegion,
 )
-from .attestation import RuntimeBindingAttestation
 from .fragments import LogicalSourceFragment, LogicalTargetFragment
 from .ownership import (
     _validate_local_target_inventory,
@@ -94,92 +87,6 @@ def _collect_placements(
     return tensors, fragments
 
 
-def _build_executor_plans(
-    placements: Sequence[WeightPlacementManifest],
-    bindings: Sequence[WeightRuntimeBindingManifest],
-    side: str,
-) -> tuple[ExecutorTransferPlan, ...]:
-    if side not in ("source", "target"):
-        raise ValueError(f"invalid executor side: {side}")
-    binding_by_participant = {
-        (binding.placement_id, binding.participant_id): binding for binding in bindings
-    }
-    if len(binding_by_participant) != len(bindings):
-        raise ValueError(f"duplicate {side} runtime binding participant")
-
-    result: list[ExecutorTransferPlan] = []
-    executor_keys: set[tuple[ParallelRank, str]] = set()
-    for placement in placements:
-        for part in placement.parts:
-            binding = binding_by_participant.get(
-                (placement.placement_id, part.participant_id)
-            )
-            if binding is None:
-                continue
-            validate_runtime_binding(placement, binding)
-            attestation = RuntimeBindingAttestation(placement, binding)
-            if not part.fragments:
-                continue
-            runtime_by_placement_fragment_id = {
-                fragment.placement_fragment_id: fragment
-                for fragment in binding.fragments
-            }
-            fragments = [
-                BoundWeightFragment(
-                    placement=placement_fragment,
-                    binding=runtime_by_placement_fragment_id[
-                        placement_fragment.placement_fragment_id
-                    ],
-                    instance_id=binding.instance_id,
-                    runtime_lease_id=binding.lease_id,
-                    lease_generation=binding.generation,
-                    owner=runtime_by_placement_fragment_id[
-                        placement_fragment.placement_fragment_id
-                    ].owner,
-                    attestation=attestation,
-                )
-                for placement_fragment in part.fragments
-            ]
-            fragments_by_worker: dict[str, list[BoundWeightFragment]] = {}
-            for fragment in fragments:
-                fragments_by_worker.setdefault(fragment.worker_id, []).append(fragment)
-            for worker_id, worker_fragments in sorted(fragments_by_worker.items()):
-                ordered_fragments = sorted(
-                    worker_fragments,
-                    key=lambda fragment: fragment.fragment_id,
-                )
-                executor_key = (part.rank, worker_id)
-                if executor_key in executor_keys:
-                    raise ValueError(
-                        f"duplicate {side} executor rank and worker: {executor_key}"
-                    )
-                executor_keys.add(executor_key)
-                fragment_ids = tuple(
-                    fragment.fragment_id for fragment in ordered_fragments
-                )
-                result.append(
-                    ExecutorTransferPlan(
-                        instance_id=binding.instance_id,
-                        placement_id=placement.placement_id,
-                        participant_id=part.participant_id,
-                        placement_digest=placement.digest,
-                        runtime_lease_id=binding.lease_id,
-                        worker_id=worker_id,
-                        rank=part.rank,
-                        fragment_ids=fragment_ids,
-                        fragment_leases=tuple(
-                            RuntimeLeaseSnapshot.from_fragment(fragment)
-                            for fragment in ordered_fragments
-                        ),
-                        attestation=attestation,
-                    )
-                )
-    result.sort(
-        key=lambda item: (item.rank.dp, item.rank.pp, item.rank.ep, item.rank.tp)
-    )
-    return tuple(result)
-
-
 def _build_placement_executor_plans(
     manifests: Sequence[WeightPlacementManifest],
     operations: Sequence[LogicalTransferOperation],
@@ -233,62 +140,6 @@ def _build_placement_executor_plans(
         key=lambda item: (item.rank.dp, item.rank.pp, item.rank.ep, item.rank.tp)
     )
     return tuple(result)
-
-
-def resolve_executor_plans(
-    plan: TransferPlan,
-    placement: WeightPlacementManifest,
-    binding: WeightRuntimeBindingManifest,
-    side: str,
-) -> tuple[ExecutorTransferPlan, ...]:
-    if side == "source":
-        executors = plan.source_executors
-    elif side == "target":
-        executors = plan.target_executors
-    else:
-        raise ValueError(f"invalid executor side: {side}")
-    if not executors:
-        raise ValueError(f"transfer plan has no {side} executor metadata")
-    if (
-        plan.resource_id != placement.resource_id
-        or plan.revision != placement.revision
-        or plan.weight_generation != placement.weight_generation
-    ):
-        raise ValueError(f"transfer plan identity differs from {side} placement")
-    validate_runtime_binding(placement, binding)
-    expected_executors = tuple(
-        executor
-        for executor in executors
-        if executor.instance_id == binding.instance_id
-        and executor.participant_id == binding.participant_id
-    )
-    if not expected_executors:
-        raise ValueError(f"{side} executor snapshot mismatch: unknown instance")
-    current_executors = _build_executor_plans(
-        (placement,),
-        (binding,),
-        side,
-    )
-    executor_keys = [
-        (executor.rank, executor.worker_id) for executor in expected_executors
-    ]
-    if len(executor_keys) != len(set(executor_keys)):
-        raise ValueError(f"{side} executor snapshot has duplicate rank and worker")
-    if current_executors != expected_executors:
-        raise ValueError(f"{side} executor snapshot mismatch")
-    return expected_executors
-
-
-def resolve_executor_plan(
-    plan: TransferPlan,
-    placement: WeightPlacementManifest,
-    binding: WeightRuntimeBindingManifest,
-    side: str,
-) -> ExecutorTransferPlan:
-    executors = resolve_executor_plans(plan, placement, binding, side)
-    if len(executors) != 1:
-        raise ValueError(f"{side} executor snapshot contains multiple ranks")
-    return executors[0]
 
 
 def _plan_transfer(
@@ -498,9 +349,3 @@ def _logical_transfer_plan(
             target_participant_ids,
         ),
     )
-
-
-__all__ = [
-    "resolve_executor_plan",
-    "resolve_executor_plans",
-]

@@ -15,12 +15,14 @@ from mooncake.reshard.weight import (
     plan_placement_transfer,
     plan_placement_transfer_to_local_target,
 )
-from mooncake.reshard.weight._planner.core import resolve_executor_plans
-from mooncake.reshard.weight._planner.contracts import (
+from mooncake.reshard.weight._planner.binding import resolve_executor_plans
+from mooncake.reshard.weight._planner.bound_contracts import (
     ExecutorTransferPlan,
+    TransferPlan,
+)
+from mooncake.reshard.weight._planner.contracts import (
     LogicalTransferPlan,
     PlacementExecutorPlan,
-    TransferPlan,
     TransferRegion,
 )
 

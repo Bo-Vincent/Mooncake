@@ -13,7 +13,7 @@ from mooncake.reshard.weight import (
     OwnershipAxis,
     SplitAxis,
 )
-from mooncake.reshard.weight._planner.contracts import RuntimeLeaseSnapshot
+from mooncake.reshard.weight._planner.bound_contracts import RuntimeLeaseSnapshot
 
 from .helpers import (
     RuntimeInputs,
