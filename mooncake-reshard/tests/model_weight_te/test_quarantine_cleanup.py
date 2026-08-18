@@ -83,6 +83,7 @@ def test_te_pending_transfer_cannot_drain_before_resource_handoff(
         *,
         registrations,
         resources,
+        allocation_tokens=(),
     ) -> None:
         pending_ids.append(pending_transfer_id)
         handoff_entered.set()
@@ -91,6 +92,7 @@ def test_te_pending_transfer_cannot_drain_before_resource_handoff(
             pending_transfer_id,
             registrations=registrations,
             resources=resources,
+            allocation_tokens=allocation_tokens,
         )
 
     pending_owner._retain_pending_resources = block_resource_handoff

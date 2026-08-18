@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import socket
 from contextlib import ExitStack
-from dataclasses import dataclass
 
 import pytest
 
@@ -13,7 +12,6 @@ from .buffers import (
     CudaRuntime,
     _cuda_rank_buffers,
     _parse_cuda_devices,
-    _registered_store_buffers,
 )
 from .execution import _run_store_iteration
 from .manifests import (
@@ -74,30 +72,20 @@ def test_gpu_store_round_trip_reshards_tp_split_and_merge(
     assert result == 0
     try:
         with ExitStack() as stack:
-            source_buffers, source_rank_devices = _cuda_rank_buffers(
+            source_buffers, _ = _cuda_rank_buffers(
                 stack,
                 runtimes,
                 source_devices,
                 ranks=source_tp,
                 size=total_bytes // source_tp,
             )
-            target_buffers, target_rank_devices = _cuda_rank_buffers(
+            target_buffers, _ = _cuda_rank_buffers(
                 stack,
                 runtimes,
                 target_devices,
                 ranks=target_tp,
                 size=total_bytes // target_tp,
             )
-            pre_registered = (
-                len(set(source_rank_devices) | set(target_rank_devices)) > 1
-            )
-            if pre_registered:
-                stack.enter_context(
-                    _registered_store_buffers(
-                        store,
-                        [*source_buffers, *target_buffers],
-                    )
-                )
             for rank, buffer in enumerate(source_buffers):
                 buffer.fill(rank + 1)
 
@@ -108,7 +96,6 @@ def test_gpu_store_round_trip_reshards_tp_split_and_merge(
                 source_buffers=source_buffers,
                 target_buffers=target_buffers,
                 namespace=f"gpu-e2e-tp{source_tp}-to-tp{target_tp}",
-                pre_registered=pre_registered,
             )
             assert set(durations) == {
                 "prepare",
@@ -227,81 +214,3 @@ def test_verify_tp_buffers_rejects_corruption() -> None:
             target_tp=2,
             chunk_bytes=4,
         )
-
-
-def test_registered_store_buffers_register_once_and_cleanup_in_reverse() -> None:
-    class FakeStore:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def register_buffer(self, address: int, nbytes: int) -> int:
-            self.calls.append(("register", address, nbytes))
-            return 0
-
-        def unregister_buffer(self, address: int) -> int:
-            self.calls.append(("unregister", address))
-            return 0
-
-    @dataclass
-    class FakeBuffer:
-        pointer: int
-        size: int
-
-        def activate(self) -> None:
-            store.calls.append(("activate", self.pointer))
-
-    store = FakeStore()
-    buffers = [FakeBuffer(100, 8), FakeBuffer(200, 16), FakeBuffer(100, 4)]
-
-    with _registered_store_buffers(store, buffers):
-        assert store.calls == [
-            ("activate", 100),
-            ("register", 100, 8),
-            ("activate", 200),
-            ("register", 200, 16),
-        ]
-
-    assert store.calls[-4:] == [
-        ("activate", 200),
-        ("unregister", 200),
-        ("activate", 100),
-        ("unregister", 100),
-    ]
-
-
-def test_registered_store_buffers_continue_cleanup_after_activation_failure() -> None:
-    class FakeStore:
-        def __init__(self) -> None:
-            self.calls = []
-
-        def register_buffer(self, address: int, nbytes: int) -> int:
-            self.calls.append(("register", address, nbytes))
-            return 0
-
-        def unregister_buffer(self, address: int) -> int:
-            self.calls.append(("unregister", address))
-            return 0
-
-    @dataclass
-    class FakeBuffer:
-        pointer: int
-        size: int
-        fail_cleanup_activation: bool = False
-        activations: int = 0
-
-        def activate(self) -> None:
-            self.activations += 1
-            if self.fail_cleanup_activation and self.activations == 2:
-                raise RuntimeError("activate failed")
-
-    store = FakeStore()
-    buffers = [
-        FakeBuffer(100, 8),
-        FakeBuffer(200, 16, fail_cleanup_activation=True),
-    ]
-
-    with pytest.raises(RuntimeError, match="activate failed"):
-        with _registered_store_buffers(store, buffers):
-            pass
-
-    assert ("unregister", 100) in store.calls

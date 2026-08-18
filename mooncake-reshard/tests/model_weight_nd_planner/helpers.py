@@ -223,7 +223,7 @@ def assert_plan_copies_logical_contents(
         }
         for runtime_fragment in binding.fragments:
             placement_fragment = placement_by_id[runtime_fragment.placement_fragment_id]
-            source_payloads[placement_fragment.placement_fragment_id] = fragment_payload(
+            source_payloads[runtime_fragment.fragment_id] = fragment_payload(
                 descriptors[placement_fragment.tensor_id], placement_fragment
             )
 
@@ -239,16 +239,16 @@ def assert_plan_copies_logical_contents(
         }
         for runtime_fragment in binding.fragments:
             placement_fragment = placement_by_id[runtime_fragment.placement_fragment_id]
-            target_payloads[placement_fragment.placement_fragment_id] = bytearray(
+            target_payloads[runtime_fragment.fragment_id] = bytearray(
                 runtime_fragment.nbytes
             )
-            target_placements_by_fragment_id[placement_fragment.placement_fragment_id] = (
+            target_placements_by_fragment_id[runtime_fragment.fragment_id] = (
                 placement_fragment
             )
 
     for operation in plan.operations:
-        source = source_payloads[operation.source.placement_fragment_id]
-        target = target_payloads[operation.target.placement_fragment_id]
+        source = source_payloads[operation.source.fragment_id]
+        target = target_payloads[operation.target.fragment_id]
         for source_offset, target_offset, nbytes in operation.iter_segments(
             max_segments=operation.segment_count
         ):

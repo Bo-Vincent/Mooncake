@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ctypes
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from typing import Mapping, Protocol
 
 
@@ -47,47 +47,6 @@ class TransferBuffer(Protocol):
     def fill(self, value: int) -> None: ...
 
     def read_range(self, offset: int, nbytes: int) -> bytes: ...
-
-
-@contextmanager
-def _registered_store_buffers(store, buffers: list[TransferBuffer]):
-    buffers_by_address = {}
-    for buffer in buffers:
-        current = buffers_by_address.get(buffer.pointer)
-        if current is None or buffer.size > current.size:
-            buffers_by_address[buffer.pointer] = buffer
-    registered = []
-    primary_error = None
-    try:
-        for buffer in buffers_by_address.values():
-            buffer.activate()
-            result = store.register_buffer(buffer.pointer, buffer.size)
-            if result != 0:
-                raise RuntimeError(
-                    f"benchmark register_buffer failed for {buffer.pointer}: {result}"
-                )
-            registered.append(buffer)
-        yield
-    except BaseException as error:
-        primary_error = error
-
-    failures = []
-    for buffer in reversed(registered):
-        try:
-            buffer.activate()
-            result = store.unregister_buffer(buffer.pointer)
-        except Exception as error:
-            failures.append((buffer.pointer, repr(error)))
-            continue
-        if result != 0:
-            failures.append((buffer.pointer, result))
-    if failures:
-        detail = f"benchmark unregister_buffer failed: {failures}"
-        if primary_error is not None:
-            raise RuntimeError(f"{primary_error}; {detail}") from primary_error
-        raise RuntimeError(detail)
-    if primary_error is not None:
-        raise primary_error
 
 
 class CudaBuffer:

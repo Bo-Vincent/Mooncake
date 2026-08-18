@@ -13,6 +13,7 @@ from mooncake.reshard.weight import (
 )
 
 from .buffers import TransferBuffer
+from .lifetime import allocation_guards_for_bindings
 from .manifests import (
     _rank_manifests,
     _verify_tp_buffers,
@@ -41,7 +42,6 @@ def _run_store_iteration(
     source_buffers: list[TransferBuffer],
     target_buffers: list[TransferBuffer],
     namespace: str,
-    pre_registered: bool = False,
 ) -> dict[str, float]:
     source_tp = len(source_buffers)
     target_tp = len(target_buffers)
@@ -82,7 +82,9 @@ def _run_store_iteration(
                 upload_plan,
                 sources.placement,
                 source_binding,
-                pre_registered=pre_registered,
+                source_allocation_guards=allocation_guards_for_bindings(
+                    (source_binding,)
+                ),
             )
         )
         durations["upload"] = time.perf_counter() - started
@@ -109,7 +111,9 @@ def _run_store_iteration(
                 load_plan,
                 target_ranks.placement,
                 target_binding,
-                pre_registered=pre_registered,
+                target_allocation_guards=allocation_guards_for_bindings(
+                    (target_binding,)
+                ),
             )
         durations["load"] = time.perf_counter() - started
         durations["e2e"] = time.perf_counter() - e2e_start
@@ -196,6 +200,8 @@ def _run_te_iteration(
             target_registrations=target_registrations,
             source_pre_registered=True,
             source_registrations=source_registrations,
+            source_allocation_guards=allocation_guards_for_bindings(sources.bindings),
+            target_allocation_guards=allocation_guards_for_bindings(targets.bindings),
         )
     )
     transfer_seconds = time.perf_counter() - started

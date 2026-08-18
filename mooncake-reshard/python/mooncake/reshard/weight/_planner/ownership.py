@@ -52,9 +52,10 @@ def complete_dp_owned_source_owners(
     """Return the complete declared source owner for each DP-owned tensor.
 
     Unlike a replicated DP tensor, an ``OwnershipAxis("dp")`` tensor is not
-    expected to exist on every DP rank. Its placement fragments name the owner
-    directly. A logical tensor may have exactly one complete owner; a partial
-    or duplicate owner declaration is ambiguous and rejected before planning.
+    expected to exist on every DP rank.  Its placement fragments name the
+    owner directly.  A logical tensor may have exactly one complete owner; a
+    partial or duplicate owner declaration is ambiguous and rejected before
+    planning.
     """
 
     owned_tensors = tuple(

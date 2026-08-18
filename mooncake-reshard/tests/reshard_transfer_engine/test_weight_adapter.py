@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from global_placement_helpers import global_placement
+from model_weight_te.helpers import allocation_guards_for_bindings
 
 from mooncake.reshard.transfer_engine import MooncakeTransferEngineExecutor
 from mooncake.reshard.weight import (
@@ -162,6 +163,8 @@ def test_weight_reader_and_sink_execute_each_participant_from_global_placements(
             source_registrations=source_registrations,
             target_pre_registered=True,
             target_registrations=registration_leases((target_binding,)),
+            source_allocation_guards=allocation_guards_for_bindings(source_bindings),
+            target_allocation_guards=allocation_guards_for_bindings((target_binding,)),
         )
     )
 
@@ -179,6 +182,8 @@ def test_weight_reader_and_sink_execute_each_participant_from_global_placements(
             target_registrations=registration_leases(target_bindings),
             source_pre_registered=True,
             source_registrations=registration_leases((source_binding,)),
+            source_allocation_guards=allocation_guards_for_bindings((source_binding,)),
+            target_allocation_guards=allocation_guards_for_bindings(target_bindings),
         )
     )
 

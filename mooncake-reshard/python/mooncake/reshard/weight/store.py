@@ -3,6 +3,7 @@
 from ._store import (
     UploadOperation,
     UploadReceipt,
+    StoreRegistrationLease,
     WeightLoadPlan,
     WeightStore,
     WeightStoreError,
@@ -12,6 +13,7 @@ from ._store import (
 __all__ = [
     "UploadOperation",
     "UploadReceipt",
+    "StoreRegistrationLease",
     "WeightLoadPlan",
     "WeightStore",
     "WeightStoreError",

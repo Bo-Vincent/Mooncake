@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from math import prod
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,15 @@ def test_runtime_binding_fragment_retains_owner() -> None:
 
     assert fragment.owner is owner
     assert fragment.device == "cuda:0"
+
+
+def test_runtime_binding_fragment_pickle_drops_process_local_owner() -> None:
+    fragment = binding_fragment(owner=object())
+
+    restored = pickle.loads(pickle.dumps(fragment))
+
+    assert restored == fragment
+    assert restored.owner is None
 
 
 def test_runtime_binding_rejects_duck_typed_manifests() -> None:

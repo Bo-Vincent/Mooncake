@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, Union
 
 from ..manifest import (
     RuntimeBindingFragment,
@@ -65,7 +65,7 @@ def pair_manifests(
 
 
 def runtime_binding_fragment(
-    fragment: RuntimeBindingFragment | BoundWeightFragment,
+    fragment: Union[RuntimeBindingFragment, BoundWeightFragment],
 ) -> RuntimeBindingFragment:
     if isinstance(fragment, RuntimeBindingFragment):
         return fragment

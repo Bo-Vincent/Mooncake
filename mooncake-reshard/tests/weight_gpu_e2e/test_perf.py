@@ -14,7 +14,6 @@ from .buffers import (
     ManagedBuffer,
     _cuda_rank_buffers,
     _parse_cuda_devices,
-    _registered_store_buffers,
 )
 from .execution import (
     _run_store_iteration,
@@ -90,12 +89,6 @@ def test_gpu_store_heterogeneous_tp_performance() -> None:
                     ranks=target_tp,
                     size=config.total_bytes // target_tp,
                 )
-                stack.enter_context(
-                    _registered_store_buffers(
-                        store,
-                        [*source_buffers, *target_buffers],
-                    )
-                )
                 for rank, buffer in enumerate(source_buffers):
                     buffer.fill(rank + 1)
 
@@ -110,7 +103,6 @@ def test_gpu_store_heterogeneous_tp_performance() -> None:
                         source_buffers=source_buffers,
                         target_buffers=target_buffers,
                         namespace=f"perf-tp{source_tp}-to-tp{target_tp}",
-                        pre_registered=True,
                     ),
                 )
                 logical_bytes = {phase: 0 for phase in samples}

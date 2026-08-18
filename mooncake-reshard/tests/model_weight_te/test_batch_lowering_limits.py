@@ -6,7 +6,6 @@ import pytest
 
 from mooncake.reshard.weight.manifest import SplitAxis, TensorDescriptor
 from mooncake.reshard.weight.planner import (
-    CopyRange,
     TransferRegion,
 )
 from mooncake.reshard.weight.te import (
@@ -111,7 +110,6 @@ def _with_noop_source_executor(plan, sources: RuntimeInputs, index: int):
         rank=part.rank,
         fragment_ids=(fragment.fragment_id,),
         fragment_leases=(lease,),
-        operation_indices=(),
         attestation=RuntimeBindingAttestation(sources.placement, binding),
     )
     return replace(plan, source_executors=(*plan.source_executors, noop))
@@ -200,28 +198,17 @@ def test_te_rejects_nd_region_above_lowering_limit(executor: str) -> None:
     assert engine.register_calls == []
 
 
-def test_te_sink_keeps_legacy_copy_range_plan_executable() -> None:
+def test_te_sink_lowers_canonical_transfer_region() -> None:
     sources = manifests(tp=1, prefix="source", address_base=0x10000)
     targets = manifests(tp=1, prefix="target", address_base=0x40000)
     planned = plan_transfer(sources, targets)
     region = planned.operations[0]
-    legacy = CopyRange(
-        tensor_id=region.tensor_id,
-        source=region.source,
-        target=region.target,
-        source_offset=region.source_offset,
-        target_offset=region.target_offset,
-        nbytes=region.nbytes,
-        repeat=region.repeat,
-        source_stride=region.source_stride,
-        target_stride=region.target_stride,
-    )
-    plan = replace(planned, operations=(legacy,))
+    assert isinstance(region, TransferRegion)
     engine = FakeTransferEngine()
 
     receipts = execute_sink(
         MooncakeTransferEngineSink(engine),
-        plan,
+        planned,
         sources,
         targets,
         target_registrations=registration_leases(targets),
@@ -380,9 +367,13 @@ def test_te_reader_batches_large_repeats_without_segment_tuple_expansion(
 
     original_iter_segments = TransferRegion.iter_segments
 
-    def observe_streaming_segments(self: TransferRegion):
+    def observe_streaming_segments(
+        self: TransferRegion,
+        *,
+        max_segments: int,
+    ):
         try:
-            for segment in original_iter_segments(self):
+            for segment in original_iter_segments(self, max_segments=max_segments):
                 state["yielded"] += 1
                 yield segment
         finally:
@@ -415,7 +406,8 @@ def test_te_reader_batches_large_repeats_without_segment_tuple_expansion(
 def test_te_scatter_ranges_use_allocation_bases_and_view_relative_offsets() -> None:
     class Operation:
         @staticmethod
-        def iter_segments():
+        def iter_segments(*, max_segments: int):
+            assert max_segments >= 2
             yield 1, 2, 3
             yield 4, 8, 2
 
@@ -449,6 +441,7 @@ def test_te_scatter_ranges_use_allocation_bases_and_view_relative_offsets() -> N
             target.endpoint,
             ((Operation(), source, target),),
             max_batch_operations=8,
+            max_region_segments=2,
         )
     )
     (transfer_range,) = batch.ranges

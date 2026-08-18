@@ -10,6 +10,7 @@ from mooncake.reshard.weight import (
     bind_logical_transfer_plan,
     plan_placement_transfer_to_local_target,
 )
+from weight_gpu_e2e.lifetime import allocation_guards_for_bindings
 
 from .helpers import (
     _BufferParameter,
@@ -242,6 +243,12 @@ def test_sglang_fp8_w31_to_w13_contract_plans_binds_and_executes() -> None:
                         runtime_lease_id=target_binding.lease_id,
                     )
                     for fragment in target_binding.fragments
+                ),
+                source_allocation_guards=allocation_guards_for_bindings(
+                    source_bindings
+                ),
+                target_allocation_guards=allocation_guards_for_bindings(
+                    (target_binding,)
                 ),
             )
 
