@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from mooncake.reshard.weight.manifest import ParallelRank
+from mooncake.reshard.weight.manifest import OwnershipAxis, ParallelRank
 from mooncake.reshard.weight.storage_manifest import WeightManifest
 
 from .helpers import (
@@ -79,6 +79,28 @@ def test_prepare_upload_does_not_require_binding_for_empty_participant() -> None
     plan = weight_store.prepare_upload(sources.placement, sources.bindings)
 
     assert len(plan.operations) == 1
+
+
+def test_prepare_upload_explicitly_rejects_dp_owned_source_tensors() -> None:
+    """Store snapshots still require one complete replicated DP source."""
+
+    sources = source_manifests(dp=1, tp=1)
+    tensor = replace(
+        tensor_descriptor(),
+        shard_dims=(),
+        parallel_axes=(
+            OwnershipAxis(kind="dp"),
+            OwnershipAxis(kind="pp"),
+            OwnershipAxis(kind="ep"),
+        ),
+    )
+    sources = rebuild_runtime_inputs(sources, tensors=(tensor,))
+    _store, weight_store = make_weight_store()
+
+    with pytest.raises(
+        ValueError, match="requires replicated DP source tensors"
+    ):
+        weight_store.prepare_upload(sources.placement, sources.bindings)
 
 
 def test_prepare_upload_rejects_missing_nonempty_participant_binding() -> None:

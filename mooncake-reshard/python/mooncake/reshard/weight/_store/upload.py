@@ -10,8 +10,8 @@ from uuid import uuid4
 
 from .._planner.ownership import (
     complete_parallel_source_replicas,
+    has_dp_ownership,
     parallel_tensor_owner,
-    require_supported_dp_semantics,
 )
 from ...contracts import (
     ResourceId,
@@ -90,7 +90,11 @@ def _collect_upload_sources(
     tensor_by_id: dict[TensorId, TensorDescriptor] = {
         tensor.tensor_id: tensor for tensor in placement.tensors
     }
-    require_supported_dp_semantics(tuple(tensor_by_id.values()))
+    if any(has_dp_ownership(tensor) for tensor in tensor_by_id.values()):
+        raise ValueError(
+            "Weight Store upload requires replicated DP source tensors; "
+            "DP-owned tensor snapshots are not supported"
+        )
     sources: list[UploadSource] = []
     runtime_fragment_ids: set[RuntimeFragmentId] = set()
     for placement, binding in pairs:
