@@ -68,7 +68,7 @@ def _tiled_target_and_regions(draw) -> tuple[_Box, tuple[_Region, ...]]:
 
 @settings(max_examples=80, deadline=None)
 @given(_tiled_target_and_regions())
-def test_regions_exactly_cover_random_nd_tilings(
+def test_regions_exactly_cover_random_n_dim_tilings(
     tiled: tuple[_Box, tuple[_Region, ...]],
 ) -> None:
     target, regions = tiled
