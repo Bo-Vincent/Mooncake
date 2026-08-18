@@ -125,6 +125,7 @@ def test_gpu_store_moves_weights_across_dp_tp_pp_ep_together() -> None:
                 transfer=bind_logical_transfer_plan(
                     logical,
                     fixture.targets.bindings,
+                    source_manifest=loaded,
                 ),
             )
             for target_placement, target_binding in fixture.targets.active_pairs():
@@ -251,6 +252,7 @@ def test_gpu_store_reshards_independent_experts_across_dimensions() -> None:
                 transfer=bind_logical_transfer_plan(
                     logical,
                     fixture.targets.bindings,
+                    source_manifest=loaded,
                 ),
             )
             for target_placement, target_binding in fixture.targets.active_pairs():
