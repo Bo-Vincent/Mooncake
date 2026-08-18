@@ -126,8 +126,7 @@ def test_ep_ownership_is_derived_from_parallel_axis_semantics() -> None:
     assert parallel_tensor_owner(split_tensor, fragment) == ()
 
 
-def test_dp_ownership_is_rejected_at_the_canonical_planner_boundary() -> None:
-    """MoE-DP needs framework ownership metadata that V3 does not yet define."""
+def test_dp_ownership_routes_each_tensor_through_its_declared_owner() -> None:
 
     tensor_a = replace(
         descriptor(),
@@ -177,7 +176,60 @@ def test_dp_ownership_is_rejected_at_the_canonical_planner_boundary() -> None:
         fragments=target_fragments,
     )
 
-    with pytest.raises(ValueError, match="DP ownership reshard is not supported"):
+    plan = plan_placement_transfer(source, target)
+
+    assert len(plan.operations) == 2
+    assert {
+        (operation.source.tensor_id, operation.source.rank.dp)
+        for operation in plan.operations
+    } == {
+        (tensor_a.tensor_id, 0),
+        (tensor_b.tensor_id, 1),
+    }
+    assert {
+        (operation.target.tensor_id, operation.target.rank.dp)
+        for operation in plan.operations
+    } == {
+        (tensor_a.tensor_id, 0),
+        (tensor_b.tensor_id, 1),
+    }
+
+
+def test_dp_ownership_rejects_ambiguous_complete_source_owners() -> None:
+    tensor = replace(
+        descriptor(),
+        tensor_id="layers.0.weight",
+        shard_dims=(),
+        expert_id=None,
+        parallel_axes=(OwnershipAxis(kind="dp"),),
+    )
+
+    def fragment(dp_rank: int, prefix: str) -> PlacementFragment:
+        return PlacementFragment(
+            placement_fragment_id=f"{prefix}-dp{dp_rank}",
+            tensor_id=tensor.tensor_id,
+            global_offset=(0, 0),
+            local_shape=tensor.global_shape,
+            nbytes=64,
+            rank=ParallelRank(dp=dp_rank),
+        )
+
+    source = global_placement_from_fragments(
+        resource_id="qwen3.5-0.8b",
+        revision="step-42",
+        placement_set_id="source-ambiguous-dp-owners",
+        tensors=(tensor,),
+        fragments=(fragment(0, "source"), fragment(1, "source")),
+    )
+    target = global_placement_from_fragments(
+        resource_id="qwen3.5-0.8b",
+        revision="step-42",
+        placement_set_id="target-dp-owner",
+        tensors=(tensor,),
+        fragments=(fragment(0, "target"),),
+    )
+
+    with pytest.raises(ValueError, match="ambiguous declared owners"):
         plan_placement_transfer(source, target)
 
 
