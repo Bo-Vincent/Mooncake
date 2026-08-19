@@ -15,7 +15,7 @@ from ...geometry import boxes_exactly_cover
 from ..binding import validate_runtime_binding
 from ..placement import WeightPlacementManifest
 from ..runtime import WeightRuntimeBindingManifest
-from ..storage_manifest import StoredFragment
+from ..storage_manifest import StoredFragment, WeightManifest
 from ..types import ParallelRank, PlacementFragment, TensorDescriptor
 from . import geometry
 from .contracts import (
@@ -34,9 +34,10 @@ from .fragments import LogicalSourceFragment, LogicalTargetFragment
 from .ownership import (
     _validate_local_target_inventory,
     _validate_target_coverage,
+    complete_dp_owned_source_owners,
     complete_parallel_source_replicas,
+    has_dp_ownership,
     parallel_tensor_owner,
-    require_supported_dp_semantics,
 )
 from .validation import (
     _validate_tensor_compatibility,
@@ -309,7 +310,6 @@ def _plan_transfer(
     else:
         _validate_tensor_sets(source_tensors, target_tensors)
         _validate_target_coverage(target_tensors, target_fragments)
-    require_supported_dp_semantics((*source_tensors.values(), *target_tensors.values()))
     placement_source_fragments = tuple(
         fragment
         for fragment in source_fragments
@@ -331,6 +331,13 @@ def _plan_transfer(
     parallel_sources = bool(placement_source_fragments)
     source_replicas = (
         complete_parallel_source_replicas(source_tensors, placement_source_fragments)
+        if parallel_sources
+        else {}
+    )
+    source_dp_owners = (
+        complete_dp_owned_source_owners(
+            source_tensors, placement_source_fragments
+        )
         if parallel_sources
         else {}
     )
@@ -379,15 +386,26 @@ def _plan_transfer(
         )
         for group in candidate_groups:
             if parallel_sources:
-                source_dp = source_dp_by_target_dp[target.rank.dp]
-                source_owner = source_replicas[source_dp][target.tensor_id]
-                eligible = [
-                    fragment
-                    for fragment in group
-                    if isinstance(fragment, PlacementFragment)
-                    and fragment.rank.dp == source_dp
-                    and parallel_tensor_owner(source_tensor, fragment) == source_owner
-                ]
+                if has_dp_ownership(source_tensor):
+                    source_owner = source_dp_owners[target.tensor_id]
+                    eligible = [
+                        fragment
+                        for fragment in group
+                        if isinstance(fragment, PlacementFragment)
+                        and parallel_tensor_owner(source_tensor, fragment)
+                        == source_owner
+                    ]
+                else:
+                    source_dp = source_dp_by_target_dp[target.rank.dp]
+                    source_owner = source_replicas[source_dp][target.tensor_id]
+                    eligible = [
+                        fragment
+                        for fragment in group
+                        if isinstance(fragment, PlacementFragment)
+                        and fragment.rank.dp == source_dp
+                        and parallel_tensor_owner(source_tensor, fragment)
+                        == source_owner
+                    ]
                 if not eligible:
                     continue
                 representative = eligible[0]
@@ -463,6 +481,7 @@ def _logical_transfer_plan(
     source_tensors: dict[TensorId, TensorDescriptor],
     target_tensors: dict[TensorId, TensorDescriptor],
     source_placement: Optional[WeightPlacementManifest],
+    source_manifest: Optional[WeightManifest],
     target_placement: WeightPlacementManifest,
     source_participant_ids: Optional[frozenset[ParticipantId]] = None,
     target_participant_ids: Optional[frozenset[ParticipantId]] = None,
@@ -480,6 +499,7 @@ def _logical_transfer_plan(
             sorted(target_tensors.values(), key=lambda item: item.tensor_id)
         ),
         operations=operations,
+        source_manifest=source_manifest,
         planning_limits=transfer.planning_limits,
         source_executors=(
             _build_placement_executor_plans(
