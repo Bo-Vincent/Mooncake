@@ -1,8 +1,9 @@
 # Mooncake Reshard
 
-`mooncake-reshard` defines framework-neutral contracts for reusable runtime
-resources. This change adds the model-weight manifest contract; planning,
-storage, and transfer execution are added separately.
+`mooncake-reshard` defines framework-neutral contracts and address-free N-D
+logical planning for reusable runtime resources. This phase adds the
+model-weight manifest and logical planner; runtime binding, storage, and
+transfer execution remain separate phases.
 
 Framework-owned adapters outside Mooncake inspect framework runtime objects,
 normalize framework-specific values, and construct the typed canonical
@@ -15,7 +16,9 @@ The public Python API is split by responsibility:
 - `mooncake.reshard.contracts` exposes `ResourceManifest`,
   `PlacementManifest`, and `RuntimeBindingManifest` as structural `Protocol`
   contracts for resource-neutral identity and lifecycle;
-- `mooncake.reshard.weight` defines model-weight placement and runtime binding.
+- `mooncake.reshard.weight` defines model-weight placement and address-free
+  N-D planning. `WeightRuntimeBindingManifest` remains an input contract for a
+  later runtime-binding phase.
 
 ## Weight Placement Model
 
@@ -59,6 +62,41 @@ consume only this globally validated placement.
 Empty participants need no runtime binding; any participant referenced by
 execution must provide one.
 
+## Logical Planning
+
+The planner consumes complete source and target placement collections:
+
+```python
+logical_plan = plan_placement_transfer(source_placements, target_placements)
+```
+
+For one target participant, the caller still provides the complete source
+placement collection and selects a target placement explicitly:
+
+```python
+logical_plan = plan_placement_transfer_to_local_target(
+    source_placements,
+    target_placement,
+)
+```
+
+The result is a backend-neutral `LogicalTransferPlan`. It contains N-D
+logical-box overlap regions but no GPU address, endpoint, allocation range,
+lease, or backend request. TP changes shard boxes, PP uses framework-provided
+ownership, EP is represented by logical expert coordinates, and DP selects
+complete replicas without changing tensor geometry.
+
+Each `TransferRegion` records overlap offset and shape, source and target base
+byte offsets, contiguous `inner_bytes`, outer loop counts, and source/target
+byte strides. The planner preserves this compact strided representation rather
+than expanding one operation per row or element.
+
+This phase does not consume a committed Store `WeightManifest`, bind a logical
+plan to live runtime fragments, submit to the Transfer Engine, or transform
+dtype, quantization, packing, swizzle, or checkpoint format. A subsequent
+runtime-binding phase may use the existing typed binding contracts to attach
+physical locations only after logical planning has completed.
+
 The weight implementation is split by responsibility:
 
 - `types.py` defines tensor and logical-fragment contracts;
@@ -66,9 +104,9 @@ The weight implementation is split by responsibility:
 - `part.py` defines one participant's address-free contribution;
 - `placement.py` assembles and identifies the complete global placement;
 - `runtime.py` defines typed physical bindings;
-- `validation.py` checks logical geometry, coverage, declared storage alias
-  groups, and addresses;
-- `binding.py` validates placement and binding attestation;
+- `validation.py` checks manifest geometry, coverage, declared storage alias
+  groups, and runtime-binding input shape;
+- `_planner/` computes address-free N-D overlap regions;
 - `manifest.py` preserves the public import surface.
 
 `kv_cache` is reserved as a resource discriminator, but this change does not
