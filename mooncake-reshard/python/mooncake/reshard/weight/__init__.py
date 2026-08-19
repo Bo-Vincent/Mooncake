@@ -1,4 +1,4 @@
-"""Public contracts for framework-neutral model-weight resharding."""
+"""Framework-neutral model-weight reshard contracts and planning APIs."""
 
 from .manifest import (
     OwnershipAxis,
@@ -16,18 +16,29 @@ from .manifest import (
     validate_runtime_binding,
     validate_runtime_bindings,
 )
-from .serde import weight_placement_from_json, weight_placement_to_json
 from .planner import (
+    BoundWeightFragment,
+    ExecutableTransferOperation,
+    ExecutorTransferPlan,
     LogicalTransferPlan,
     LogicalTransferOperation,
     PipelineRouteGroup,
     PlacementExecutorPlan,
     PlanningLimits,
+    RuntimeBindingAttestation,
+    RuntimeLeaseSnapshot,
+    RuntimeTensorOwner,
+    StoredLoadOperation,
+    TransferPlan,
     TransferRegion,
+    bind_logical_transfer_plan,
     plan_placement_transfer,
     plan_placement_transfer_to_local_target,
     plan_stored_transfer_to_target_placement,
+    resolve_executor_plan,
+    resolve_executor_plans,
 )
+from .serde import weight_placement_from_json, weight_placement_to_json
 from .storage_manifest import StoredFragment, WeightManifest
 
 __all__ = [
@@ -49,13 +60,24 @@ __all__ = [
     "weight_placement_to_json",
     "StoredFragment",
     "WeightManifest",
+    "BoundWeightFragment",
+    "ExecutableTransferOperation",
+    "ExecutorTransferPlan",
     "LogicalTransferPlan",
     "LogicalTransferOperation",
     "PipelineRouteGroup",
     "PlacementExecutorPlan",
     "PlanningLimits",
+    "RuntimeBindingAttestation",
+    "RuntimeLeaseSnapshot",
+    "RuntimeTensorOwner",
+    "StoredLoadOperation",
+    "TransferPlan",
     "TransferRegion",
+    "bind_logical_transfer_plan",
     "plan_placement_transfer",
     "plan_placement_transfer_to_local_target",
     "plan_stored_transfer_to_target_placement",
+    "resolve_executor_plan",
+    "resolve_executor_plans",
 ]
