@@ -1,9 +1,8 @@
 # Mooncake Reshard
 
-`mooncake-reshard` defines framework-neutral contracts and address-free N-D
-logical planning for reusable runtime resources. This phase adds the
-model-weight manifest and logical planner; runtime binding, storage, and
-transfer execution remain separate phases.
+`mooncake-reshard` defines framework-neutral contracts and logical planning for
+reusable runtime resources. This change adds the model-weight manifest and N-D
+reshard planner; storage and transfer execution are added separately.
 
 Framework-owned adapters outside Mooncake inspect framework runtime objects,
 normalize framework-specific values, and construct the typed canonical
@@ -16,9 +15,7 @@ The public Python API is split by responsibility:
 - `mooncake.reshard.contracts` exposes `ResourceManifest`,
   `PlacementManifest`, and `RuntimeBindingManifest` as structural `Protocol`
   contracts for resource-neutral identity and lifecycle;
-- `mooncake.reshard.weight` defines model-weight placement and address-free
-  N-D planning. `WeightRuntimeBindingManifest` remains an input contract for a
-  later runtime-binding phase.
+- `mooncake.reshard.weight` defines model-weight placement and runtime binding.
 
 ## Weight Placement Model
 
@@ -64,38 +61,28 @@ execution must provide one.
 
 ## Logical Planning
 
-The planner consumes complete source and target placement collections:
+The planner consumes one complete source placement and one complete target
+placement:
 
 ```python
-logical_plan = plan_placement_transfer(source_placements, target_placements)
+logical_plan = plan_placement_transfer(source_placement, target_placement)
 ```
 
-For one target participant, the caller still provides the complete source
-placement collection and selects a target placement explicitly:
+For one target executor, the complete placements are retained and the target
+participant is selected explicitly:
 
 ```python
 logical_plan = plan_placement_transfer_to_local_target(
-    source_placements,
+    source_placement,
     target_placement,
+    target_participant_id,
 )
 ```
 
-The result is a backend-neutral `LogicalTransferPlan`. It contains N-D
-logical-box overlap regions but no GPU address, endpoint, allocation range,
-lease, or backend request. TP changes shard boxes, PP uses framework-provided
-ownership, EP is represented by logical expert coordinates, and DP selects
-complete replicas without changing tensor geometry.
-
-Each `TransferRegion` records overlap offset and shape, source and target base
-byte offsets, contiguous `inner_bytes`, outer loop counts, and source/target
-byte strides. The planner preserves this compact strided representation rather
-than expanding one operation per row or element.
-
-This phase does not consume a committed Store `WeightManifest`, bind a logical
-plan to live runtime fragments, submit to the Transfer Engine, or transform
-dtype, quantization, packing, swizzle, or checkpoint format. A subsequent
-runtime-binding phase may use the existing typed binding contracts to attach
-physical locations only after logical planning has completed.
+The result contains backend-neutral N-D overlap regions. PP routes tensor
+ownership, EP is represented by logical expert coordinates, TP changes shard
+boxes, and DP selects complete replicas without changing tensor geometry.
+Physical addresses are bound only after logical planning.
 
 The weight implementation is split by responsibility:
 
@@ -104,9 +91,11 @@ The weight implementation is split by responsibility:
 - `part.py` defines one participant's address-free contribution;
 - `placement.py` assembles and identifies the complete global placement;
 - `runtime.py` defines typed physical bindings;
-- `validation.py` checks manifest geometry, coverage, declared storage alias
-  groups, and runtime-binding input shape;
-- `_planner/` computes address-free N-D overlap regions;
+- `validation.py` checks logical geometry, coverage, declared storage alias
+  groups, and addresses;
+- `binding.py` validates placement and binding attestation;
+- `_planner/` implements N-D overlap planning and late runtime binding;
+- `planner.py` preserves the planner public import surface;
 - `manifest.py` preserves the public import surface.
 
 `kv_cache` is reserved as a resource discriminator, but this change does not
