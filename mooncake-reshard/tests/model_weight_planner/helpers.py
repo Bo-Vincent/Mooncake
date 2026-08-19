@@ -18,6 +18,7 @@ from mooncake.reshard.weight import (
     WeightPlacementManifest,
     WeightPlacementPart,
     WeightRuntimeBindingManifest,
+    bind_logical_transfer_plan,
     plan_placement_transfer,
     plan_placement_transfer_to_local_target,
 )
@@ -416,7 +417,26 @@ def tp_manifests(
 
 
 def plan_transfer(source: RuntimeInputs, target: RuntimeInputs):
-    return plan_placement_transfer(source.placement, target.placement)
+    logical = plan_placement_transfer(source.placement, target.placement)
+    source_participants = {
+        executor.participant_id for executor in logical.source_executors
+    }
+    target_participants = {
+        executor.participant_id for executor in logical.target_executors
+    }
+    return bind_logical_transfer_plan(
+        logical,
+        tuple(
+            binding
+            for binding in target.bindings
+            if binding.participant_id in target_participants
+        ),
+        source_bindings=tuple(
+            binding
+            for binding in source.bindings
+            if binding.participant_id in source_participants
+        ),
+    )
 
 
 def plan_transfer_to_local_target(
@@ -426,10 +446,22 @@ def plan_transfer_to_local_target(
     target_index: int = 0,
 ):
     target_binding = target.bindings[target_index]
-    return plan_placement_transfer_to_local_target(
+    logical = plan_placement_transfer_to_local_target(
         source.placement,
         target.placement,
         target_binding.participant_id,
+    )
+    source_participants = {
+        executor.participant_id for executor in logical.source_executors
+    }
+    return bind_logical_transfer_plan(
+        logical,
+        (target_binding,),
+        source_bindings=tuple(
+            binding
+            for binding in source.bindings
+            if binding.participant_id in source_participants
+        ),
     )
 
 
