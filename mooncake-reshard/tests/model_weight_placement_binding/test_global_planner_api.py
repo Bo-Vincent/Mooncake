@@ -111,6 +111,30 @@ def test_planner_accepts_canonical_fragment_ids_generated_by_manifest() -> None:
     )
 
 
+def test_logical_plan_rejects_forged_placement_source_provenance() -> None:
+    source = _placement(2, "source")
+    target = _placement(1, "target")
+    plan = plan_placement_transfer(source, target)
+
+    forged_source = replace(plan.operations[0].source, rank=ParallelRank(pp=99))
+    forged_operation = replace(plan.operations[0], source=forged_source)
+
+    with pytest.raises(
+        ValueError,
+        match="source placement fragment snapshots differ",
+    ):
+        replace(plan, operations=(forged_operation, *plan.operations[1:]))
+
+    with pytest.raises(ValueError, match="no source executor metadata"):
+        replace(plan, source_executors=())
+
+    with pytest.raises(ValueError, match="source tensor catalog differs"):
+        replace(plan, source_tensors=())
+
+    with pytest.raises(ValueError, match="target tensor catalog differs"):
+        replace(plan, target_tensors=())
+
+
 def _stored_source(tensor: TensorDescriptor) -> WeightManifest:
     group_id = "weights/default/model/revision/9"
     return WeightManifest(

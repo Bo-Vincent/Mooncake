@@ -536,9 +536,7 @@ class LogicalTransferPlan:
             or self.source_manifest.weight_generation
             != self.target_placement.weight_generation
         ):
-            raise ValueError(
-                "logical transfer plan source manifest identity differs"
-            )
+            raise ValueError("logical transfer plan source manifest identity differs")
         for operation in self.operations:
             _validate_logical_operation(operation, self.source_placement is not None)
             if operation.segment_count > self.planning_limits.max_segments_per_region:
@@ -572,6 +570,7 @@ class LogicalTransferPlan:
         from .validation import _validate_logical_target_coverage
 
         _validate_logical_target_coverage(self)
+        self.validate_source_placement_snapshot()
 
     @property
     def total_bytes(self) -> int:
@@ -599,6 +598,8 @@ class LogicalTransferPlan:
         source_manifest = validate_weight_manifest_snapshot(self.source_manifest)
         if self.source_manifest_identity != source_manifest.manifest_identity:
             raise ValueError("logical plan source manifest identity differs")
+        if self.source_tensors != source_manifest.tensors:
+            raise ValueError("logical plan source tensor catalog differs")
         source_by_id = {
             fragment.fragment_id: fragment for fragment in source_manifest.fragments
         }
@@ -611,6 +612,16 @@ class LogicalTransferPlan:
                 raise ValueError(
                     "logical plan and source manifest fragment snapshots differ"
                 )
+
+    def validate_source_placement_snapshot(self) -> None:
+        """Fail closed if a placement source no longer matches its plan snapshot."""
+
+        if self.source_placement is None:
+            return
+
+        from .validation import _validate_logical_source_placement
+
+        _validate_logical_source_placement(self)
 
     @property
     def pipeline_routes(self) -> tuple[PipelineRouteGroup, ...]:
