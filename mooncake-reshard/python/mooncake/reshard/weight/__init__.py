@@ -1,6 +1,5 @@
 """Framework-neutral model-weight reshard contracts and execution adapters."""
 
-from .adapter import WEIGHT_RESHARD_ADAPTER, WeightReshardAdapter
 from .manifest import (
     OwnershipAxis,
     ParallelRank,
@@ -76,8 +75,6 @@ def supports_weight_reshard_capability(capability: str) -> bool:
 
 __all__ = [
     "WEIGHT_RESHARD_CAPABILITIES",
-    "WEIGHT_RESHARD_ADAPTER",
-    "WeightReshardAdapter",
     "supports_weight_reshard_capability",
     "ParallelRank",
     "ParallelTopology",
