@@ -160,6 +160,59 @@ def _stored_source(tensor: TensorDescriptor) -> WeightManifest:
     )
 
 
+def _two_tensor_placement(placement_set_id: str) -> WeightPlacementManifest:
+    participant = TopologyParticipant(f"{placement_set_id}-worker-0", ParallelRank())
+    topology = ParallelTopology(
+        tp_size=1,
+        pp_size=1,
+        ep_size=1,
+        dp_size=1,
+        participants=(participant,),
+    )
+    tensors = tuple(
+        TensorDescriptor(
+            tensor_id=tensor_id,
+            global_shape=(8,),
+            dtype="uint8",
+            itemsize=1,
+            shard_dims=(0,),
+            layout_fingerprint="global-planner:uint8:v1",
+            parallel_axes=(SplitAxis(kind="tp", dim=0),),
+        )
+        for tensor_id in ("layers.a.weight", "layers.b.weight")
+    )
+    return WeightPlacementManifest(
+        resource_id="model",
+        revision="revision",
+        weight_generation=9,
+        placement_set_id=placement_set_id,
+        topology=topology,
+        parts=(
+            WeightPlacementPart(
+                resource_id="model",
+                revision="revision",
+                weight_generation=9,
+                placement_set_id=placement_set_id,
+                topology_id=topology.topology_id,
+                participant_id=participant.participant_id,
+                rank=participant.rank,
+                tensors=tensors,
+                fragments=tuple(
+                    PlacementFragment(
+                        placement_fragment_id=f"{placement_set_id}-{tensor.tensor_id}",
+                        tensor_id=tensor.tensor_id,
+                        global_offset=(0,),
+                        local_shape=tensor.global_shape,
+                        nbytes=8,
+                        rank=participant.rank,
+                    )
+                    for tensor in tensors
+                ),
+            ),
+        ),
+    )
+
+
 def test_store_backed_planner_attests_selected_source_fragments() -> None:
     target = _placement(8, "target")
     source = _stored_source(target.tensors[0])
@@ -187,3 +240,37 @@ def test_store_backed_planner_attests_selected_source_fragments() -> None:
             replace(source, weight_generation=10),
             target,
         )
+
+
+def test_store_backed_planner_accepts_reordered_tensor_catalog() -> None:
+    target = _two_tensor_placement("target")
+    tensors = target.tensors
+    group_id = "weights/default/model/revision/9"
+    source = WeightManifest(
+        namespace="default",
+        resource_id="model",
+        revision="revision",
+        weight_generation=9,
+        group_id=group_id,
+        manifest_key=f"{group_id}/manifest",
+        created_at="2026-08-20T00:00:00Z",
+        tensors=(tensors[1], tensors[0]),
+        fragments=tuple(
+            StoredFragment(
+                fragment_id=f"store-{tensor.tensor_id}",
+                tensor_id=tensor.tensor_id,
+                global_offset=(0,),
+                local_shape=tensor.global_shape,
+                object_key=f"{group_id}/payload/{index}",
+                object_offset=0,
+                nbytes=8,
+            )
+            for index, tensor in enumerate((tensors[1], tensors[0]))
+        ),
+    )
+
+    plan = plan_stored_transfer_to_target_placement(source, target)
+
+    assert plan.source_manifest == source
+    assert plan.source_tensors == target.tensors
+    assert len(plan.operations) == 2

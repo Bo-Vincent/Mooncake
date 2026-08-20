@@ -598,7 +598,7 @@ class LogicalTransferPlan:
         source_manifest = validate_weight_manifest_snapshot(self.source_manifest)
         if self.source_manifest_identity != source_manifest.manifest_identity:
             raise ValueError("logical plan source manifest identity differs")
-        if self.source_tensors != source_manifest.tensors:
+        if self.source_tensors != _canonical_tensor_catalog(source_manifest.tensors):
             raise ValueError("logical plan source tensor catalog differs")
         source_by_id = {
             fragment.fragment_id: fragment for fragment in source_manifest.fragments
@@ -650,6 +650,14 @@ class LogicalTransferPlan:
         for name, value in state.items():
             object.__setattr__(self, name, value)
         self.__post_init__()
+
+
+def _canonical_tensor_catalog(
+    tensors: Sequence[TensorDescriptor],
+) -> tuple[TensorDescriptor, ...]:
+    """Compare tensor catalogs by canonical identity, not exporter order."""
+
+    return tuple(sorted(tensors, key=lambda item: item.tensor_id))
 
 
 def _executor_projection_key(
