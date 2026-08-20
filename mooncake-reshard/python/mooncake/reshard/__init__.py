@@ -2,8 +2,6 @@
 
 from .contracts import (
     PlacementManifest,
-    ResourceAdapter,
-    ResourceAdapterRegistry,
     ResourceKind,
     ResourceManifest,
     RuntimeBindingFragment,
@@ -14,8 +12,6 @@ from .contracts import (
 
 __all__ = [
     "PlacementManifest",
-    "ResourceAdapter",
-    "ResourceAdapterRegistry",
     "ResourceKind",
     "ResourceManifest",
     "RuntimeBindingFragment",

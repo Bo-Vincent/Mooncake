@@ -1,6 +1,5 @@
 """Public resource-neutral contracts for Mooncake resharding."""
 
-from .adapter import ResourceAdapter, ResourceAdapterRegistry
 from .fragments import RuntimeBindingFragment
 from .ids import (
     LeaseId,
@@ -32,8 +31,6 @@ __all__ = [
     "PlacementId",
     "PlacementManifest",
     "PlacementSetId",
-    "ResourceAdapter",
-    "ResourceAdapterRegistry",
     "ResourceId",
     "ResourceKind",
     "ResourceManifest",

@@ -123,7 +123,7 @@ other overlaps fail closed.
 - `planner.py` preserves the planner public import surface;
 - `manifest.py` preserves the public import surface.
 
-- `contracts/` contains resource-neutral contracts and adapter registration;
+- `contracts/` contains resource-neutral structural contracts;
 - `transfer_engine/` contains resource-neutral physical transfer ownership;
 - `weight/topology.py`, `weight/part.py`, and `weight/placement.py` define the
   complete logical placement;

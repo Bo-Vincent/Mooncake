@@ -5,17 +5,13 @@ from dataclasses import dataclass
 import pytest
 
 from mooncake.reshard import (
-    PlacementManifest,
-    ResourceAdapter,
-    ResourceAdapterRegistry,
     ResourceKind,
     RuntimeBindingFragment,
-    RuntimeBindingManifest,
     StoredResourceManifest,
     validate_resource_binding_identity,
 )
-from mooncake.reshard.weight import WEIGHT_RESHARD_ADAPTER
 from mooncake.reshard.weight import RuntimeBindingFragment as WeightRuntimeFragment
+from mooncake.reshard.weight import WeightRuntimeBindingManifest
 from mooncake.reshard.weight.storage_manifest import WeightManifest
 
 
@@ -47,19 +43,6 @@ class KvBinding:
         return ResourceKind.KV_CACHE
 
 
-class KvAdapter(ResourceAdapter):
-    resource_kind = ResourceKind.KV_CACHE
-    placement_type = KvPlacement
-    binding_type = KvBinding
-
-    def validate_binding(
-        self,
-        placement: PlacementManifest,
-        binding: RuntimeBindingManifest,
-    ) -> None:
-        validate_resource_binding_identity(placement, binding)
-
-
 def kv_pair() -> tuple[KvPlacement, KvBinding]:
     placement = KvPlacement(resource_id="request-7", placement_id="kv-placement")
     binding = KvBinding(
@@ -73,24 +56,6 @@ def kv_pair() -> tuple[KvPlacement, KvBinding]:
     return placement, binding
 
 
-def test_registry_routes_weight_and_kv_without_model_name_rules() -> None:
-    kv_adapter = KvAdapter()
-    registry = ResourceAdapterRegistry((WEIGHT_RESHARD_ADAPTER, kv_adapter))
-
-    assert registry.resolve(ResourceKind.MODEL_WEIGHT) is WEIGHT_RESHARD_ADAPTER
-    assert WEIGHT_RESHARD_ADAPTER.stored_manifest_type is WeightManifest
-    assert registry.resolve(ResourceKind.KV_CACHE) is kv_adapter
-    assert set(registry.resource_kinds()) == {
-        ResourceKind.MODEL_WEIGHT,
-        ResourceKind.KV_CACHE,
-    }
-
-
-def test_registry_rejects_duplicate_resource_kind() -> None:
-    with pytest.raises(ValueError, match="duplicate resource adapter"):
-        ResourceAdapterRegistry((KvAdapter(), KvAdapter()))
-
-
 def test_common_identity_fence_accepts_kv_and_rejects_cross_resource_binding() -> None:
     placement, binding = kv_pair()
 
@@ -99,7 +64,7 @@ def test_common_identity_fence_accepts_kv_and_rejects_cross_resource_binding() -
     with pytest.raises(ValueError, match="resource_kind"):
         validate_resource_binding_identity(
             placement,
-            WEIGHT_RESHARD_ADAPTER.binding_type(
+            WeightRuntimeBindingManifest(
                 resource_id=placement.resource_id,
                 revision="step-1",
                 placement_id=placement.placement_id,
