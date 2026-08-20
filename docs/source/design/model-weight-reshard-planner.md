@@ -75,6 +75,12 @@ or topologies, and incomplete or conflicting tensor coverage. Planning then
 fails closed when source and target tensor identity, dtype, global shape,
 layout fingerprint, ownership, or logical coverage is inconsistent.
 
+Coverage validation uses an ordered interval scan for 1-D inputs and a
+coordinate-compressed sweep for 2-D inputs, both with `O(N log N)` behavior.
+For 3-D and higher logical boxes, exact intersection remains supported under an
+explicit pairwise-comparison budget; inputs that exceed it fail closed rather
+than making validation work unbounded.
+
 Runtime binding rechecks the global placement ID and digest, exact participant
 and fragment membership, leases, generations, aliases, and physical address
 bounds. The runtime binding remains the only source of truth for live physical

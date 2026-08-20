@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import heapq
+from array import array
 from math import prod
 from typing import Iterable, Protocol, Sequence
 
 from ._compat import _strict_zip
+
+
+_MAX_HIGH_DIMENSIONAL_PAIRWISE_COMPARISONS = 1_000_000
 
 
 class LogicalBox(Protocol):
@@ -51,10 +56,133 @@ def box_contains(
 def boxes_overlap(
     boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
 ) -> bool:
-    """Return whether any two N-D boxes overlap."""
+    """Return whether any two N-D boxes overlap.
+
+    One-dimensional intervals and two-dimensional rectangles use bounded sweep
+    algorithms. Higher-dimensional boxes retain full intersection semantics but
+    fail closed after an explicit pairwise-comparison budget rather than making
+    unbounded validation work part of the public manifest contract.
+    """
 
     if len(boxes) < 2:
         return False
+    ndim = len(boxes[0][0])
+    if ndim == 1:
+        return _one_dimensional_boxes_overlap(boxes)
+    if ndim == 2:
+        return _two_dimensional_boxes_overlap(boxes)
+    return _high_dimensional_boxes_overlap(boxes)
+
+
+def _one_dimensional_boxes_overlap(
+    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
+) -> bool:
+    ordered = sorted((offset[0], offset[0] + shape[0]) for offset, shape in boxes)
+    previous_end = ordered[0][1]
+    for begin, end in ordered[1:]:
+        if begin < previous_end:
+            return True
+        previous_end = max(previous_end, end)
+    return False
+
+
+class _RangeMaxTree:
+    """Coordinate-compressed range-add/range-maximum tree for 2-D sweeps."""
+
+    def __init__(self, size: int) -> None:
+        if size <= 0:
+            raise ValueError("range tree size must be positive")
+        capacity = size * 4
+        self._size = size
+        self._maximum = array("i", [0]) * capacity
+        self._lazy = array("i", [0]) * capacity
+
+    def add(self, left: int, right: int, value: int) -> None:
+        self._add(1, 0, self._size - 1, left, right, value)
+
+    def maximum(self, left: int, right: int) -> int:
+        return self._maximum_in(1, 0, self._size - 1, left, right)
+
+    def _add(
+        self,
+        node: int,
+        begin: int,
+        end: int,
+        left: int,
+        right: int,
+        value: int,
+    ) -> None:
+        if left <= begin and end <= right:
+            self._maximum[node] += value
+            self._lazy[node] += value
+            return
+        middle = (begin + end) // 2
+        if left <= middle:
+            self._add(node * 2, begin, middle, left, right, value)
+        if right > middle:
+            self._add(node * 2 + 1, middle + 1, end, left, right, value)
+        self._maximum[node] = self._lazy[node] + max(
+            self._maximum[node * 2], self._maximum[node * 2 + 1]
+        )
+
+    def _maximum_in(
+        self,
+        node: int,
+        begin: int,
+        end: int,
+        left: int,
+        right: int,
+    ) -> int:
+        if left <= begin and end <= right:
+            return self._maximum[node]
+        middle = (begin + end) // 2
+        result = 0
+        if left <= middle:
+            result = self._maximum_in(node * 2, begin, middle, left, right)
+        if right > middle:
+            result = max(
+                result,
+                self._maximum_in(node * 2 + 1, middle + 1, end, left, right),
+            )
+        return self._lazy[node] + result
+
+
+def _two_dimensional_boxes_overlap(
+    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
+) -> bool:
+    coordinates = sorted(
+        {
+            coordinate
+            for offset, shape in boxes
+            for coordinate in (offset[1], offset[1] + shape[1])
+        }
+    )
+    coordinate_index = {
+        coordinate: index for index, coordinate in enumerate(coordinates)
+    }
+    tree = _RangeMaxTree(len(coordinates) - 1)
+    events: list[tuple[int, int, int, int]] = []
+    for offset, shape in boxes:
+        x_begin = offset[0]
+        x_end = offset[0] + shape[0]
+        y_begin = coordinate_index[offset[1]]
+        y_end = coordinate_index[offset[1] + shape[1]] - 1
+        events.append((x_end, 0, y_begin, y_end))
+        events.append((x_begin, 1, y_begin, y_end))
+
+    for _, is_start, y_begin, y_end in sorted(events):
+        if not is_start:
+            tree.add(y_begin, y_end, -1)
+            continue
+        if tree.maximum(y_begin, y_end) > 0:
+            return True
+        tree.add(y_begin, y_end, 1)
+    return False
+
+
+def _high_dimensional_boxes_overlap(
+    boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
+) -> bool:
     ndim = len(boxes[0][0])
     sweep_dim = max(
         range(ndim),
@@ -62,17 +190,25 @@ def boxes_overlap(
             {(offset[dim], offset[dim] + shape[dim]) for offset, shape in boxes}
         ),
     )
-    ordered = sorted(boxes, key=lambda item: item[0][sweep_dim])
-    active: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
-    for offset, shape in ordered:
+    ordered = sorted(
+        enumerate(boxes),
+        key=lambda item: item[1][0][sweep_dim],
+    )
+    active: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+    expirations: list[tuple[int, int]] = []
+    comparisons = 0
+    for index, (offset, shape) in ordered:
         begin = offset[sweep_dim]
-        active = [
-            candidate
-            for candidate in active
-            if candidate[0][sweep_dim] + candidate[1][sweep_dim] > begin
-        ]
-        if any(
-            all(
+        while expirations and expirations[0][0] <= begin:
+            _, expired_index = heapq.heappop(expirations)
+            active.pop(expired_index, None)
+        for candidate_offset, candidate_shape in active.values():
+            if comparisons >= _MAX_HIGH_DIMENSIONAL_PAIRWISE_COMPARISONS:
+                raise ValueError(
+                    "high-dimensional overlap budget exceeded before validation"
+                )
+            comparisons += 1
+            if all(
                 left_begin < right_begin + right_extent
                 and right_begin < left_begin + left_extent
                 for left_begin, left_extent, right_begin, right_extent in _strict_zip(
@@ -81,11 +217,10 @@ def boxes_overlap(
                     offset,
                     shape,
                 )
-            )
-            for candidate_offset, candidate_shape in active
-        ):
-            return True
-        active.append((offset, shape))
+            ):
+                return True
+        active[index] = (offset, shape)
+        heapq.heappush(expirations, (offset[sweep_dim] + shape[sweep_dim], index))
     return False
 
 
