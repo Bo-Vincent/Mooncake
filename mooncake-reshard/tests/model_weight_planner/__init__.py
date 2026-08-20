@@ -1,1 +1,1 @@
-"""按职责组织模型权重 planner 测试。"""
+"""Model-weight planner tests organized by responsibility."""

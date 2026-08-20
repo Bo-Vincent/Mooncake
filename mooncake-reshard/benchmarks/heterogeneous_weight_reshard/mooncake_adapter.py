@@ -1,4 +1,4 @@
-"""Mooncake N-D planner 的纯控制面 benchmark adapter。"""
+"""Control-plane-only benchmark adapter for the Mooncake N-D planner."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ NEUTRAL_TENSOR_ID = "benchmark_tensor"
 
 
 class MooncakePlanningError(ValueError):
-    """Benchmark case 无法生成 Mooncake 静态计划。"""
+    """Raised when a benchmark case cannot produce a static Mooncake plan."""
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,7 @@ def plan_mooncake_case(
     max_batch_operations: int = _DEFAULT_MAX_BATCH_OPERATIONS,
     max_region_segments: int = _DEFAULT_MAX_REGION_SEGMENTS,
 ) -> MooncakeStaticPlan:
-    """构造 placement/binding，并仅用 N-D region 静态算术汇总计划。"""
+    """Build placement and binding, then summarize with N-D region arithmetic."""
 
     for name, value in (
         ("max_batch_operations", max_batch_operations),

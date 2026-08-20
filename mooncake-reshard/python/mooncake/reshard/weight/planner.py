@@ -1,4 +1,4 @@
-"""模型权重传输计划的稳定公共门面。"""
+"""Stable public facade for model-weight transfer planning."""
 
 from ._planner.api import (
     plan_placement_transfer,
