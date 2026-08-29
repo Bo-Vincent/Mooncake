@@ -1,5 +1,6 @@
 """Stable public facade for model-weight manifest contracts."""
 
+from ..contracts import RuntimeBindingFragment
 from .binding import validate_runtime_binding, validate_runtime_bindings
 from .part import WeightPlacementPart
 from .placement import WeightPlacementManifest
@@ -10,7 +11,6 @@ from .types import (
     ParallelRank,
     PlacementFragment,
     ReplicatedAxis,
-    RuntimeBindingFragment,
     SplitAxis,
     TensorDescriptor,
 )
