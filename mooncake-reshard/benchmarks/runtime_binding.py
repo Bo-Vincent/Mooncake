@@ -233,7 +233,6 @@ def _accepts(action: Callable[[], object]) -> bool:
         return False
     return True
 
-
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Measure Mooncake Reshard logical planning and runtime binding"
