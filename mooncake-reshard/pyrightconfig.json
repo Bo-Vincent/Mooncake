@@ -1,5 +1,6 @@
 {
   "include": [
+    "python/mooncake/reshard/geometry.py",
     "python/mooncake/reshard/contracts",
     "python/mooncake/reshard/weight/types.py",
     "python/mooncake/reshard/weight/topology.py",
@@ -25,7 +26,9 @@
     "python/mooncake/reshard/kv_cache/serde.py",
     "python/mooncake/reshard/kv_cache/planner.py",
     "python/mooncake/reshard/kv_cache/plan_serde.py",
+    "python/mooncake/reshard/weight/storage_manifest.py",
     "python/mooncake/reshard/weight/_planner",
+    "python/mooncake/reshard/weight/_store",
     "python/mooncake/reshard/weight/_te",
     "python/mooncake/reshard/transfer_engine"
   ],

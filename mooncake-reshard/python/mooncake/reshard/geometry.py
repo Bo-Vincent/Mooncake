@@ -183,8 +183,9 @@ def _two_dimensional_boxes_overlap(
 def _high_dimensional_boxes_overlap(
     boxes: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
 ) -> bool:
+    ndim = len(boxes[0][0])
     sweep_dim = max(
-        range(len(boxes[0][0])),
+        range(ndim),
         key=lambda dim: len(
             {(offset[dim], offset[dim] + shape[dim]) for offset, shape in boxes}
         ),

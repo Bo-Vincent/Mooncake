@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "execution_enabled": false,
+  "execution_guard": "VIN_RUN_BENCHMARK",
+  "dtype": "uint8",
+  "warmups": 3,
+  "iterations": 20,
+  "physical_gpus": 16,
+  "placement": {
+    "source_host": "rdma-1",
+    "target_host": "rdma-2",
+    "gpus_per_host": 8
+  },
+  "metrics": [
+    "process_wall_ms",
+    "cold_e2e_ms",
+    "first_update_ms",
+    "steady_update_ms",
+    "data_plane_ms",
+    "logical_GiBps",
+    "wire_GiBps",
+    "transport_init_ms",
+    "registration_ms",
+    "plan_ms",
+    "lowering_ms"
+  ],
+  "physical_cases": [
+    {
+      "id": "tp4_to_tp8_dim0",
+      "source": {"replicas": 1, "shards": 4, "shard_dim": 0},
+      "target": {"replicas": 1, "shards": 8, "shard_dim": 0},
+      "global_shape": [2048, 2048, 2048],
+      "required_ranks": 12
+    },
+    {
+      "id": "tp8_to_tp4_dim0",
+      "source": {"replicas": 1, "shards": 8, "shard_dim": 0},
+      "target": {"replicas": 1, "shards": 4, "shard_dim": 0},
+      "global_shape": [2048, 2048, 2048],
+      "required_ranks": 12
+    },
+    {
+      "id": "cross_dim0_to_dim1",
+      "source": {"replicas": 1, "shards": 4, "shard_dim": 0},
+      "target": {"replicas": 1, "shards": 4, "shard_dim": 1},
+      "global_shape": [2048, 2048, 2048],
+      "required_ranks": 8
+    },
+    {
+      "id": "cross_dim0_to_dim2_physical",
+      "source": {"replicas": 1, "shards": 4, "shard_dim": 0},
+      "target": {"replicas": 1, "shards": 4, "shard_dim": 2},
+      "global_shape": [128, 4096, 16384],
+      "required_ranks": 8
+    },
+    {
+      "id": "dp2_tp4_to_dp1_tp8_dim0",
+      "source": {"replicas": 2, "shards": 4, "shard_dim": 0},
+      "target": {"replicas": 1, "shards": 8, "shard_dim": 0},
+      "global_shape": [2048, 2048, 1024],
+      "required_ranks": 16
+    }
+  ],
+  "stress_cases": [
+    {
+      "id": "cross_dim0_to_dim2_stress",
+      "source": {"replicas": 1, "shards": 4, "shard_dim": 0},
+      "target": {"replicas": 1, "shards": 4, "shard_dim": 2},
+      "global_shape": [2048, 2048, 2048],
+      "required_ranks": 8
+    }
+  ],
+  "planner_only_cases": [
+    {
+      "id": "pp2_to_pp4_then_reverse",
+      "reason": "PP is explicit per-tensor ownership routing, not a shard dimension"
+    },
+    {
+      "id": "ep8_to_ep2_then_reverse",
+      "reason": "independent expert tensors remain separate logical allocations"
+    },
+    {
+      "id": "tp4_pp2_ep8_dp2_to_tp8_pp4_ep2_dp4",
+      "reason": "the literal source and target rank counts exceed 16 physical GPUs"
+    }
+  ]
+}
