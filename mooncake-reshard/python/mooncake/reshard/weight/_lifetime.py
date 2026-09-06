@@ -93,6 +93,7 @@ def acquire_weight_lifetime_tokens(
             )
             if not isinstance(acquired, AcquiredWeightBinding):
                 raise ValueError(f"{side} allocation guard returned an invalid binding")
+            tokens.append(acquired.token)
             fresh_binding = acquired.binding
             expected_fence = weight_allocation_fence(
                 fresh_binding,
@@ -105,7 +106,6 @@ def acquire_weight_lifetime_tokens(
                 expected_binding, fresh_binding, required_fragment_ids
             )
             acquired_bindings.append(fresh_binding)
-            tokens.append(acquired.token)
     except BaseException:
         AllocationTokenSet(tuple(tokens)).release_after_terminal(
             TerminalTransferState.ABORTED
