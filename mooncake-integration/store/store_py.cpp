@@ -1960,6 +1960,41 @@ uintptr_t get_free_func_addr() {
     return reinterpret_cast<uintptr_t>(&hugepage_memory_free);
 }
 
+template <typename T>
+py::tuple weight_rpc_result_to_python(WeightRpcResult<T> result) {
+    if (!result) {
+        return py::make_tuple(py::none(), 0, toInt(result.error()));
+    }
+    if (!*result) {
+        return py::make_tuple(py::none(), static_cast<int>(result->error()), 0);
+    }
+    return py::make_tuple(py::cast(std::move(result->value())), 0, 0);
+}
+
+template <>
+py::tuple weight_rpc_result_to_python(WeightRpcResult<void> result) {
+    if (!result) {
+        return py::make_tuple(py::none(), 0, toInt(result.error()));
+    }
+    if (!*result) {
+        return py::make_tuple(py::none(), static_cast<int>(result->error()), 0);
+    }
+    return py::make_tuple(true, 0, 0);
+}
+
+WeightRevisionIdentity make_weight_revision_identity(
+    const std::string &tenant_id, const std::string &name_space,
+    const std::string &resource_id, const std::string &revision,
+    uint64_t weight_generation) {
+    return WeightRevisionIdentity{
+        .tenant_id = tenant_id,
+        .name_space = name_space,
+        .resource_id = resource_id,
+        .revision = revision,
+        .weight_generation = weight_generation,
+    };
+}
+
 class MooncakeDistributedNoFRegisterPyWrapper {
    public:
     std::shared_ptr<NoFRegisterClient> register_{nullptr};
@@ -1989,6 +2024,109 @@ PYBIND11_MODULE(store, m) {
         .value("METADATA", ObjectDataType::METADATA)
         .value("GENERAL", ObjectDataType::GENERAL)
         .export_values();
+
+    py::enum_<WeightAvailabilityState>(m, "WeightAvailabilityState")
+        .value("IMPORTING", WeightAvailabilityState::IMPORTING)
+        .value("READY", WeightAvailabilityState::READY)
+        .value("DEGRADED", WeightAvailabilityState::DEGRADED)
+        .value("DELETING", WeightAvailabilityState::DELETING)
+        .value("DELETED", WeightAvailabilityState::DELETED);
+    py::enum_<WeightResidencyState>(m, "WeightResidencyState")
+        .value("UNKNOWN", WeightResidencyState::UNKNOWN)
+        .value("HOT", WeightResidencyState::HOT)
+        .value("COLD", WeightResidencyState::COLD)
+        .value("MIXED", WeightResidencyState::MIXED)
+        .value("ABSENT", WeightResidencyState::ABSENT);
+    py::enum_<WeightOperationState>(m, "WeightOperationState")
+        .value("NONE", WeightOperationState::NONE)
+        .value("EVICTING", WeightOperationState::EVICTING)
+        .value("REHYDRATING", WeightOperationState::REHYDRATING)
+        .value("REPAIRING", WeightOperationState::REPAIRING);
+    py::enum_<WeightCatalogError>(m, "WeightCatalogError")
+        .value("INVALID_ARGUMENT", WeightCatalogError::INVALID_ARGUMENT)
+        .value("NOT_FOUND", WeightCatalogError::NOT_FOUND)
+        .value("CONFLICT", WeightCatalogError::CONFLICT)
+        .value("STALE_GENERATION", WeightCatalogError::STALE_GENERATION)
+        .value("NOT_READY", WeightCatalogError::NOT_READY)
+        .value("BUSY", WeightCatalogError::BUSY)
+        .value("LEASE_EXPIRED", WeightCatalogError::LEASE_EXPIRED)
+        .value("GENERATION_EXHAUSTED",
+               WeightCatalogError::GENERATION_EXHAUSTED)
+        .value("DURABILITY_FAILED", WeightCatalogError::DURABILITY_FAILED);
+
+    py::class_<WeightRevisionIdentity>(m, "WeightRevisionIdentity")
+        .def_property_readonly(
+            "tenant_id", [](const WeightRevisionIdentity &value) {
+                return value.tenant_id;
+            })
+        .def_property_readonly("namespace",
+                               [](const WeightRevisionIdentity &value) {
+                                   return value.name_space;
+                               })
+        .def_property_readonly(
+            "name_space", [](const WeightRevisionIdentity &value) {
+                return value.name_space;
+            })
+        .def_readonly("resource_id", &WeightRevisionIdentity::resource_id)
+        .def_readonly("revision", &WeightRevisionIdentity::revision)
+        .def_readonly("weight_generation",
+                      &WeightRevisionIdentity::weight_generation);
+    py::class_<WeightManifestReference>(m, "WeightManifestReference")
+        .def_readonly("manifest_key", &WeightManifestReference::manifest_key)
+        .def_readonly("manifest_sha256",
+                      &WeightManifestReference::manifest_sha256)
+        .def_readonly("payload_group_id",
+                      &WeightManifestReference::payload_group_id)
+        .def_readonly("payload_keys_sha256",
+                      &WeightManifestReference::payload_keys_sha256)
+        .def_readonly("payload_count", &WeightManifestReference::payload_count)
+        .def_readonly("logical_bytes", &WeightManifestReference::logical_bytes);
+    py::class_<WeightRevisionMetadata>(m, "WeightRevisionMetadata")
+        .def_readonly("identity", &WeightRevisionMetadata::identity)
+        .def_readonly("manifest", &WeightRevisionMetadata::manifest)
+        .def_readonly("availability", &WeightRevisionMetadata::availability)
+        .def_readonly("residency", &WeightRevisionMetadata::residency)
+        .def_readonly("operation", &WeightRevisionMetadata::operation)
+        .def_readonly("operation_id", &WeightRevisionMetadata::operation_id)
+        .def_readonly("metadata_generation",
+                      &WeightRevisionMetadata::metadata_generation)
+        .def_readonly("created_at_ms", &WeightRevisionMetadata::created_at_ms)
+        .def_readonly("updated_at_ms", &WeightRevisionMetadata::updated_at_ms);
+    py::class_<WeightRevisionLease>(m, "WeightRevisionLease")
+        .def_readonly("lease_id", &WeightRevisionLease::lease_id)
+        .def_readonly("identity", &WeightRevisionLease::identity)
+        .def_readonly("holder", &WeightRevisionLease::holder)
+        .def_readonly("expires_at_ms", &WeightRevisionLease::expires_at_ms)
+        .def_readonly("fenced_metadata_generation",
+                      &WeightRevisionLease::fenced_metadata_generation);
+    py::class_<WeightRevisionView>(m, "WeightRevisionView")
+        .def_readonly("metadata", &WeightRevisionView::metadata)
+        .def_readonly("active_lease_count",
+                      &WeightRevisionView::active_lease_count)
+        .def_readonly("nearest_lease_expiry_ms",
+                      &WeightRevisionView::nearest_lease_expiry_ms);
+    py::class_<ListWeightRevisionsResponse>(m, "WeightRevisionPage")
+        .def_readonly("revisions", &ListWeightRevisionsResponse::revisions)
+        .def_readonly("next_page_token",
+                      &ListWeightRevisionsResponse::next_page_token);
+    py::class_<WeightResidencyOperation>(m, "WeightResidencyOperation")
+        .def_readonly("operation_id", &WeightResidencyOperation::operation_id)
+        .def_readonly("identity", &WeightResidencyOperation::identity)
+        .def_readonly("operation", &WeightResidencyOperation::operation)
+        .def_readonly("target_residency",
+                      &WeightResidencyOperation::target_residency)
+        .def_readonly("fenced_metadata_generation",
+                      &WeightResidencyOperation::fenced_metadata_generation)
+        .def_readonly("started_at_ms",
+                      &WeightResidencyOperation::started_at_ms)
+        .def_readonly("updated_at_ms",
+                      &WeightResidencyOperation::updated_at_ms)
+        .def_readonly("processed_members",
+                      &WeightResidencyOperation::processed_members)
+        .def_readonly("total_members",
+                      &WeightResidencyOperation::total_members)
+        .def_readonly("cursor", &WeightResidencyOperation::cursor)
+        .def_readonly("message", &WeightResidencyOperation::message);
 
     py::enum_<SoftPinAction>(m, "SoftPinAction")
         .value("PRESERVE", SoftPinAction::PRESERVE)
@@ -2231,7 +2369,9 @@ PYBIND11_MODULE(store, m) {
         "Get PyClient from MooncakeDistributedStore (internal use, returns "
         "capsule)");
 
-    py::class_<MooncakeStorePyWrapper>(m, "MooncakeDistributedStore")
+    py::class_<MooncakeStorePyWrapper> store_class(m,
+                                                    "MooncakeDistributedStore");
+    store_class
         .def(py::init<>())
         .def(
             "begin_weight_snapshot",
@@ -3199,6 +3339,321 @@ PYBIND11_MODULE(store, m) {
             "Returns:\n"
             "    tuple[QueryTaskResponse | None, int]: (QueryTaskResponse if "
             "success, error code: 0 if success, non-zero if failure)");
+
+    auto identity_from_args = [](const std::string &tenant_id,
+                                 const std::string &name_space,
+                                 const std::string &resource_id,
+                                 const std::string &revision,
+                                 uint64_t weight_generation) {
+        return make_weight_revision_identity(tenant_id, name_space, resource_id,
+                                             revision, weight_generation);
+    };
+    store_class.def(
+        "begin_weight_import",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation,
+                             const std::string &payload_group_id,
+                             uint64_t expected_payload_count,
+                             uint64_t expected_logical_bytes) {
+            auto request = BeginWeightImportRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+                .payload_group_id = payload_group_id,
+                .expected_payload_count = expected_payload_count,
+                .expected_logical_bytes = expected_logical_bytes,
+            };
+            WeightRpcResult<WeightRevisionMetadata> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->begin_weight_import(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("payload_group_id") = "", py::arg("expected_payload_count"),
+        py::arg("expected_logical_bytes"));
+    store_class.def(
+        "commit_weight_import",
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            uint64_t expected_metadata_generation,
+            const std::string &manifest_key,
+            const std::string &manifest_sha256,
+            const std::string &payload_group_id,
+            const std::string &payload_keys_sha256, uint64_t payload_count,
+            uint64_t logical_bytes) {
+            auto request = CommitWeightImportRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+                .expected_metadata_generation = expected_metadata_generation,
+                .manifest =
+                    WeightManifestReference{
+                        .manifest_key = manifest_key,
+                        .manifest_sha256 = manifest_sha256,
+                        .payload_group_id = payload_group_id,
+                        .payload_keys_sha256 = payload_keys_sha256,
+                        .payload_count = payload_count,
+                        .logical_bytes = logical_bytes,
+                    },
+            };
+            WeightRpcResult<WeightRevisionMetadata> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->commit_weight_import(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("expected_metadata_generation"), py::arg("manifest_key"),
+        py::arg("manifest_sha256"), py::arg("payload_group_id"),
+        py::arg("payload_keys_sha256"), py::arg("payload_count"),
+        py::arg("logical_bytes"));
+    store_class.def(
+        "abort_weight_import",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation,
+                             uint64_t expected_metadata_generation) {
+            auto request = AbortWeightImportRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+                .expected_metadata_generation = expected_metadata_generation,
+            };
+            WeightRpcResult<WeightRevisionMetadata> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->abort_weight_import(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("expected_metadata_generation"));
+    store_class.def(
+        "get_weight_revision",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation) {
+            auto request = GetWeightRevisionRequest{.identity =
+                                                        identity_from_args(
+                                                            tenant_id,
+                                                            name_space,
+                                                            resource_id,
+                                                            revision,
+                                                            weight_generation)};
+            WeightRpcResult<WeightRevisionView> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->get_weight_revision(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"));
+    store_class.def(
+        "list_weight_revisions",
+        [](MooncakeStorePyWrapper &self, const std::string &tenant_id,
+           const std::string &name_space, const std::string &resource_id,
+           const std::string &page_token, uint32_t limit) {
+            auto request = ListWeightRevisionsRequest{
+                .tenant_id = tenant_id,
+                .name_space = name_space,
+                .resource_id = resource_id,
+                .page_token = page_token,
+                .limit = limit,
+            };
+            WeightRpcResult<ListWeightRevisionsResponse> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->list_weight_revisions(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("page_token") = "", py::arg("limit") = 100);
+    store_class.def(
+        "acquire_weight_revision_lease",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation,
+                             uint64_t expected_metadata_generation,
+                             const std::string &holder, uint64_t ttl_ms) {
+            auto request = AcquireWeightRevisionLeaseRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+                .expected_metadata_generation = expected_metadata_generation,
+                .holder = holder,
+                .ttl_ms = ttl_ms,
+            };
+            WeightRpcResult<WeightRevisionLease> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->acquire_weight_revision_lease(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("expected_metadata_generation"), py::arg("holder"),
+        py::arg("ttl_ms"));
+    store_class.def(
+        "renew_weight_revision_lease",
+        [](MooncakeStorePyWrapper &self, const std::string &tenant_id,
+           uint64_t lease_id, uint64_t ttl_ms) {
+            auto request = RenewWeightRevisionLeaseRequest{
+                .tenant_id = tenant_id,
+                .lease_id = lease_id,
+                .ttl_ms = ttl_ms,
+            };
+            WeightRpcResult<WeightRevisionLease> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->renew_weight_revision_lease(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("lease_id"), py::arg("ttl_ms"));
+    store_class.def(
+        "release_weight_revision_lease",
+        [](MooncakeStorePyWrapper &self, const std::string &tenant_id,
+           uint64_t lease_id) {
+            auto request = ReleaseWeightRevisionLeaseRequest{
+                .tenant_id = tenant_id,
+                .lease_id = lease_id,
+            };
+            WeightRpcResult<void> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->release_weight_revision_lease(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("lease_id"));
+    store_class.def(
+        "start_weight_residency_operation",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation,
+                             uint64_t expected_metadata_generation,
+                             int target_residency) {
+            auto request = StartWeightResidencyOperationRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+                .expected_metadata_generation = expected_metadata_generation,
+                .target_residency =
+                    static_cast<WeightResidencyState>(target_residency),
+            };
+            WeightRpcResult<WeightResidencyOperation> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->start_weight_residency_operation(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("expected_metadata_generation"),
+        py::arg("target_residency"));
+    store_class.def(
+        "query_weight_operation",
+        [](MooncakeStorePyWrapper &self, const std::string &tenant_id,
+           uint64_t operation_id) {
+            auto request = QueryWeightOperationRequest{
+                .tenant_id = tenant_id,
+                .operation_id = operation_id,
+            };
+            WeightRpcResult<WeightResidencyOperation> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->query_weight_operation(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("operation_id"));
+    store_class.def(
+        "reconcile_weight_revision",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation) {
+            auto request = ReconcileWeightRevisionRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+            };
+            WeightRpcResult<WeightRevisionMetadata> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->reconcile_weight_revision(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"));
+    store_class.def(
+        "delete_weight_revision",
+        [identity_from_args](MooncakeStorePyWrapper &self,
+                             const std::string &tenant_id,
+                             const std::string &name_space,
+                             const std::string &resource_id,
+                             const std::string &revision,
+                             uint64_t weight_generation,
+                             uint64_t expected_metadata_generation) {
+            auto request = DeleteWeightRevisionRequest{
+                .identity = identity_from_args(
+                    tenant_id, name_space, resource_id, revision,
+                    weight_generation),
+                .expected_metadata_generation = expected_metadata_generation,
+            };
+            WeightRpcResult<WeightRevisionMetadata> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->delete_weight_revision(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("expected_metadata_generation"));
 
     // Expose NUMA binding as a module-level function (no self required)
     m.def(
