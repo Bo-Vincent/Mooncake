@@ -9,6 +9,23 @@ from typing import Literal, Optional, Protocol, cast
 from ..._typing import TypeAlias
 
 from .errors import WeightStoreError
+from ..management import (
+    WeightManagementError,
+    WeightManagementErrorCode,
+    WeightManagementTransportError,
+    WeightManifestReference,
+    WeightResidencyOperation,
+    WeightResidencyState,
+    WeightRevisionIdentity,
+    WeightRevisionLease,
+    WeightRevisionMetadata,
+    WeightRevisionPage,
+    WeightRevisionView,
+    lease_from_native,
+    metadata_from_native,
+    operation_from_native,
+    view_from_native,
+)
 
 
 StoreRecordType: TypeAlias = Literal["payload", "metadata"]
@@ -114,6 +131,162 @@ class StoreBackend:
     def unregister_buffer(self, address: int) -> int:
         return self._status("unregister_buffer", address)
 
+    def begin_weight_import(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        payload_group_id: str,
+        expected_payload_count: int,
+        expected_logical_bytes: int,
+    ) -> WeightRevisionMetadata:
+        value = self._management_call(
+            "begin_weight_import",
+            *self._identity_args(identity),
+            payload_group_id,
+            expected_payload_count,
+            expected_logical_bytes,
+        )
+        return metadata_from_native(value)
+
+    def commit_weight_import(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        expected_metadata_generation: int,
+        manifest: WeightManifestReference,
+    ) -> WeightRevisionMetadata:
+        value = self._management_call(
+            "commit_weight_import",
+            *self._identity_args(identity),
+            expected_metadata_generation,
+            manifest.manifest_key,
+            manifest.manifest_sha256,
+            manifest.payload_group_id,
+            manifest.payload_keys_sha256,
+            manifest.payload_count,
+            manifest.logical_bytes,
+        )
+        return metadata_from_native(value)
+
+    def abort_weight_import(
+        self, identity: WeightRevisionIdentity, expected_metadata_generation: int
+    ) -> WeightRevisionMetadata:
+        value = self._management_call(
+            "abort_weight_import",
+            *self._identity_args(identity),
+            expected_metadata_generation,
+        )
+        return metadata_from_native(value)
+
+    def get_weight_revision(
+        self, identity: WeightRevisionIdentity
+    ) -> WeightRevisionView:
+        value = self._management_call(
+            "get_weight_revision", *self._identity_args(identity)
+        )
+        return view_from_native(value)
+
+    def list_weight_revisions(
+        self,
+        *,
+        tenant_id: str,
+        namespace: str,
+        resource_id: str,
+        page_token: str,
+        limit: int,
+    ) -> WeightRevisionPage:
+        value = self._management_call(
+            "list_weight_revisions",
+            tenant_id,
+            namespace,
+            resource_id,
+            page_token,
+            limit,
+        )
+        if isinstance(value, WeightRevisionPage):
+            return value
+        return WeightRevisionPage(
+            revisions=tuple(view_from_native(item) for item in value.revisions),
+            next_page_token=value.next_page_token,
+        )
+
+    def acquire_weight_revision_lease(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        expected_metadata_generation: int,
+        holder: str,
+        ttl_ms: int,
+    ) -> WeightRevisionLease:
+        value = self._management_call(
+            "acquire_weight_revision_lease",
+            *self._identity_args(identity),
+            expected_metadata_generation,
+            holder,
+            ttl_ms,
+        )
+        return lease_from_native(value)
+
+    def renew_weight_revision_lease(
+        self, *, tenant_id: str, lease_id: int, ttl_ms: int
+    ) -> WeightRevisionLease:
+        return lease_from_native(
+            self._management_call(
+                "renew_weight_revision_lease", tenant_id, lease_id, ttl_ms
+            )
+        )
+
+    def release_weight_revision_lease(
+        self, *, tenant_id: str, lease_id: int
+    ) -> None:
+        self._management_call(
+            "release_weight_revision_lease", tenant_id, lease_id
+        )
+
+    def start_weight_residency_operation(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        expected_metadata_generation: int,
+        target_residency: WeightResidencyState,
+    ) -> WeightResidencyOperation:
+        value = self._management_call(
+            "start_weight_residency_operation",
+            *self._identity_args(identity),
+            expected_metadata_generation,
+            int(target_residency),
+        )
+        return operation_from_native(value)
+
+    def query_weight_operation(
+        self, *, tenant_id: str, operation_id: int
+    ) -> WeightResidencyOperation:
+        return operation_from_native(
+            self._management_call(
+                "query_weight_operation", tenant_id, operation_id
+            )
+        )
+
+    def reconcile_weight_revision(
+        self, identity: WeightRevisionIdentity
+    ) -> WeightRevisionMetadata:
+        return metadata_from_native(
+            self._management_call(
+                "reconcile_weight_revision", *self._identity_args(identity)
+            )
+        )
+
+    def delete_weight_revision(
+        self, identity: WeightRevisionIdentity, expected_metadata_generation: int
+    ) -> WeightRevisionMetadata:
+        return metadata_from_native(
+            self._management_call(
+                "delete_weight_revision",
+                *self._identity_args(identity),
+                expected_metadata_generation,
+            )
+        )
+
     def get_into_ranges(
         self,
         addresses: Sequence[int],
@@ -137,6 +310,35 @@ class StoreBackend:
         if type(result) is not int:
             raise WeightStoreError(f"{method_name} returned an invalid status")
         return result
+
+    def _management_call(self, method_name: str, *args: object) -> object:
+        result = self._call(method_name, *args)
+        if not isinstance(result, tuple) or len(result) != 3:
+            raise WeightStoreError(
+                f"{method_name} returned an invalid management result"
+            )
+        value, domain_error, transport_error = result
+        if type(domain_error) is not int or type(transport_error) is not int:
+            raise WeightStoreError(f"{method_name} returned invalid error codes")
+        if transport_error:
+            raise WeightManagementTransportError(transport_error)
+        if domain_error:
+            raise WeightManagementError(WeightManagementErrorCode(domain_error))
+        if value is None:
+            raise WeightStoreError(f"{method_name} returned no value")
+        return value
+
+    @staticmethod
+    def _identity_args(identity: WeightRevisionIdentity) -> tuple[object, ...]:
+        if not isinstance(identity, WeightRevisionIdentity):
+            raise WeightStoreError("identity must be a WeightRevisionIdentity")
+        return (
+            identity.tenant_id,
+            identity.namespace,
+            identity.resource_id,
+            identity.revision,
+            identity.weight_generation,
+        )
 
     def _call(self, method_name: str, *args: object, **kwargs: object) -> object:
         method = self._required_method(method_name)
