@@ -114,6 +114,35 @@ TEST(WeightCatalogTest, CommitUsesCasAndIsRetryableAfterResponseLoss) {
     auto retry_result = catalog.Publish(*response_lost_retry);
     ASSERT_TRUE(retry_result.has_value());
     EXPECT_EQ(*published, *retry_result);
+
+    auto unrelated_generation = request;
+    unrelated_generation.expected_metadata_generation = 99;
+    auto wrong_retry =
+        catalog.PrepareCommitImport(unrelated_generation, 301);
+    ASSERT_FALSE(wrong_retry.has_value());
+    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, wrong_retry.error());
+}
+
+TEST(WeightCatalogTest, AbortRetryRequiresAdjacentGeneration) {
+    WeightCatalog catalog;
+    auto importing = PublishBegin(catalog, BeginRequest());
+    const AbortWeightImportRequest request{
+        .identity = importing.identity,
+        .expected_metadata_generation = importing.metadata_generation,
+    };
+    auto candidate = catalog.PrepareAbortImport(request, 200);
+    ASSERT_TRUE(candidate.has_value());
+    ASSERT_TRUE(catalog.Publish(*candidate).has_value());
+
+    auto retry = catalog.PrepareAbortImport(request, 201);
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_TRUE(retry->no_op);
+
+    auto unrelated_generation = request;
+    unrelated_generation.expected_metadata_generation = 99;
+    auto rejected = catalog.PrepareAbortImport(unrelated_generation, 202);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, rejected.error());
 }
 
 TEST(WeightCatalogTest, LookupAndPaginationAreExactAndDeterministic) {
@@ -195,6 +224,17 @@ TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
     auto operation = catalog.Publish(*first);
     ASSERT_TRUE(operation.has_value());
     EXPECT_EQ(WeightOperationState::EVICTING, operation->operation);
+
+    auto unrelated_generation = catalog.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = 99,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        301);
+    ASSERT_FALSE(unrelated_generation.has_value());
+    EXPECT_EQ(WeightCatalogError::STALE_GENERATION,
+              unrelated_generation.error());
 
     auto conflicting = catalog.PrepareStartOperation(
         StartWeightResidencyOperationRequest{

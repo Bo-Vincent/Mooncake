@@ -200,6 +200,10 @@ TEST_F(OpLogApplierTest, ReplaysWeightOperationStartAndCompletion) {
         .fenced_metadata_generation = 2,
         .started_at_ms = 200,
         .updated_at_ms = 200,
+        .processed_members = 0,
+        .total_members = 2,
+        .cursor = {},
+        .message = {},
     };
     ASSERT_TRUE(applier_->ApplyOpLogEntry(MakeEntry(
         2, OpType::WEIGHT_METADATA_UPSERT, key,
