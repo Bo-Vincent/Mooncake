@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from threading import Event
+from typing import cast
 
 import pytest
 
@@ -55,7 +56,13 @@ class ManagedInMemoryStore(InMemoryStore):
 
     @staticmethod
     def _identity(args: tuple[object, ...]) -> WeightRevisionIdentity:
-        return WeightRevisionIdentity(*args[:5])
+        return WeightRevisionIdentity(
+            tenant_id=cast(str, args[0]),
+            namespace=cast(str, args[1]),
+            resource_id=cast(str, args[2]),
+            revision=cast(str, args[3]),
+            weight_generation=cast(int, args[4]),
+        )
 
     def begin_weight_import(self, *args):
         identity = self._identity(args)
