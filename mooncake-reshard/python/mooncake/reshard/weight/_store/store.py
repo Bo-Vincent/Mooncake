@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Callable, Optional
+from threading import Event, Lock, Thread
+from typing import Callable, Literal, Optional
 from uuid import uuid4
 
 from ..manifest import (
@@ -16,6 +17,7 @@ from ..management import (
     WeightAvailabilityState,
     WeightManifestReference,
     WeightRevisionIdentity,
+    WeightRevisionLease,
     WeightRevisionMetadata,
     WeightRevisionPage,
     WeightRevisionView,
@@ -75,6 +77,72 @@ def _payload_summary(manifest: StoredWeightManifest) -> tuple[tuple[str, ...], i
             fragment.object_offset + fragment.nbytes,
         )
     return tuple(sorted(object_sizes)), sum(object_sizes.values())
+
+
+class _RevisionLeaseGuard:
+    def __init__(
+        self,
+        backend: StoreBackend,
+        lease: WeightRevisionLease,
+        ttl_ms: int,
+    ) -> None:
+        self._backend = backend
+        self._lease = lease
+        self._ttl_ms = ttl_ms
+        self._stop = Event()
+        self._error_lock = Lock()
+        self._renewal_error: Optional[Exception] = None
+        self._thread = Thread(
+            target=self._renew_loop,
+            name=f"weight-lease-{lease.lease_id}",
+            daemon=True,
+        )
+
+    def __enter__(self) -> _RevisionLeaseGuard:
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> Literal[False]:
+        self._stop.set()
+        self._thread.join()
+        renewal_error = self._get_renewal_error()
+        release_error: Optional[Exception] = None
+        try:
+            self._backend.release_weight_revision_lease(
+                tenant_id=self._lease.identity.tenant_id,
+                lease_id=self._lease.lease_id,
+            )
+        except Exception as error:
+            release_error = error
+        if exc_type is None:
+            if renewal_error is not None:
+                raise renewal_error
+            if release_error is not None:
+                raise release_error
+        return False
+
+    def raise_if_failed(self) -> None:
+        error = self._get_renewal_error()
+        if error is not None:
+            raise error
+
+    def _get_renewal_error(self) -> Optional[Exception]:
+        with self._error_lock:
+            return self._renewal_error
+
+    def _renew_loop(self) -> None:
+        interval_seconds = max(0.001, min(self._ttl_ms / 3000, 30.0))
+        while not self._stop.wait(interval_seconds):
+            try:
+                self._backend.renew_weight_revision_lease(
+                    tenant_id=self._lease.identity.tenant_id,
+                    lease_id=self._lease.lease_id,
+                    ttl_ms=self._ttl_ms,
+                )
+            except Exception as error:
+                with self._error_lock:
+                    self._renewal_error = error
+                return
 
 
 class WeightStore:
@@ -302,11 +370,12 @@ class WeightStore:
             holder=holder or f"reshard-{uuid4().hex}",
             ttl_ms=lease_ttl_ms,
         )
-        try:
+        with _RevisionLeaseGuard(self.store, lease, lease_ttl_ms) as lease_guard:
             manifest = self._load.load_manifest(view.metadata.manifest.manifest_key)
             self._verify_managed_manifest(view.metadata, manifest)
             plan = self.plan_load(manifest, target_placement, target_bindings)
             for binding in target_bindings:
+                lease_guard.raise_if_failed()
                 if target_allocation_guards is None:
                     self.load(plan, target_placement, binding)
                 else:
@@ -316,12 +385,8 @@ class WeightStore:
                         binding,
                         target_allocation_guards=target_allocation_guards,
                     )
+                lease_guard.raise_if_failed()
             return manifest
-        finally:
-            self.store.release_weight_revision_lease(
-                tenant_id=lease.identity.tenant_id,
-                lease_id=lease.lease_id,
-            )
 
     def plan_load(
         self,
