@@ -420,6 +420,7 @@ target_link_libraries(
           mooncake_common
           Mooncake::zstd
           Mooncake::xxhash
+          OpenSSL::Crypto
           asio_shared
           yalantinglibs::yalantinglibs)
 if(KV_EVENTS_ZMQ_FOUND)
@@ -520,6 +521,7 @@ target_link_libraries(
           JsonCpp::JsonCpp
           yaml-cpp
           Mooncake::xxhash
+          OpenSSL::Crypto
           numa)
 if(KV_EVENTS_ZMQ_FOUND)
   target_link_libraries(mooncake_store_master PRIVATE Mooncake::libzmq)
@@ -551,7 +553,8 @@ target_link_libraries(
          asio_shared
          transfer_engine
          yalantinglibs::yalantinglibs
-  PRIVATE gflags::gflags JsonCpp::JsonCpp yaml-cpp Mooncake::xxhash numa)
+  PRIVATE gflags::gflags JsonCpp::JsonCpp yaml-cpp Mooncake::xxhash
+          OpenSSL::Crypto numa)
 if(KV_EVENTS_ZMQ_FOUND)
   target_link_libraries(mooncake_store PRIVATE Mooncake::libzmq)
 endif()

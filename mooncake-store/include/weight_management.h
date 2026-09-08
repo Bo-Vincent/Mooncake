@@ -215,6 +215,10 @@ struct DeleteWeightRevisionRequest {
 };
 YLT_REFL(DeleteWeightRevisionRequest, identity, expected_metadata_generation);
 
+std::string ComputeWeightPayloadKeysSha256(
+    const std::vector<std::string>& payload_keys);
+std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity);
+
 class WeightValidationResult {
    public:
     static WeightValidationResult Success() { return WeightValidationResult(); }

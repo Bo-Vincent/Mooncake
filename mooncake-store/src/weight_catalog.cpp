@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <charconv>
 #include <limits>
+#include <memory>
+#include <sstream>
 #include <string_view>
+
+#include <openssl/evp.h>
 
 namespace mooncake {
 namespace {
@@ -25,7 +29,76 @@ bool SameManifest(const WeightRevisionMetadata& metadata,
     return metadata.manifest == manifest;
 }
 
+std::string Sha256Hex(const std::vector<std::string_view>& chunks) {
+    using Context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    Context context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!context ||
+        EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1) {
+        return {};
+    }
+    for (const auto chunk : chunks) {
+        if (EVP_DigestUpdate(context.get(), chunk.data(), chunk.size()) != 1) {
+            return {};
+        }
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_size = 0;
+    if (EVP_DigestFinal_ex(context.get(), digest, &digest_size) != 1 ||
+        digest_size != 32) {
+        return {};
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string encoded(digest_size * 2, '0');
+    for (unsigned int i = 0; i < digest_size; ++i) {
+        encoded[2 * i] = kHex[digest[i] >> 4];
+        encoded[2 * i + 1] = kHex[digest[i] & 0x0f];
+    }
+    return encoded;
+}
+
+void AppendLengthPrefixed(std::vector<std::string>* storage,
+                          std::vector<std::string_view>* chunks,
+                          std::string_view value) {
+    storage->push_back(std::to_string(value.size()));
+    chunks->push_back(storage->back());
+    chunks->push_back(":");
+    chunks->push_back(value);
+    chunks->push_back("\n");
+}
+
 }  // namespace
+
+std::string ComputeWeightPayloadKeysSha256(
+    const std::vector<std::string>& payload_keys) {
+    auto sorted_keys = payload_keys;
+    std::sort(sorted_keys.begin(), sorted_keys.end());
+    std::vector<std::string> lengths;
+    lengths.reserve(sorted_keys.size());
+    std::vector<std::string_view> chunks;
+    chunks.reserve(sorted_keys.size() * 4);
+    for (const auto& key : sorted_keys) {
+        AppendLengthPrefixed(&lengths, &chunks, key);
+    }
+    return Sha256Hex(chunks);
+}
+
+std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity) {
+    if (!ValidateWeightRevisionIdentity(identity).ok()) {
+        return {};
+    }
+    std::vector<std::string> lengths;
+    lengths.reserve(5);
+    std::vector<std::string_view> chunks;
+    chunks.reserve(20);
+    AppendLengthPrefixed(&lengths, &chunks, identity.tenant_id);
+    AppendLengthPrefixed(&lengths, &chunks, identity.name_space);
+    AppendLengthPrefixed(&lengths, &chunks, identity.resource_id);
+    AppendLengthPrefixed(&lengths, &chunks, identity.revision);
+    const auto generation = std::to_string(identity.weight_generation);
+    AppendLengthPrefixed(&lengths, &chunks, generation);
+    const auto digest = Sha256Hex(chunks);
+    return digest.empty() ? std::string() : "weight:" + digest;
+}
 
 WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareBeginImport(
     const BeginWeightImportRequest& request, uint64_t now_ms) const {

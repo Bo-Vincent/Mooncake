@@ -1726,6 +1726,177 @@ std::shared_ptr<Lease> MasterService::RegisterGroupMember(
     return it->second.lease;
 }
 
+WeightCatalog::Result<WeightRevisionMetadata> MasterService::BeginWeightImport(
+    const BeginWeightImportRequest& request) {
+    auto normalized = request;
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty() ||
+        (!request.payload_group_id.empty() &&
+         request.payload_group_id != canonical_group)) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+    normalized.payload_group_id = canonical_group;
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_catalog_.PrepareBeginImport(normalized, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return weight_catalog_.Publish(*mutation);
+}
+
+WeightCatalog::Result<WeightRevisionMetadata> MasterService::CommitWeightImport(
+    const CommitWeightImportRequest& request) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty() ||
+        request.manifest.payload_group_id != canonical_group) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    auto mutation = weight_catalog_.PrepareCommitImport(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    if (mutation->no_op) {
+        return weight_catalog_.Publish(*mutation);
+    }
+    auto validation = ValidateWeightGroupForCommit(request);
+    if (!validation) {
+        return tl::make_unexpected(validation.error());
+    }
+
+    mutation = weight_catalog_.PrepareCommitImport(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return weight_catalog_.Publish(*mutation);
+}
+
+WeightCatalog::Result<WeightRevisionMetadata> MasterService::AbortWeightImport(
+    const AbortWeightImportRequest& request) {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_catalog_.PrepareAbortImport(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return weight_catalog_.Publish(*mutation);
+}
+
+WeightCatalog::Result<WeightRevisionView> MasterService::GetWeightRevision(
+    const GetWeightRevisionRequest& request) const {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    return weight_catalog_.Get(request.identity, now_ms);
+}
+
+WeightCatalog::Result<ListWeightRevisionsResponse>
+MasterService::ListWeightRevisions(
+    const ListWeightRevisionsRequest& request) const {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    return weight_catalog_.List(request, now_ms);
+}
+
+WeightCatalog::Result<std::vector<MasterService::WeightGroupMemberSnapshot>>
+MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
+                                   const std::string& payload_group_id) const {
+    const TenantId tenant_id(identity.tenant_id);
+    auto member_keys = GetGroupMemberKeys(tenant_id, payload_group_id);
+    if (member_keys.empty()) {
+        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+    }
+    std::sort(member_keys.begin(), member_keys.end());
+
+    std::vector<WeightGroupMemberSnapshot> members;
+    members.reserve(member_keys.size());
+    for (const auto& key : member_keys) {
+        MetadataAccessorRO accessor(
+            this, MakeObjectIdentity(key, TenantId(identity.tenant_id)));
+        if (!accessor.Exists()) {
+            return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        }
+        const auto& metadata = accessor.Get();
+        if (metadata.group_id != payload_group_id) {
+            return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        }
+        members.push_back(WeightGroupMemberSnapshot{
+            .key = key,
+            .size = metadata.size,
+            .data_type = metadata.data_type,
+            .readable = HasReadableReplica(metadata),
+        });
+    }
+    return members;
+}
+
+WeightCatalog::Result<void> MasterService::ValidateWeightGroupForCommit(
+    const CommitWeightImportRequest& request) const {
+    const auto expected_manifest_key =
+        "weights/" + request.identity.name_space + "/" +
+        request.identity.resource_id + "/" + request.identity.revision + "/" +
+        std::to_string(request.identity.weight_generation) + "/manifest";
+    if (request.manifest.manifest_key != expected_manifest_key) {
+        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+    }
+
+    auto members = SnapshotWeightGroup(request.identity,
+                                       request.manifest.payload_group_id);
+    if (!members) {
+        return tl::make_unexpected(members.error());
+    }
+    if (members->size() != request.manifest.payload_count + 1) {
+        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+    }
+
+    bool found_manifest = false;
+    uint64_t logical_bytes = 0;
+    std::vector<std::string> payload_keys;
+    payload_keys.reserve(request.manifest.payload_count);
+    for (const auto& member : *members) {
+        if (!member.readable) {
+            return tl::make_unexpected(WeightCatalogError::NOT_READY);
+        }
+        if (member.key == request.manifest.manifest_key) {
+            if (found_manifest ||
+                member.data_type != ObjectDataType::METADATA) {
+                return tl::make_unexpected(WeightCatalogError::CONFLICT);
+            }
+            found_manifest = true;
+            continue;
+        }
+        if (member.data_type != ObjectDataType::WEIGHT ||
+            member.size >
+                std::numeric_limits<uint64_t>::max() - logical_bytes) {
+            return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        }
+        logical_bytes += member.size;
+        payload_keys.push_back(member.key);
+    }
+    if (!found_manifest) {
+        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+    }
+    if (logical_bytes != request.manifest.logical_bytes ||
+        payload_keys.size() != request.manifest.payload_count ||
+        ComputeWeightPayloadKeysSha256(payload_keys) !=
+            request.manifest.payload_keys_sha256) {
+        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+    }
+    return {};
+}
+
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,
                                           const std::string& key,
                                           const std::string& group_id) {

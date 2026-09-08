@@ -160,6 +160,19 @@ TEST(WeightManagementContractTest, RoundTripsWireEnumsAndMetadata) {
     EXPECT_EQ(metadata, decoded);
 }
 
+TEST(WeightManagementContractTest, CanonicalDigestsAreStableAndUnambiguous) {
+    EXPECT_EQ(
+        "ff2c110b8f18291ea676be2af036320944751c4b3e6a65b3c1153721c61c2b26",
+        ComputeWeightPayloadKeysSha256({"p2", "p1"}));
+
+    auto identity = ValidIdentity();
+    identity.tenant_id = "default";
+    EXPECT_EQ(
+        "weight:5dbbea14aa75c98a5b3fbb576a9c612d64fc6bc8f490f24a7ff0"
+        "17fcfe321b7d",
+        MakeWeightPayloadGroupId(identity));
+}
+
 TEST(WeightManagementContractTest, MetadataDoesNotDuplicateManifestChildren) {
     static_assert(!HasTensorsField<WeightRevisionMetadata>);
     static_assert(!HasRuntimeEndpointField<WeightRevisionMetadata>);
