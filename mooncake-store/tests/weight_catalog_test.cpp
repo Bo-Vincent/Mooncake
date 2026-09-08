@@ -207,6 +207,37 @@ TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
     EXPECT_EQ(WeightCatalogError::BUSY, conflicting.error());
 }
 
+TEST(WeightCatalogTest, UnchangedOperationProgressIsIdempotent) {
+    WeightCatalog catalog;
+    auto ready = PublishReady(catalog);
+    auto started = catalog.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        300);
+    ASSERT_TRUE(started.has_value());
+    auto operation = catalog.Publish(*started);
+    ASSERT_TRUE(operation.has_value());
+
+    auto progress = catalog.PrepareUpdateOperationProgress(
+        operation->operation_id, 0, 4, {}, 400);
+    ASSERT_TRUE(progress.has_value());
+    EXPECT_FALSE(progress->no_op);
+    auto published = catalog.Publish(*progress);
+    ASSERT_TRUE(published.has_value());
+    EXPECT_EQ(400, published->updated_at_ms);
+
+    auto retry = catalog.PrepareUpdateOperationProgress(
+        operation->operation_id, 0, 4, {}, 500);
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_TRUE(retry->no_op);
+    auto retried = catalog.Publish(*retry);
+    ASSERT_TRUE(retried.has_value());
+    EXPECT_EQ(400, retried->updated_at_ms);
+}
+
 TEST(WeightCatalogTest, ActiveLeaseBlocksResidencyAndDelete) {
     WeightCatalog catalog;
     auto ready = PublishReady(catalog);

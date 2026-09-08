@@ -723,22 +723,39 @@ WeightCatalog::PrepareUpdateOperationProgress(
         return tl::make_unexpected(WeightCatalogError::CONFLICT);
     }
     auto next_operation = operation->second;
+    const bool unchanged =
+        next_operation.processed_members == processed_members &&
+        next_operation.total_members == total_members &&
+        next_operation.cursor == cursor;
+    if (unchanged) {
+        return WeightOperationMutation{
+            .metadata =
+                WeightCatalogMutation{
+                    .identity = revision->first,
+                    .previous = revision->second,
+                    .next = revision->second,
+                    .no_op = true,
+                },
+            .previous = operation->second,
+            .next = operation->second,
+            .no_op = true,
+        };
+    }
     next_operation.processed_members = processed_members;
     next_operation.total_members = total_members;
     next_operation.cursor = std::move(cursor);
     next_operation.updated_at_ms = now_ms;
-    const bool unchanged = next_operation == operation->second;
     return WeightOperationMutation{
         .metadata =
             WeightCatalogMutation{
                 .identity = revision->first,
                 .previous = revision->second,
                 .next = revision->second,
-                .no_op = unchanged,
+                .no_op = false,
             },
         .previous = operation->second,
         .next = std::move(next_operation),
-        .no_op = unchanged,
+        .no_op = false,
     };
 }
 

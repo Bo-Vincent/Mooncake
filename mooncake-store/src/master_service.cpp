@@ -2076,6 +2076,97 @@ MasterService::DeleteWeightRevision(
         ReconcileWeightRevisionRequest{.identity = request.identity});
 }
 
+size_t MasterService::RunWeightReconciliationForTesting(uint64_t now_ms,
+                                                        size_t limit) {
+    return ReconcileWeightCatalogOnce(now_ms, limit);
+}
+
+bool MasterService::DropWeightGroupMemberForTesting(
+    const WeightRevisionIdentity& identity, const std::string& key) {
+    return RemoveObject(key, TenantId(identity.tenant_id), true, true)
+        .has_value();
+}
+
+size_t MasterService::ReconcileWeightCatalogOnce(uint64_t now_ms,
+                                                 size_t limit) {
+    if (limit == 0) {
+        return 0;
+    }
+    constexpr uint64_t kImportAbandonTimeoutMs = 5 * 60 * 1000;
+    size_t actions = 0;
+
+    for (const auto& mutation : weight_catalog_.PrepareExpireLeases(now_ms)) {
+        if (actions == limit) {
+            break;
+        }
+        if (PersistAndPublishWeightLeaseMutation(mutation)) {
+            ++actions;
+        } else {
+            MasterMetricManager::instance()
+                .inc_weight_reconciliation_failures();
+        }
+    }
+
+    const auto snapshot = weight_catalog_.ExportSnapshot();
+    const size_t revision_count = snapshot.metadata.size();
+    const size_t start = revision_count == 0
+                             ? 0
+                             : weight_reconciliation_offset_.fetch_add(
+                                   std::max<size_t>(limit, 1)) %
+                                   revision_count;
+    for (size_t examined = 0;
+         examined < revision_count && actions < limit; ++examined) {
+        const auto& metadata =
+            snapshot.metadata[(start + examined) % revision_count];
+        if (metadata.availability == WeightAvailabilityState::DELETED) {
+            continue;
+        }
+
+        if (metadata.availability == WeightAvailabilityState::IMPORTING) {
+            if (now_ms < metadata.updated_at_ms ||
+                now_ms - metadata.updated_at_ms < kImportAbandonTimeoutMs) {
+                continue;
+            }
+            auto mutation = weight_catalog_.PrepareAbortImport(
+                AbortWeightImportRequest{
+                    .identity = metadata.identity,
+                    .expected_metadata_generation =
+                        metadata.metadata_generation,
+                },
+                now_ms);
+            if (!mutation || !PersistAndPublishWeightMutation(*mutation)) {
+                MasterMetricManager::instance()
+                    .inc_weight_reconciliation_failures();
+                continue;
+            }
+            ++actions;
+            continue;
+        }
+
+        WeightCatalog::Result<WeightRevisionMetadata> reconciled =
+            metadata.availability == WeightAvailabilityState::DELETING
+                ? DeleteWeightRevision(DeleteWeightRevisionRequest{
+                      .identity = metadata.identity,
+                      .expected_metadata_generation =
+                          metadata.metadata_generation,
+                  })
+                : ReconcileWeightRevision(
+                      ReconcileWeightRevisionRequest{
+                          .identity = metadata.identity,
+                      });
+        if (reconciled) {
+            ++actions;
+        } else if (reconciled.error() != WeightCatalogError::STALE_GENERATION) {
+            MasterMetricManager::instance()
+                .inc_weight_reconciliation_failures();
+        }
+    }
+
+    MasterMetricManager::instance().project_weight_catalog(
+        weight_catalog_.ExportSnapshot(), now_ms);
+    return actions;
+}
+
 WeightCatalog::Result<std::vector<MasterService::WeightGroupMemberSnapshot>>
 MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
                                    const std::string& payload_group_id) const {
@@ -3858,6 +3949,12 @@ void MasterService::TaskCleanupThreadFunc() {
         }
         CleanupExpiredSoftPins(std::chrono::system_clock::now());
         CleanupExpiredDynamicReplicationState();
+        shared_lock.unlock();
+        const auto now_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        ReconcileWeightCatalogOnce(now_ms, 32);
     }
     LOG(INFO) << "Task cleanup thread stopped";
 }
