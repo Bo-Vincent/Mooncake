@@ -160,7 +160,7 @@ class StoredWeightManifest(StoredResourceManifest):
         _require_u64(self.weight_generation, "weight_generation")
         if not self.manifest_key.endswith("/manifest"):
             raise ValueError("manifest_key must use the canonical manifest suffix")
-        payload_prefix = f"{self.manifest_key[:-len('/manifest')]}/payload/"
+        payload_prefix = f"{self.manifest_key[: -len('/manifest')]}/payload/"
         if any(
             not fragment.object_key.startswith(payload_prefix)
             for fragment in self.fragments
