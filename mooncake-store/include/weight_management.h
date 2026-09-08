@@ -271,6 +271,34 @@ inline bool IsValidWeightComponent(std::string_view value) {
     return true;
 }
 
+inline std::string EncodeWeightPathSegment(std::string_view value) {
+    constexpr char kHex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (const unsigned char c : value) {
+        const bool safe = (c >= 'a' && c <= 'z') ||
+                          (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+                          c == '.' || c == '~';
+        if (safe) {
+            encoded.push_back(static_cast<char>(c));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(kHex[c >> 4]);
+            encoded.push_back(kHex[c & 0x0f]);
+        }
+    }
+    return encoded;
+}
+
+inline std::string MakeWeightManifestKey(
+    const WeightRevisionIdentity& identity) {
+    return "weights/" + EncodeWeightPathSegment(identity.name_space) + "/" +
+           EncodeWeightPathSegment(identity.resource_id) + "/" +
+           EncodeWeightPathSegment(identity.revision) + "/" +
+           std::to_string(identity.weight_generation) + "/manifest";
+}
+
 inline bool IsValidSha256(std::string_view digest) {
     if (digest.size() != 64) {
         return false;

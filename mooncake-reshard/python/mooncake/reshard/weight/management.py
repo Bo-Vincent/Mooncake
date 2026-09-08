@@ -110,9 +110,7 @@ class WeightManifestReference:
         _require_u64(self.payload_count, "payload_count", nonzero=True)
         _require_u64(self.logical_bytes, "logical_bytes", nonzero=True)
         unpublished = not (
-            self.manifest_key
-            or self.manifest_sha256
-            or self.payload_keys_sha256
+            self.manifest_key or self.manifest_sha256 or self.payload_keys_sha256
         )
         if unpublished:
             return
@@ -138,7 +136,9 @@ class WeightRevisionMetadata:
             raise ValueError("identity must be a WeightRevisionIdentity")
         if not isinstance(self.manifest, WeightManifestReference):
             raise ValueError("manifest must be a WeightManifestReference")
-        object.__setattr__(self, "availability", WeightAvailabilityState(self.availability))
+        object.__setattr__(
+            self, "availability", WeightAvailabilityState(self.availability)
+        )
         object.__setattr__(self, "residency", WeightResidencyState(self.residency))
         object.__setattr__(self, "operation", WeightOperationState(self.operation))
         _require_u64(self.operation_id, "operation_id")
@@ -239,7 +239,7 @@ class WeightRevisionPage:
 def identity_from_native(value: Any) -> WeightRevisionIdentity:
     return WeightRevisionIdentity(
         tenant_id=value.tenant_id,
-        namespace=value.name_space,
+        namespace=value.namespace,
         resource_id=value.resource_id,
         revision=value.revision,
         weight_generation=value.weight_generation,

@@ -208,6 +208,10 @@ MasterService::MasterService(const MasterServiceConfig& config)
       enable_offload_(config.enable_offload),
       enable_oplog_(config.enable_ha && config.enable_oplog &&
                     config.ha_backend_type == "etcd"),
+      weight_management_mutations_enabled_(
+          !(config.enable_ha && config.enable_oplog &&
+            config.ha_backend_type == "etcd") ||
+          config.weight_management_oplog_capability_confirmed),
       oplog_batch_max_entries_(config.oplog_batch_max_entries),
       cluster_id_(config.cluster_id),
       root_fs_dir_(config.root_fs_dir),
@@ -1928,6 +1932,15 @@ MasterService::ReconcileWeightRevision(
     }
     if (current.operation == WeightOperationState::EVICTING) {
         EvictManagedWeightGroupToCold(current);
+    } else if (current.operation == WeightOperationState::REHYDRATING) {
+        const auto tenant_id = TenantId(current.identity.tenant_id);
+        for (const auto& key : GetGroupMemberKeys(
+                 tenant_id, current.manifest.payload_group_id)) {
+            const auto result = TryPushPromotionQueue(
+                MakeObjectIdentity(key, tenant_id), false, true);
+            VLOG(1) << "weight_rehydrate_promotion key=" << key
+                    << " result=" << static_cast<int>(result);
+        }
     }
 
     auto members = SnapshotWeightGroup(request.identity,
@@ -2225,10 +2238,7 @@ MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
 
 WeightCatalog::Result<void> MasterService::ValidateWeightGroupForCommit(
     const CommitWeightImportRequest& request) const {
-    const auto expected_manifest_key =
-        "weights/" + request.identity.name_space + "/" +
-        request.identity.resource_id + "/" + request.identity.revision + "/" +
-        std::to_string(request.identity.weight_generation) + "/manifest";
+    const auto expected_manifest_key = MakeWeightManifestKey(request.identity);
     if (request.manifest.manifest_key != expected_manifest_key) {
         return tl::make_unexpected(WeightCatalogError::CONFLICT);
     }
@@ -2281,6 +2291,9 @@ WeightCatalog::Result<void> MasterService::ValidateWeightGroupForCommit(
 WeightCatalog::Result<WeightRevisionMetadata>
 MasterService::PersistAndPublishWeightMutation(
     const WeightCatalogMutation& mutation) {
+    if (!mutation.no_op && !weight_management_mutations_enabled_) {
+        return tl::make_unexpected(WeightCatalogError::DURABILITY_FAILED);
+    }
     if (mutation.no_op || !enable_oplog_) {
         return weight_catalog_.Publish(mutation);
     }
@@ -2354,6 +2367,9 @@ MasterService::PersistAndPublishWeightMutation(
 WeightCatalog::Result<WeightResidencyOperation>
 MasterService::PersistAndPublishWeightOperationMutation(
     const WeightOperationMutation& mutation) {
+    if (!mutation.no_op && !weight_management_mutations_enabled_) {
+        return tl::make_unexpected(WeightCatalogError::DURABILITY_FAILED);
+    }
     if (mutation.no_op || !enable_oplog_) {
         return weight_catalog_.Publish(mutation);
     }
@@ -2413,6 +2429,9 @@ MasterService::PersistAndPublishWeightOperationMutation(
 WeightCatalog::Result<WeightRevisionLease>
 MasterService::PersistAndPublishWeightLeaseMutation(
     const WeightLeaseMutation& mutation) {
+    if (!mutation.no_op && !weight_management_mutations_enabled_) {
+        return tl::make_unexpected(WeightCatalogError::DURABILITY_FAILED);
+    }
     if (mutation.no_op || !enable_oplog_) {
         return weight_catalog_.Publish(mutation);
     }
@@ -10431,8 +10450,8 @@ tl::expected<UUID, ErrorCode> MasterService::SubmitDynamicReplicaCopyTask(
 }
 
 MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
-    const ObjectIdentity& object_id, bool record_candidate) {
-    if (!promotion_on_hit_ || !promotion_sketch_) {
+    const ObjectIdentity& object_id, bool record_candidate, bool force) {
+    if (!force && (!promotion_on_hit_ || !promotion_sketch_)) {
         return PromotionQueueResult::kDisabled;
     }
     const auto& key = object_id.user_key;
@@ -10443,8 +10462,10 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
     // is clamped into [1, 255] at config parse time (see master.cpp), so
     // direct comparison is well-defined and threshold=0 (which would
     // bypass the gate entirely since freq is uint8_t) cannot reach here.
-    const uint8_t freq = promotion_sketch_->increment(admission_key);
-    if (freq < promotion_admission_threshold_) {
+    const uint8_t freq =
+        force ? std::numeric_limits<uint8_t>::max()
+              : promotion_sketch_->increment(admission_key);
+    if (!force && freq < promotion_admission_threshold_) {
         MasterMetricManager::instance().inc_promotion_rejected_frequency();
         return PromotionQueueResult::kFrequencyRejected;
     }
@@ -10455,7 +10476,7 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
     const double used_ratio = segment_manager_.GetMemoryUsage().used_ratio();
     if (used_ratio >= eviction_high_watermark_ratio_) {
         MasterMetricManager::instance().inc_promotion_rejected_watermark();
-        if (record_candidate) {
+        if (record_candidate && !force) {
             MetadataAccessorRW accessor(this, object_id);
             if (accessor.Exists()) {
                 RecordOrUpdateCandidate(accessor.GetTenantState(), key, freq,
@@ -10471,6 +10492,8 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
     // its RO accessor.
     MetadataAccessorRW accessor(this, object_id);
     if (!accessor.Exists()) {
+        VLOG(1) << "promotion_rejected key=" << key
+                << " reason=not_found force=" << force;
         return PromotionQueueResult::kNotFound;
     }
     auto& metadata = accessor.Get();
@@ -10480,6 +10503,8 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
     // processing_keys. Promotion must not establish a second owner.
     if (accessor.InProcessing()) {
         EraseCandidate(tenant_state, key);
+        VLOG(1) << "promotion_rejected key=" << key
+                << " reason=primary_write_in_flight force=" << force;
         return PromotionQueueResult::kAlreadyInFlight;
     }
 
@@ -10494,6 +10519,8 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
             tenant_state.promotion_tasks.at(key).holder_id, object_id.tenant_id,
             key);
         EraseCandidate(tenant_state, key);
+        VLOG(1) << "promotion_rejected key=" << key
+                << " reason=promotion_in_flight force=" << force;
         return PromotionQueueResult::kAlreadyInFlight;
     }
     if (metadata.HasReplica(&Replica::fn_is_memory_replica)) {
@@ -10522,7 +10549,7 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
     if (promotion_in_flight_.load(std::memory_order_relaxed) >=
         promotion_queue_limit_) {
         MasterMetricManager::instance().inc_promotion_rejected_cap();
-        if (record_candidate) {
+        if (record_candidate && !force) {
             RecordOrUpdateCandidate(tenant_state, key, freq,
                                     PromotionCandidateReason::kQueueCap,
                                     ErrorCode::OK);
@@ -10550,7 +10577,7 @@ MasterService::PromotionQueueResult MasterService::TryPushPromotionQueue(
             EraseCandidate(tenant_state, key);
             return PromotionQueueResult::kNoLocalDiskSource;
         }
-        if (record_candidate) {
+        if (record_candidate && !force) {
             RecordOrUpdateCandidate(tenant_state, key, freq,
                                     PromotionCandidateReason::kPushFailed,
                                     push_result.error());

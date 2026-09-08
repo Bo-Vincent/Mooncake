@@ -2063,10 +2063,6 @@ PYBIND11_MODULE(store, m) {
                                [](const WeightRevisionIdentity &value) {
                                    return value.name_space;
                                })
-        .def_property_readonly(
-            "name_space", [](const WeightRevisionIdentity &value) {
-                return value.name_space;
-            })
         .def_readonly("resource_id", &WeightRevisionIdentity::resource_id)
         .def_readonly("revision", &WeightRevisionIdentity::revision)
         .def_readonly("weight_generation",

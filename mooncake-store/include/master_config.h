@@ -126,6 +126,7 @@ struct MasterConfig {
     bool enable_oplog = false;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_management_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     uint32_t batch_oplog_retry_timeout_sec = 180;
@@ -271,6 +272,7 @@ class MasterServiceSupervisorConfig {
     bool enable_oplog = false;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_management_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     uint32_t batch_oplog_retry_timeout_sec = 180;
@@ -414,6 +416,8 @@ class MasterServiceSupervisorConfig {
         enable_oplog = config.enable_oplog;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_management_oplog_capability_confirmed =
+            config.weight_management_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         batch_oplog_retry_timeout_sec = config.batch_oplog_retry_timeout_sec;
@@ -604,6 +608,7 @@ class WrappedMasterServiceConfig {
     bool enable_oplog = false;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_management_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     std::string cluster_id = DEFAULT_CLUSTER_ID;
@@ -705,6 +710,8 @@ class WrappedMasterServiceConfig {
         enable_oplog = config.enable_oplog;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_management_oplog_capability_confirmed =
+            config.weight_management_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         cluster_id = config.cluster_id;
@@ -832,6 +839,8 @@ class WrappedMasterServiceConfig {
         enable_oplog = config.enable_oplog;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_management_oplog_capability_confirmed =
+            config.weight_management_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         cluster_id = config.cluster_id;
@@ -904,6 +913,7 @@ class MasterServiceConfigBuilder {
     bool enable_oplog_ = false;
     bool enable_oplog_snapshot_ = false;
     uint64_t snapshot_chunk_object_count_ = 1000000;
+    bool weight_management_oplog_capability_confirmed_ = false;
     int oplog_poll_interval_ms_ = 1000;
     uint32_t oplog_batch_max_entries_ = 1024;
     std::string cluster_id_ = DEFAULT_CLUSTER_ID;
@@ -1060,6 +1070,12 @@ class MasterServiceConfigBuilder {
     MasterServiceConfigBuilder& set_snapshot_chunk_object_count(
         uint64_t count) {
         snapshot_chunk_object_count_ = count;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder&
+    set_weight_management_oplog_capability_confirmed(bool confirmed) {
+        weight_management_oplog_capability_confirmed_ = confirmed;
         return *this;
     }
 
@@ -1319,6 +1335,7 @@ class MasterServiceConfig {
     bool enable_oplog = false;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_management_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     std::string cluster_id = DEFAULT_CLUSTER_ID;
@@ -1414,6 +1431,8 @@ class MasterServiceConfig {
         enable_oplog = config.enable_oplog;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_management_oplog_capability_confirmed =
+            config.weight_management_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         cluster_id = config.cluster_id;
@@ -1493,6 +1512,8 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.enable_oplog = enable_oplog_;
     config.enable_oplog_snapshot = enable_oplog_snapshot_;
     config.snapshot_chunk_object_count = snapshot_chunk_object_count_;
+    config.weight_management_oplog_capability_confirmed =
+        weight_management_oplog_capability_confirmed_;
     config.oplog_poll_interval_ms = oplog_poll_interval_ms_;
     config.oplog_batch_max_entries = oplog_batch_max_entries_;
     config.cluster_id = cluster_id_;

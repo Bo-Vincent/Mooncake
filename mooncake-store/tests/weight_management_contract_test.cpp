@@ -173,6 +173,15 @@ TEST(WeightManagementContractTest, CanonicalDigestsAreStableAndUnambiguous) {
         MakeWeightPayloadGroupId(identity));
 }
 
+TEST(WeightManagementContractTest, ManifestKeyUsesCanonicalUrlEncoding) {
+    auto identity = ValidIdentity();
+    identity.name_space = "prod east";
+    identity.resource_id = "family/model";
+    identity.revision = "v1%candidate";
+    EXPECT_EQ("weights/prod%20east/family%2Fmodel/v1%25candidate/7/manifest",
+              MakeWeightManifestKey(identity));
+}
+
 TEST(WeightManagementContractTest, MetadataDoesNotDuplicateManifestChildren) {
     static_assert(!HasTensorsField<WeightRevisionMetadata>);
     static_assert(!HasRuntimeEndpointField<WeightRevisionMetadata>);

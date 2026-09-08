@@ -66,7 +66,7 @@ def test_native_metadata_conversion_preserves_exact_identity() -> None:
     native.identity.__dict__.update(
         {
             "tenant_id": metadata.identity.tenant_id,
-            "name_space": metadata.identity.namespace,
+            "namespace": metadata.identity.namespace,
             "resource_id": metadata.identity.resource_id,
             "revision": metadata.identity.revision,
             "weight_generation": metadata.identity.weight_generation,
