@@ -2451,6 +2451,89 @@ TEST_F(MasterServiceHATest, OplogExplicitEnableCreatesWriter) {
                            producer_view));
 }
 
+TEST_F(MasterServiceHATest,
+       WeightMetadataBecomesVisibleOnlyAfterDurableCallback) {
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_cluster_id("weight_metadata_durable_first")
+                      .build();
+    MasterService service(config);
+    auto* writer = InstallGatedWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
+    ASSERT_TRUE(writer->PauseCallbacksAfter(0));
+
+    WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    auto accepted = std::async(std::launch::async, [&] {
+        return service.BeginWeightImport(BeginWeightImportRequest{
+            .identity = identity,
+            .payload_group_id = {},
+            .expected_payload_count = 2,
+            .expected_logical_bytes = 2048,
+        });
+    });
+
+    OpLogBatchStorage storage("weight_metadata_durable_first", *backend);
+    OpLogBatchRecord batch;
+    ReadBatchEventually(storage, 1, batch);
+    ASSERT_EQ(1, batch.entries.size());
+    EXPECT_EQ(OpType::WEIGHT_METADATA_UPSERT, batch.entries.front().op_type);
+    EXPECT_EQ(std::future_status::timeout,
+              accepted.wait_for(std::chrono::milliseconds(20)));
+    EXPECT_FALSE(
+        service
+            .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
+            .has_value());
+
+    ASSERT_TRUE(writer->RunCallbacksThrough(batch.entries.front().sequence_id));
+    auto result = accepted.get();
+    ASSERT_TRUE(result.has_value());
+    auto visible = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = identity});
+    ASSERT_TRUE(visible.has_value());
+    EXPECT_EQ(*result, visible->metadata);
+}
+
+TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_cluster_id("weight_metadata_rejected")
+                      .build();
+    MasterService service(config);
+    auto* writer = InstallRejectingWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
+    writer->RejectCommitsWith(ErrorCode::ETCD_TRANSACTION_FAIL);
+
+    WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    auto rejected = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = identity,
+        .payload_group_id = {},
+        .expected_payload_count = 2,
+        .expected_logical_bytes = 2048,
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightCatalogError::DURABILITY_FAILED, rejected.error());
+    EXPECT_FALSE(
+        service
+            .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
+            .has_value());
+}
+
 TEST_F(MasterServiceHATest, FencedWriterClaimsConfiguredProducerView) {
     constexpr ViewVersionId kProducerView = 7;
     const std::string cluster_id = "fenced_writer_claim";

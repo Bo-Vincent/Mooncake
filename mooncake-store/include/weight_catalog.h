@@ -22,6 +22,7 @@ enum class WeightCatalogError : uint8_t {
     BUSY = 6,
     LEASE_EXPIRED = 7,
     GENERATION_EXHAUSTED = 8,
+    DURABILITY_FAILED = 9,
 };
 
 enum class WeightCatalogMutationKind : uint8_t {

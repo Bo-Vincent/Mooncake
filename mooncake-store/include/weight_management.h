@@ -218,6 +218,9 @@ YLT_REFL(DeleteWeightRevisionRequest, identity, expected_metadata_generation);
 std::string ComputeWeightPayloadKeysSha256(
     const std::vector<std::string>& payload_keys);
 std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity);
+std::string MakeWeightRevisionCatalogKey(
+    const WeightRevisionIdentity& identity);
+std::string MakeWeightLeaseCatalogKey(uint64_t lease_id);
 
 class WeightValidationResult {
    public:

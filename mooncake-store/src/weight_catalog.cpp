@@ -66,6 +66,24 @@ void AppendLengthPrefixed(std::vector<std::string>* storage,
     chunks->push_back("\n");
 }
 
+std::string ComputeWeightIdentitySha256(
+    const WeightRevisionIdentity& identity) {
+    if (!ValidateWeightRevisionIdentity(identity).ok()) {
+        return {};
+    }
+    std::vector<std::string> lengths;
+    lengths.reserve(5);
+    std::vector<std::string_view> chunks;
+    chunks.reserve(20);
+    AppendLengthPrefixed(&lengths, &chunks, identity.tenant_id);
+    AppendLengthPrefixed(&lengths, &chunks, identity.name_space);
+    AppendLengthPrefixed(&lengths, &chunks, identity.resource_id);
+    AppendLengthPrefixed(&lengths, &chunks, identity.revision);
+    const auto generation = std::to_string(identity.weight_generation);
+    AppendLengthPrefixed(&lengths, &chunks, generation);
+    return Sha256Hex(chunks);
+}
+
 }  // namespace
 
 std::string ComputeWeightPayloadKeysSha256(
@@ -83,21 +101,19 @@ std::string ComputeWeightPayloadKeysSha256(
 }
 
 std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity) {
-    if (!ValidateWeightRevisionIdentity(identity).ok()) {
-        return {};
-    }
-    std::vector<std::string> lengths;
-    lengths.reserve(5);
-    std::vector<std::string_view> chunks;
-    chunks.reserve(20);
-    AppendLengthPrefixed(&lengths, &chunks, identity.tenant_id);
-    AppendLengthPrefixed(&lengths, &chunks, identity.name_space);
-    AppendLengthPrefixed(&lengths, &chunks, identity.resource_id);
-    AppendLengthPrefixed(&lengths, &chunks, identity.revision);
-    const auto generation = std::to_string(identity.weight_generation);
-    AppendLengthPrefixed(&lengths, &chunks, generation);
-    const auto digest = Sha256Hex(chunks);
+    const auto digest = ComputeWeightIdentitySha256(identity);
     return digest.empty() ? std::string() : "weight:" + digest;
+}
+
+std::string MakeWeightRevisionCatalogKey(
+    const WeightRevisionIdentity& identity) {
+    const auto digest = ComputeWeightIdentitySha256(identity);
+    return digest.empty() ? std::string() : "weight-revision:" + digest;
+}
+
+std::string MakeWeightLeaseCatalogKey(uint64_t lease_id) {
+    return lease_id == 0 ? std::string()
+                         : "weight-lease:" + std::to_string(lease_id);
 }
 
 WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareBeginImport(
