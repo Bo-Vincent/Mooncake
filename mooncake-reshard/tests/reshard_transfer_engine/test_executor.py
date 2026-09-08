@@ -110,6 +110,20 @@ def test_resource_neutral_executor_supports_ticket_capable_binding() -> None:
     assert read.endpoint == write.endpoint == "worker-1:12345"
 
 
+def test_submission_executes_multiple_batches_and_closes_its_handle() -> None:
+    engine = TicketEngine()
+    executor = MooncakeTransferEngineExecutor(engine)
+
+    with executor.submission() as submission:
+        read = submission.execute_batch(batch(), TransferDirection.READ)
+        write = submission.execute_batch(batch(), TransferDirection.WRITE)
+
+    assert read.operation_count == write.operation_count == 2
+    assert [call[0] for call in engine.calls] == ["read", "write"]
+    with pytest.raises(TransferEngineError, match="no longer active"):
+        submission.execute_batch(batch(), TransferDirection.READ)
+
+
 def test_transfer_batch_rejects_mismatched_or_invalid_ranges() -> None:
     for values in (
         {"source_addresses": (0x1000,), "target_addresses": (), "sizes": (1,)},

@@ -22,7 +22,7 @@ class _RegistrationEngine(Protocol):
 
 
 class _PendingResourceOwner(Protocol):
-    def _retain_pending_resources(
+    def retain_pending_resources(
         self,
         pending_transfer_id: str,
         *,
@@ -31,7 +31,7 @@ class _PendingResourceOwner(Protocol):
         allocation_tokens: Sequence[AllocationLifetimeToken] = (),
     ) -> None: ...
 
-    def _retain_pending_registration_cleanup(
+    def retain_pending_registration_cleanup(
         self,
         *,
         terminal_state: TerminalTransferState,
@@ -204,7 +204,7 @@ def _handoff_pending_resources(
     lifetime_tokens: Optional[AllocationTokenSet] = None,
 ) -> BaseException:
     allocation_tokens = lifetime_tokens.tokens if lifetime_tokens is not None else ()
-    pending_owner._retain_pending_resources(
+    pending_owner.retain_pending_resources(
         error.pending_transfer_id,
         registrations=registrations,
         resources=resources,
@@ -245,7 +245,7 @@ def _raise_pending_registration_cleanup(
         primary_error,
         body_entered=body_entered,
     )
-    pending_transfer_id = pending_owner._retain_pending_registration_cleanup(
+    pending_transfer_id = pending_owner.retain_pending_registration_cleanup(
         terminal_state=terminal_state,
         registrations=tuple(address for address, _ in failures),
         resources=resources,
@@ -272,6 +272,7 @@ def _quarantine_unknown_registration_cleanup(
     pending_owner: _PendingResourceOwner,
     *,
     label: str,
+    operation: str,
     registrations: Sequence[int],
     error: BaseException,
     primary_error: Optional[BaseException],
@@ -295,7 +296,7 @@ def _quarantine_unknown_registration_cleanup(
     if lifetime_tokens is not None:
         lifetime_tokens.handoff_to_pending()
     detail = (
-        f"{label} unregister_memory outcome is unknown; cleanup is quarantined "
+        f"{label} {operation} outcome is unknown: {error}; cleanup is quarantined "
         f"as {pending_transfer_id} and engine restart is required"
     )
     if isinstance(error, Exception):
@@ -337,6 +338,7 @@ def _unregister_owned_allocations(
             _quarantine_unknown_registration_cleanup(
                 pending_owner,
                 label=label,
+                operation="unregister_memory",
                 registrations=unresolved,
                 error=error,
                 primary_error=primary_error,
@@ -375,6 +377,7 @@ def _register_allocations(
             _quarantine_unknown_registration_cleanup(
                 pending_owner,
                 label=label,
+                operation="register_memory",
                 registrations=(*owned, address),
                 error=error,
                 primary_error=error,
@@ -485,10 +488,6 @@ def registered_sources(
     )
     if primary_error is not None:
         raise primary_error
-
-
-# Preserve the weight TE public name while exposing a resource-neutral name.
-MemoryRegistrationLease = BufferRegistrationLease
 
 
 @contextmanager

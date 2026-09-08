@@ -13,7 +13,7 @@ from .contracts import (
     TransferBatchReceipt,
     TransferDirection,
 )
-from .executor import MooncakeTransferEngineExecutor
+from .executor import MooncakeTransferEngineExecutor, TransferSubmission
 from .lifetime import (
     AllocationFence,
     AllocationLifetimeToken,
@@ -35,5 +35,6 @@ __all__ = [
     "TransferDirection",
     "TransferEngineError",
     "TransferRegistrationCleanupPendingError",
+    "TransferSubmission",
     "TerminalTransferState",
 ]
