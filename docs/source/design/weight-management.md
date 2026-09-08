@@ -172,4 +172,3 @@ New integrations should:
 3. discover with `get_weight_revision` or `list_weight_revisions`;
 4. load with `load_weight_revision`, which verifies the manifest and holds the
    revision lease through transfer completion.
-

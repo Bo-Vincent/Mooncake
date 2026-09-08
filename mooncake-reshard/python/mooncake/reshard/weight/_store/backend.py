@@ -237,12 +237,8 @@ class StoreBackend:
             )
         )
 
-    def release_weight_revision_lease(
-        self, *, tenant_id: str, lease_id: int
-    ) -> None:
-        self._management_call(
-            "release_weight_revision_lease", tenant_id, lease_id
-        )
+    def release_weight_revision_lease(self, *, tenant_id: str, lease_id: int) -> None:
+        self._management_call("release_weight_revision_lease", tenant_id, lease_id)
 
     def start_weight_residency_operation(
         self,
@@ -263,9 +259,7 @@ class StoreBackend:
         self, *, tenant_id: str, operation_id: int
     ) -> WeightResidencyOperation:
         return operation_from_native(
-            self._management_call(
-                "query_weight_operation", tenant_id, operation_id
-            )
+            self._management_call("query_weight_operation", tenant_id, operation_id)
         )
 
     def reconcile_weight_revision(

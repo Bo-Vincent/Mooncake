@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,23 +58,11 @@ def test_management_records_are_immutable_and_have_no_tensor_metadata() -> None:
 def test_native_metadata_conversion_preserves_exact_identity() -> None:
     metadata = _metadata()
 
-    class Native:
-        pass
-
-    native = Native()
-    native.__dict__.update(metadata.__dict__)
-    native.identity = Native()
-    native.identity.__dict__.update(
-        {
-            "tenant_id": metadata.identity.tenant_id,
-            "namespace": metadata.identity.namespace,
-            "resource_id": metadata.identity.resource_id,
-            "revision": metadata.identity.revision,
-            "weight_generation": metadata.identity.weight_generation,
-        }
+    native = SimpleNamespace(
+        **metadata.__dict__,
     )
-    native.manifest = Native()
-    native.manifest.__dict__.update(metadata.manifest.__dict__)
+    native.identity = SimpleNamespace(**metadata.identity.__dict__)
+    native.manifest = SimpleNamespace(**metadata.manifest.__dict__)
 
     assert metadata_from_native(native) == metadata
 
