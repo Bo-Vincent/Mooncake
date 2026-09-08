@@ -37,6 +37,18 @@ enum class WeightOperationState : uint8_t {
     REPAIRING = 3,
 };
 
+enum class WeightCatalogError : uint8_t {
+    INVALID_ARGUMENT = 1,
+    NOT_FOUND = 2,
+    CONFLICT = 3,
+    STALE_GENERATION = 4,
+    NOT_READY = 5,
+    BUSY = 6,
+    LEASE_EXPIRED = 7,
+    GENERATION_EXHAUSTED = 8,
+    DURABILITY_FAILED = 9,
+};
+
 struct WeightRevisionIdentity {
     std::string tenant_id{"default"};
     std::string name_space;
@@ -184,15 +196,17 @@ YLT_REFL(AcquireWeightRevisionLeaseRequest, identity,
          expected_metadata_generation, holder, ttl_ms);
 
 struct RenewWeightRevisionLeaseRequest {
+    std::string tenant_id{"default"};
     uint64_t lease_id{0};
     uint64_t ttl_ms{0};
 };
-YLT_REFL(RenewWeightRevisionLeaseRequest, lease_id, ttl_ms);
+YLT_REFL(RenewWeightRevisionLeaseRequest, tenant_id, lease_id, ttl_ms);
 
 struct ReleaseWeightRevisionLeaseRequest {
+    std::string tenant_id{"default"};
     uint64_t lease_id{0};
 };
-YLT_REFL(ReleaseWeightRevisionLeaseRequest, lease_id);
+YLT_REFL(ReleaseWeightRevisionLeaseRequest, tenant_id, lease_id);
 
 struct StartWeightResidencyOperationRequest {
     WeightRevisionIdentity identity;
@@ -203,9 +217,10 @@ YLT_REFL(StartWeightResidencyOperationRequest, identity,
          expected_metadata_generation, target_residency);
 
 struct QueryWeightOperationRequest {
+    std::string tenant_id{"default"};
     uint64_t operation_id{0};
 };
-YLT_REFL(QueryWeightOperationRequest, operation_id);
+YLT_REFL(QueryWeightOperationRequest, tenant_id, operation_id);
 
 struct ReconcileWeightRevisionRequest {
     WeightRevisionIdentity identity;

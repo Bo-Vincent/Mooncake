@@ -13,18 +13,6 @@
 
 namespace mooncake {
 
-enum class WeightCatalogError : uint8_t {
-    INVALID_ARGUMENT = 1,
-    NOT_FOUND = 2,
-    CONFLICT = 3,
-    STALE_GENERATION = 4,
-    NOT_READY = 5,
-    BUSY = 6,
-    LEASE_EXPIRED = 7,
-    GENERATION_EXHAUSTED = 8,
-    DURABILITY_FAILED = 9,
-};
-
 enum class WeightCatalogMutationKind : uint8_t {
     UPSERT = 0,
     ERASE = 1,

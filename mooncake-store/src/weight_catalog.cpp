@@ -434,13 +434,18 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareAcquireLease(
 
 WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareRenewLease(
     const RenewWeightRevisionLeaseRequest& request, uint64_t now_ms) const {
-    if (request.lease_id == 0 || request.ttl_ms == 0 ||
+    if (request.tenant_id.empty() ||
+        !TenantId(request.tenant_id).IsValid() || request.lease_id == 0 ||
+        request.ttl_ms == 0 ||
         request.ttl_ms > kMaxLeaseTtlMs) {
         return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto current = leases_.find(request.lease_id);
     if (current == leases_.end()) {
+        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+    }
+    if (current->second.identity.tenant_id != request.tenant_id) {
         return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
     }
     if (current->second.expires_at_ms <= now_ms) {
@@ -457,7 +462,8 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareRenewLease(
 
 WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareReleaseLease(
     const ReleaseWeightRevisionLeaseRequest& request) const {
-    if (request.lease_id == 0) {
+    if (request.tenant_id.empty() ||
+        !TenantId(request.tenant_id).IsValid() || request.lease_id == 0) {
         return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
@@ -468,6 +474,9 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareReleaseLease(
             .lease_id = request.lease_id,
             .no_op = true,
         };
+    }
+    if (current->second.identity.tenant_id != request.tenant_id) {
+        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
     }
     return WeightLeaseMutation{
         .kind = WeightCatalogMutationKind::ERASE,

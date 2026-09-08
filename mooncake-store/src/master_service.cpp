@@ -1826,6 +1826,13 @@ MasterService::ListWeightRevisions(
 WeightCatalog::Result<WeightRevisionLease>
 MasterService::AcquireWeightRevisionLease(
     const AcquireWeightRevisionLeaseRequest& request) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty()) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+    [[maybe_unused]] auto group_operation_lock =
+        AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
+                                        canonical_group);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -1892,7 +1899,16 @@ MasterService::StartWeightResidencyOperation(
 WeightCatalog::Result<WeightResidencyOperation>
 MasterService::QueryWeightOperation(
     const QueryWeightOperationRequest& request) const {
-    return weight_catalog_.QueryOperation(request.operation_id);
+    if (request.tenant_id.empty() ||
+        !TenantId(request.tenant_id).IsValid()) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+    auto operation = weight_catalog_.QueryOperation(request.operation_id);
+    if (!operation ||
+        operation->identity.tenant_id == request.tenant_id) {
+        return operation;
+    }
+    return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
 }
 
 WeightCatalog::Result<WeightRevisionMetadata>
