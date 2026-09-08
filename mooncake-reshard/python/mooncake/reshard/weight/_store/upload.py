@@ -204,6 +204,7 @@ def plan_weight_upload(
     *,
     namespace: str = "default",
     key_prefix: str = "weights",
+    payload_group_id: Optional[str] = None,
 ) -> WeightUploadPlan:
     """Build an address-free Store upload plan from complete source manifests."""
 
@@ -262,7 +263,7 @@ def plan_weight_upload(
         resource_id=resource_id,
         revision=revision,
         weight_generation=weight_generation,
-        group_id=base_key,
+        group_id=payload_group_id or base_key,
         manifest_key=f"{base_key}/manifest",
         tensors=tensors,
         fragments=tuple(stored_fragments),
