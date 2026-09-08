@@ -22,4 +22,20 @@ def begin_weight_snapshot(
     return WeightStore(store).begin_weight_snapshot(snapshot, adapter)
 
 
-__all__ = ["begin_weight_snapshot"]
+def begin_managed_weight_snapshot(
+    store: object,
+    snapshot: WeightSnapshotDescriptor,
+    adapter: WeightSnapshotAdapter,
+    *,
+    tenant_id: str = "default",
+) -> WeightStoreWriter:
+    """Open a snapshot writer published through the Store WeightCatalog."""
+
+    return WeightStore(store).begin_managed_weight_snapshot(
+        snapshot,
+        adapter,
+        tenant_id=tenant_id,
+    )
+
+
+__all__ = ["begin_managed_weight_snapshot", "begin_weight_snapshot"]
