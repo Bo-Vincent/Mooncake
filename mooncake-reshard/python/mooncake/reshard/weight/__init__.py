@@ -69,6 +69,7 @@ from .store import (
     WeightStoreWriter,
     WeightStore,
     WeightStoreError,
+    begin_managed_weight_snapshot,
 )
 from .te import (
     DirectReadReceipt,
@@ -128,6 +129,7 @@ __all__ = [
     "WeightStoreWriter",
     "WeightStore",
     "WeightStoreError",
+    "begin_managed_weight_snapshot",
     "WeightUploadPlan",
     "plan_weight_upload",
     "BoundWeightFragment",
