@@ -42,6 +42,21 @@ from .planner import (
     resolve_executor_plans,
 )
 from .storage_manifest import StoredFragmentSnapshot, StoredWeightManifest
+from .management import (
+    WeightAvailabilityState,
+    WeightManagementError,
+    WeightManagementErrorCode,
+    WeightManagementTransportError,
+    WeightManifestReference,
+    WeightOperationState,
+    WeightResidencyOperation,
+    WeightResidencyState,
+    WeightRevisionIdentity,
+    WeightRevisionLease,
+    WeightRevisionMetadata,
+    WeightRevisionPage,
+    WeightRevisionView,
+)
 from ._store import UploadOperation, WeightUploadPlan, plan_weight_upload
 from .store import (
     StoreRegistrationLease,
@@ -73,6 +88,19 @@ __all__ = [
     "weight_placement_to_json",
     "StoredFragmentSnapshot",
     "StoredWeightManifest",
+    "WeightAvailabilityState",
+    "WeightManagementError",
+    "WeightManagementErrorCode",
+    "WeightManagementTransportError",
+    "WeightManifestReference",
+    "WeightOperationState",
+    "WeightResidencyOperation",
+    "WeightResidencyState",
+    "WeightRevisionIdentity",
+    "WeightRevisionLease",
+    "WeightRevisionMetadata",
+    "WeightRevisionPage",
+    "WeightRevisionView",
     "UploadOperation",
     "UploadReceipt",
     "StoreRegistrationLease",
