@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
+from threading import Event
 
 import pytest
 
@@ -18,7 +19,12 @@ from mooncake.reshard.weight.management import (
 )
 from mooncake.reshard.weight.store import WeightStoreError
 
-from .helpers import InMemoryStore, make_weight_store, source_manifests, target_manifests
+from .helpers import (
+    InMemoryStore,
+    make_weight_store,
+    source_manifests,
+    target_manifests,
+)
 
 
 def _identity_digest(identity: WeightRevisionIdentity) -> str:
@@ -44,6 +50,8 @@ class ManagedInMemoryStore(InMemoryStore):
         self.catalog: dict[WeightRevisionIdentity, WeightRevisionMetadata] = {}
         self.next_lease_id = 1
         self.released_leases: list[int] = []
+        self.renewed_leases: list[int] = []
+        self.renewed = Event()
 
     @staticmethod
     def _identity(args: tuple[object, ...]) -> WeightRevisionIdentity:
@@ -135,6 +143,23 @@ class ManagedInMemoryStore(InMemoryStore):
         self.released_leases.append(lease_id)
         return True, 0, 0
 
+    def renew_weight_revision_lease(self, tenant_id, lease_id, ttl_ms):
+        assert tenant_id == "tenant-a"
+        self.renewed_leases.append(lease_id)
+        self.renewed.set()
+        identity = next(iter(self.catalog))
+        return (
+            WeightRevisionLease(
+                lease_id=lease_id,
+                identity=identity,
+                holder="worker-0",
+                expires_at_ms=1000 + ttl_ms,
+                fenced_metadata_generation=self.catalog[identity].metadata_generation,
+            ),
+            0,
+            0,
+        )
+
 
 def test_managed_revision_publish_resolve_load_and_release_lease() -> None:
     raw = ManagedInMemoryStore()
@@ -209,4 +234,38 @@ def test_managed_load_releases_lease_after_digest_rejection() -> None:
             targets.placement,
             targets.bindings,
         )
+    assert raw.released_leases == [1]
+
+
+def test_managed_load_renews_short_lease_until_transfer_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = ManagedInMemoryStore()
+    _, weight_store = make_weight_store(raw)
+    sources = source_manifests(dp=1, tp=1)
+    targets = target_manifests(dp=1, tp=1)
+    plan = weight_store.plan_managed_upload(
+        sources.placement,
+        sources.bindings,
+        tenant_id="tenant-a",
+    )
+    receipts = []
+    for binding in sources.bindings:
+        receipts.extend(weight_store.upload(plan, sources.placement, binding))
+    weight_store.commit_upload(plan, receipts)
+    assert plan.management_identity is not None
+
+    def wait_for_renewal(*args, **kwargs) -> None:
+        assert raw.renewed.wait(timeout=1)
+
+    monkeypatch.setattr(weight_store, "load", wait_for_renewal)
+    weight_store.load_weight_revision(
+        plan.management_identity,
+        targets.placement,
+        targets.bindings,
+        holder="worker-0",
+        lease_ttl_ms=30,
+    )
+
+    assert raw.renewed_leases
     assert raw.released_leases == [1]
