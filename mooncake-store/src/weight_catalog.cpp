@@ -399,6 +399,20 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareAcquireLease(
     if (current->second.operation != WeightOperationState::NONE) {
         return tl::make_unexpected(WeightCatalogError::BUSY);
     }
+    for (const auto& [lease_id, lease] : leases_) {
+        (void)lease_id;
+        if (lease.identity == request.identity &&
+            lease.holder == request.holder && lease.expires_at_ms > now_ms &&
+            lease.fenced_metadata_generation <=
+                current->second.metadata_generation) {
+            return WeightLeaseMutation{
+                .lease_id = lease.lease_id,
+                .previous = lease,
+                .next = lease,
+                .no_op = true,
+            };
+        }
+    }
     if (next_lease_id_ == 0 ||
         next_lease_id_ == std::numeric_limits<uint64_t>::max()) {
         return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
@@ -487,6 +501,9 @@ WeightCatalog::Result<WeightRevisionLease> WeightCatalog::Publish(
     std::lock_guard lock(mutex_);
     const auto current = leases_.find(mutation.lease_id);
     if (mutation.no_op) {
+        if (mutation.next.has_value()) {
+            return *mutation.next;
+        }
         return WeightRevisionLease{.lease_id = mutation.lease_id};
     }
     if (mutation.previous.has_value()) {
@@ -509,7 +526,7 @@ WeightCatalog::Result<WeightRevisionLease> WeightCatalog::Publish(
     if (revision == revisions_.end()) {
         return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
     }
-    if (revision->second.metadata_generation !=
+    if (revision->second.metadata_generation <
         next.fenced_metadata_generation) {
         return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
     }
@@ -530,7 +547,7 @@ bool WeightCatalog::HasActiveLease(const WeightRevisionIdentity& identity,
     for (const auto& [lease_id, lease] : leases_) {
         static_cast<void>(lease_id);
         if (lease.identity == identity &&
-            lease.fenced_metadata_generation == metadata_generation &&
+            lease.fenced_metadata_generation <= metadata_generation &&
             lease.expires_at_ms > now_ms) {
             return true;
         }
@@ -817,7 +834,7 @@ uint64_t WeightCatalog::CountActiveLeasesLocked(
     for (const auto& [lease_id, lease] : leases_) {
         static_cast<void>(lease_id);
         if (lease.identity != metadata.identity ||
-            lease.fenced_metadata_generation != metadata.metadata_generation ||
+            lease.fenced_metadata_generation > metadata.metadata_generation ||
             lease.expires_at_ms <= now_ms) {
             continue;
         }

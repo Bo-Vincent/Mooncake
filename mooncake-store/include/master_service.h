@@ -215,6 +215,12 @@ class MasterService {
         const GetWeightRevisionRequest& request) const;
     WeightCatalog::Result<ListWeightRevisionsResponse> ListWeightRevisions(
         const ListWeightRevisionsRequest& request) const;
+    WeightCatalog::Result<WeightRevisionLease> AcquireWeightRevisionLease(
+        const AcquireWeightRevisionLeaseRequest& request);
+    WeightCatalog::Result<WeightRevisionLease> RenewWeightRevisionLease(
+        const RenewWeightRevisionLeaseRequest& request);
+    WeightCatalog::Result<void> ReleaseWeightRevisionLease(
+        const ReleaseWeightRevisionLeaseRequest& request);
 
     ErrorCode SetBatchOpLogBackendForTesting(
         std::shared_ptr<HaKvBackend> backend);
@@ -1796,6 +1802,8 @@ class MasterService {
         const CommitWeightImportRequest& request) const;
     WeightCatalog::Result<WeightRevisionMetadata>
     PersistAndPublishWeightMutation(const WeightCatalogMutation& mutation);
+    WeightCatalog::Result<WeightRevisionLease>
+    PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
 
     class SoftPinDeadlineIndex {
        public:

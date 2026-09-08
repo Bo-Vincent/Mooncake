@@ -1810,6 +1810,47 @@ MasterService::ListWeightRevisions(
     return weight_catalog_.List(request, now_ms);
 }
 
+WeightCatalog::Result<WeightRevisionLease>
+MasterService::AcquireWeightRevisionLease(
+    const AcquireWeightRevisionLeaseRequest& request) {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_catalog_.PrepareAcquireLease(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return PersistAndPublishWeightLeaseMutation(*mutation);
+}
+
+WeightCatalog::Result<WeightRevisionLease>
+MasterService::RenewWeightRevisionLease(
+    const RenewWeightRevisionLeaseRequest& request) {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_catalog_.PrepareRenewLease(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return PersistAndPublishWeightLeaseMutation(*mutation);
+}
+
+WeightCatalog::Result<void> MasterService::ReleaseWeightRevisionLease(
+    const ReleaseWeightRevisionLeaseRequest& request) {
+    auto mutation = weight_catalog_.PrepareReleaseLease(request);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    auto released = PersistAndPublishWeightLeaseMutation(*mutation);
+    if (!released) {
+        return tl::make_unexpected(released.error());
+    }
+    return {};
+}
+
 WeightCatalog::Result<std::vector<MasterService::WeightGroupMemberSnapshot>>
 MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
                                    const std::string& payload_group_id) const {
@@ -1962,6 +2003,80 @@ MasterService::PersistAndPublishWeightMutation(
         LOG(ERROR) << "Timed out waiting for durable weight catalog publish, "
                    << "sequence_id=" << persisted->sequence_id
                    << ", key=" << persisted->object_key;
+        return tl::make_unexpected(WeightCatalogError::DURABILITY_FAILED);
+    }
+    return std::move(*completion->result);
+}
+
+WeightCatalog::Result<WeightRevisionLease>
+MasterService::PersistAndPublishWeightLeaseMutation(
+    const WeightLeaseMutation& mutation) {
+    if (mutation.no_op || !enable_oplog_) {
+        return weight_catalog_.Publish(mutation);
+    }
+
+    OpType type;
+    std::string tenant_id;
+    std::string payload;
+    if (mutation.kind == WeightCatalogMutationKind::UPSERT &&
+        mutation.next.has_value()) {
+        type = OpType::WEIGHT_LEASE_UPSERT;
+        tenant_id = mutation.next->identity.tenant_id;
+        const auto encoded = struct_pack::serialize(*mutation.next);
+        payload.assign(encoded.begin(), encoded.end());
+    } else if (mutation.previous.has_value()) {
+        type = OpType::WEIGHT_LEASE_DELETE;
+        tenant_id = mutation.previous->identity.tenant_id;
+        WeightLeaseDeleteOp deletion{
+            .lease_id = mutation.lease_id,
+            .identity = mutation.previous->identity,
+            .fenced_metadata_generation =
+                mutation.previous->fenced_metadata_generation,
+        };
+        const auto encoded = struct_pack::serialize(deletion);
+        payload.assign(encoded.begin(), encoded.end());
+    } else {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+
+    struct Completion {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::optional<WeightCatalog::Result<WeightRevisionLease>> result;
+    };
+    auto completion = std::make_shared<Completion>();
+    auto persisted = AppendOpLogWithDurableFinalize(
+        type, tenant_id, MakeWeightLeaseCatalogKey(mutation.lease_id), payload,
+        [this, mutation, completion](const OpLogEntry& durable_entry) {
+            auto published = weight_catalog_.Publish(mutation);
+            if (!published) {
+                LOG(ERROR) << "Failed to publish durable weight lease "
+                              "mutation, sequence_id="
+                           << durable_entry.sequence_id
+                           << ", lease_id=" << mutation.lease_id
+                           << ", error=" << static_cast<int>(published.error());
+            }
+            {
+                std::lock_guard lock(completion->mutex);
+                completion->result = std::move(published);
+            }
+            completion->cv.notify_all();
+        });
+    if (!persisted) {
+        LOG(ERROR) << "Failed to persist weight lease mutation, lease_id="
+                   << mutation.lease_id
+                   << ", error=" << static_cast<int>(persisted.error());
+        return tl::make_unexpected(WeightCatalogError::DURABILITY_FAILED);
+    }
+
+    constexpr auto kPublishTimeout = std::chrono::seconds(30);
+    std::unique_lock lock(completion->mutex);
+    if (!completion->cv.wait_for(lock, kPublishTimeout, [&] {
+            return completion->result.has_value();
+        })) {
+        LOG(ERROR) << "Timed out waiting for durable weight lease publication, "
+                      "lease_id="
+                   << mutation.lease_id;
         return tl::make_unexpected(WeightCatalogError::DURABILITY_FAILED);
     }
     return std::move(*completion->result);
