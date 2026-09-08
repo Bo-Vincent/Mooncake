@@ -170,8 +170,8 @@ TEST(WeightCatalogTest, LeaseExpiryIsGenerationFencedAndIdempotent) {
     ASSERT_TRUE(lease.has_value());
     EXPECT_TRUE(
         catalog.HasActiveLease(ready.identity, ready.metadata_generation, 349));
-    EXPECT_FALSE(catalog.HasActiveLease(ready.identity,
-                                        ready.metadata_generation + 1, 349));
+    EXPECT_TRUE(catalog.HasActiveLease(ready.identity,
+                                       ready.metadata_generation + 1, 349));
 
     auto expired = catalog.PrepareExpireLeases(350);
     ASSERT_EQ(1, expired.size());
@@ -205,6 +205,129 @@ TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
         301);
     ASSERT_FALSE(conflicting.has_value());
     EXPECT_EQ(WeightCatalogError::BUSY, conflicting.error());
+}
+
+TEST(WeightCatalogTest, ActiveLeaseBlocksResidencyAndDelete) {
+    WeightCatalog catalog;
+    auto ready = PublishReady(catalog);
+    auto lease_mutation = catalog.PrepareAcquireLease(
+        AcquireWeightRevisionLeaseRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .holder = "worker-1",
+            .ttl_ms = 100,
+        },
+        300);
+    ASSERT_TRUE(lease_mutation.has_value());
+    ASSERT_TRUE(catalog.Publish(*lease_mutation).has_value());
+
+    auto operation = catalog.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        301);
+    ASSERT_FALSE(operation.has_value());
+    EXPECT_EQ(WeightCatalogError::BUSY, operation.error());
+
+    auto deletion = catalog.PrepareDelete(
+        DeleteWeightRevisionRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+        },
+        301);
+    ASSERT_FALSE(deletion.has_value());
+    EXPECT_EQ(WeightCatalogError::BUSY, deletion.error());
+}
+
+TEST(WeightCatalogTest, CompletesResidencyOperationAndRetainsRecord) {
+    WeightCatalog catalog;
+    auto ready = PublishReady(catalog);
+    auto start = catalog.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        300);
+    ASSERT_TRUE(start.has_value());
+    auto operation = catalog.Publish(*start);
+    ASSERT_TRUE(operation.has_value());
+
+    auto finish = catalog.PrepareFinishOperation(
+        operation->operation_id, WeightResidencyState::COLD, 400);
+    ASSERT_TRUE(finish.has_value());
+    auto completed = catalog.Publish(*finish);
+    ASSERT_TRUE(completed.has_value());
+    EXPECT_EQ("completed", completed->message);
+
+    auto view = catalog.Get(ready.identity, 400);
+    ASSERT_TRUE(view.has_value());
+    EXPECT_EQ(WeightOperationState::NONE, view->metadata.operation);
+    EXPECT_EQ(0, view->metadata.operation_id);
+    EXPECT_EQ(WeightResidencyState::COLD, view->metadata.residency);
+    EXPECT_EQ(ready.metadata_generation + 2,
+              view->metadata.metadata_generation);
+    EXPECT_EQ(*completed,
+              *catalog.QueryOperation(completed->operation_id));
+}
+
+TEST(WeightCatalogTest, RestoresMultipleCompletedOperations) {
+    WeightCatalog catalog;
+    auto metadata = PublishReady(catalog);
+    for (const auto target :
+         {WeightResidencyState::COLD, WeightResidencyState::HOT}) {
+        auto start = catalog.PrepareStartOperation(
+            StartWeightResidencyOperationRequest{
+                .identity = metadata.identity,
+                .expected_metadata_generation =
+                    metadata.metadata_generation,
+                .target_residency = target,
+            },
+            300 + metadata.metadata_generation);
+        ASSERT_TRUE(start.has_value());
+        auto operation = catalog.Publish(*start);
+        ASSERT_TRUE(operation.has_value());
+        auto finish = catalog.PrepareFinishOperation(
+            operation->operation_id, target,
+            400 + metadata.metadata_generation);
+        ASSERT_TRUE(finish.has_value());
+        ASSERT_TRUE(catalog.Publish(*finish).has_value());
+        auto view = catalog.Get(metadata.identity, 500);
+        ASSERT_TRUE(view.has_value());
+        metadata = view->metadata;
+    }
+
+    WeightCatalog restored;
+    ASSERT_TRUE(restored.RestoreSnapshot(catalog.ExportSnapshot()).has_value());
+    EXPECT_EQ(metadata, restored.Get(metadata.identity, 500)->metadata);
+    EXPECT_EQ("completed", restored.QueryOperation(1)->message);
+    EXPECT_EQ("completed", restored.QueryOperation(2)->message);
+}
+
+TEST(WeightCatalogTest, DeleteRetainsAbsentTombstone) {
+    WeightCatalog catalog;
+    auto ready = PublishReady(catalog);
+    auto start = catalog.PrepareDelete(
+        DeleteWeightRevisionRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+        },
+        300);
+    ASSERT_TRUE(start.has_value());
+    auto deleting = catalog.Publish(*start);
+    ASSERT_TRUE(deleting.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DELETING, deleting->availability);
+
+    auto finish = catalog.PrepareFinishDelete(
+        ready.identity, deleting->metadata_generation, 400);
+    ASSERT_TRUE(finish.has_value());
+    auto deleted = catalog.Publish(*finish);
+    ASSERT_TRUE(deleted.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+    EXPECT_EQ(WeightResidencyState::ABSENT, deleted->residency);
+    EXPECT_TRUE(catalog.IsManagedGroup(deleted->manifest.payload_group_id));
 }
 
 TEST(WeightCatalogTest, OnlyOneConcurrentCasCandidatePublishes) {

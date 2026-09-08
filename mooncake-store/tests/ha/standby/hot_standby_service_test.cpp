@@ -548,7 +548,10 @@ TEST_F(HotStandbyServiceTest, AppliesNewerWeightCatalogOpLogAfterSnapshot) {
     ready.residency = WeightResidencyState::HOT;
     ready.metadata_generation = 2;
     ready.updated_at_ms = 200;
-    const auto encoded = struct_pack::serialize(ready);
+    const auto encoded = struct_pack::serialize(WeightMetadataUpsertOp{
+        .metadata = ready,
+        .operation = std::nullopt,
+    });
     auto batch = MakeCaptureBatch(
         1, 2, OpType::WEIGHT_METADATA_UPSERT,
         MakeWeightRevisionCatalogKey(ready.identity),

@@ -99,10 +99,30 @@ class WeightCatalog {
 
     Result<WeightOperationMutation> PrepareStartOperation(
         const StartWeightResidencyOperationRequest& request, uint64_t now_ms);
+    Result<WeightOperationMutation> PrepareFinishOperation(
+        uint64_t operation_id, WeightResidencyState observed_residency,
+        uint64_t now_ms) const;
+    Result<WeightOperationMutation> PrepareUpdateOperationProgress(
+        uint64_t operation_id, uint64_t processed_members,
+        uint64_t total_members, std::string cursor, uint64_t now_ms) const;
     Result<WeightResidencyOperation> Publish(
         const WeightOperationMutation& mutation);
+    Result<WeightResidencyOperation> QueryOperation(
+        uint64_t operation_id) const;
+
+    Result<WeightCatalogMutation> PrepareDelete(
+        const DeleteWeightRevisionRequest& request, uint64_t now_ms) const;
+    Result<WeightCatalogMutation> PrepareFinishDelete(
+        const WeightRevisionIdentity& identity,
+        uint64_t expected_metadata_generation, uint64_t now_ms) const;
+    Result<WeightCatalogMutation> PrepareReconcile(
+        const WeightRevisionIdentity& identity,
+        uint64_t expected_metadata_generation,
+        WeightAvailabilityState availability,
+        WeightResidencyState residency, uint64_t now_ms) const;
 
     bool IsManagedGroup(const std::string& payload_group_id) const;
+    bool AllowsGroupMemberMutation(const std::string& payload_group_id) const;
     WeightCatalogSnapshot ExportSnapshot() const;
     Result<void> RestoreSnapshot(const WeightCatalogSnapshot& snapshot);
     void Clear();

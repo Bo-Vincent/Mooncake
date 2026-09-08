@@ -110,6 +110,9 @@ struct WeightResidencyOperation {
     uint64_t fenced_metadata_generation{0};
     uint64_t started_at_ms{0};
     uint64_t updated_at_ms{0};
+    uint64_t processed_members{0};
+    uint64_t total_members{0};
+    std::string cursor;
     std::string message;
 
     friend bool operator==(const WeightResidencyOperation&,
@@ -117,7 +120,7 @@ struct WeightResidencyOperation {
 };
 YLT_REFL(WeightResidencyOperation, operation_id, identity, operation,
          target_residency, fenced_metadata_generation, started_at_ms,
-         updated_at_ms, message);
+         updated_at_ms, processed_members, total_members, cursor, message);
 
 struct WeightRevisionView {
     WeightRevisionMetadata metadata;
