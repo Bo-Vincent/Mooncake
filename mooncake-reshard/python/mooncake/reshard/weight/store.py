@@ -11,6 +11,7 @@ from ._store import (
     WeightStore,
     WeightStoreError,
     WeightUploadPlan,
+    begin_managed_weight_snapshot,
     begin_weight_snapshot,
     plan_weight_upload,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "WeightStore",
     "WeightStoreError",
     "WeightUploadPlan",
+    "begin_managed_weight_snapshot",
     "begin_weight_snapshot",
     "plan_weight_upload",
 ]
