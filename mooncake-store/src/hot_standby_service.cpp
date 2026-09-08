@@ -257,6 +257,11 @@ ErrorCode HotStandbyService::LoadSnapshotBaselineLocked(
             return ErrorCode::DESERIALIZE_FAIL;
         }
     }
+    if (!metadata_store_->RestoreWeightCatalog(snapshot.weight_catalog)) {
+        LOG(ERROR) << "Snapshot baseline contains an invalid weight catalog";
+        metadata_store_->Clear();
+        return ErrorCode::DESERIALIZE_FAIL;
+    }
     // Load segment registry from snapshot
     if (oplog_applier_) {
         oplog_applier_->LoadSegmentRegistry(snapshot.segments);
@@ -722,8 +727,10 @@ ErrorCode HotStandbyService::PromoteAndExportSnapshot(StandbySnapshot& out) {
     out.oplog_sequence_id = latest_applied_seq_id;
     if (metadata_store_) {
         metadata_store_->Snapshot(out.objects);
+        out.weight_catalog = metadata_store_->SnapshotWeightCatalog();
     } else {
         out.objects.clear();
+        out.weight_catalog = WeightCatalogSnapshot{};
     }
     if (oplog_applier_) {
         out.segments = oplog_applier_->GetSegmentRegistry().GetAllSegments();
@@ -867,8 +874,10 @@ bool HotStandbyService::ExportStandbySnapshot(StandbySnapshot& out) const {
     // Export object metadata
     if (metadata_store_) {
         metadata_store_->Snapshot(out.objects);
+        out.weight_catalog = metadata_store_->SnapshotWeightCatalog();
     } else {
         out.objects.clear();
+        out.weight_catalog = WeightCatalogSnapshot{};
     }
 
     // Export segments from OpLogApplier's registry (Patch B)

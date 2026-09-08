@@ -78,4 +78,70 @@ TEST(StandbyMetadataStoreTest, RestoreInsertRejectsDuplicateWithoutOverwrite) {
     EXPECT_EQ(1u, restored->size);
 }
 
+TEST(StandbyMetadataStoreTest, WeightCatalogSnapshotRoundTripsCompleteState) {
+    const WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    const WeightCatalogSnapshot snapshot{
+        .metadata = {WeightRevisionMetadata{
+            .identity = identity,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key =
+                        "weights/production/llama-70b/step-100/7/manifest",
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(identity),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .availability = WeightAvailabilityState::READY,
+            .residency = WeightResidencyState::HOT,
+            .operation = WeightOperationState::EVICTING,
+            .operation_id = 3,
+            .metadata_generation = 4,
+            .created_at_ms = 100,
+            .updated_at_ms = 200,
+        }},
+        .leases = {WeightRevisionLease{
+            .lease_id = 5,
+            .identity = identity,
+            .holder = "worker-0",
+            .expires_at_ms = 300,
+            .fenced_metadata_generation = 2,
+        }},
+        .operations = {WeightResidencyOperation{
+            .operation_id = 3,
+            .identity = identity,
+            .operation = WeightOperationState::EVICTING,
+            .target_residency = WeightResidencyState::COLD,
+            .fenced_metadata_generation = 4,
+            .started_at_ms = 150,
+            .updated_at_ms = 200,
+            .message = {},
+        }},
+        .next_lease_id = 6,
+        .next_operation_id = 4,
+    };
+
+    StandbyMetadataStore store;
+    ASSERT_TRUE(store.RestoreWeightCatalog(snapshot));
+    EXPECT_EQ(snapshot, store.SnapshotWeightCatalog());
+}
+
+TEST(StandbyMetadataStoreTest, RejectsInvalidWeightCatalogWithoutMutation) {
+    StandbyMetadataStore store;
+    const WeightCatalogSnapshot empty;
+    ASSERT_TRUE(store.RestoreWeightCatalog(empty));
+
+    WeightCatalogSnapshot invalid;
+    invalid.next_lease_id = 0;
+    EXPECT_FALSE(store.RestoreWeightCatalog(invalid));
+    EXPECT_EQ(empty, store.SnapshotWeightCatalog());
+}
+
 }  // namespace mooncake::test

@@ -644,6 +644,134 @@ bool WeightCatalog::IsManagedGroup(const std::string& payload_group_id) const {
     return group_index_.contains(payload_group_id);
 }
 
+WeightCatalogSnapshot WeightCatalog::ExportSnapshot() const {
+    std::lock_guard lock(mutex_);
+    WeightCatalogSnapshot snapshot{
+        .schema_version = 1,
+        .metadata = {},
+        .leases = {},
+        .operations = {},
+        .next_lease_id = next_lease_id_,
+        .next_operation_id = next_operation_id_,
+    };
+    snapshot.metadata.reserve(revisions_.size());
+    for (const auto& [identity, metadata] : revisions_) {
+        static_cast<void>(identity);
+        snapshot.metadata.push_back(metadata);
+    }
+    snapshot.leases.reserve(leases_.size());
+    for (const auto& [lease_id, lease] : leases_) {
+        static_cast<void>(lease_id);
+        snapshot.leases.push_back(lease);
+    }
+    std::sort(snapshot.leases.begin(), snapshot.leases.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.lease_id < rhs.lease_id;
+              });
+    snapshot.operations.reserve(operations_.size());
+    for (const auto& [operation_id, operation] : operations_) {
+        static_cast<void>(operation_id);
+        snapshot.operations.push_back(operation);
+    }
+    std::sort(snapshot.operations.begin(), snapshot.operations.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.operation_id < rhs.operation_id;
+              });
+    return snapshot;
+}
+
+WeightCatalog::Result<void> WeightCatalog::RestoreSnapshot(
+    const WeightCatalogSnapshot& snapshot) {
+    if (snapshot.schema_version != 1 || snapshot.next_lease_id == 0 ||
+        snapshot.next_operation_id == 0) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+
+    std::map<WeightRevisionIdentity, WeightRevisionMetadata> revisions;
+    std::map<std::string, WeightRevisionIdentity> group_index;
+    for (const auto& metadata : snapshot.metadata) {
+        if (!ValidateWeightRevisionMetadata(metadata).ok() ||
+            !IsValidWeightComponent(metadata.manifest.payload_group_id) ||
+            !revisions.emplace(metadata.identity, metadata).second ||
+            !group_index
+                 .emplace(metadata.manifest.payload_group_id, metadata.identity)
+                 .second) {
+            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        }
+    }
+
+    uint64_t max_lease_id = 0;
+    std::unordered_map<uint64_t, WeightRevisionLease> leases;
+    for (const auto& lease : snapshot.leases) {
+        const auto revision = revisions.find(lease.identity);
+        if (lease.lease_id == 0 ||
+            !ValidateWeightRevisionIdentity(lease.identity).ok() ||
+            !IsValidWeightComponent(lease.holder) || lease.expires_at_ms == 0 ||
+            lease.fenced_metadata_generation == 0 ||
+            revision == revisions.end() ||
+            lease.fenced_metadata_generation >
+                revision->second.metadata_generation ||
+            !leases.emplace(lease.lease_id, lease).second) {
+            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        }
+        max_lease_id = std::max(max_lease_id, lease.lease_id);
+    }
+    if (snapshot.next_lease_id <= max_lease_id) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+
+    uint64_t max_operation_id = 0;
+    std::unordered_map<uint64_t, WeightResidencyOperation> operations;
+    for (const auto& operation : snapshot.operations) {
+        const auto revision = revisions.find(operation.identity);
+        if (operation.operation_id == 0 ||
+            !ValidateWeightRevisionIdentity(operation.identity).ok() ||
+            operation.operation == WeightOperationState::NONE ||
+            (operation.target_residency != WeightResidencyState::HOT &&
+             operation.target_residency != WeightResidencyState::COLD) ||
+            operation.fenced_metadata_generation == 0 ||
+            operation.updated_at_ms < operation.started_at_ms ||
+            revision == revisions.end() ||
+            revision->second.operation != operation.operation ||
+            revision->second.operation_id != operation.operation_id ||
+            revision->second.metadata_generation !=
+                operation.fenced_metadata_generation ||
+            !operations.emplace(operation.operation_id, operation).second) {
+            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        }
+        max_operation_id = std::max(max_operation_id, operation.operation_id);
+    }
+    if (snapshot.next_operation_id <= max_operation_id) {
+        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+    }
+    for (const auto& [identity, metadata] : revisions) {
+        static_cast<void>(identity);
+        if (metadata.operation != WeightOperationState::NONE &&
+            !operations.contains(metadata.operation_id)) {
+            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        }
+    }
+
+    std::lock_guard lock(mutex_);
+    revisions_ = std::move(revisions);
+    group_index_ = std::move(group_index);
+    leases_ = std::move(leases);
+    operations_ = std::move(operations);
+    next_lease_id_ = snapshot.next_lease_id;
+    next_operation_id_ = snapshot.next_operation_id;
+    return {};
+}
+
+void WeightCatalog::Clear() {
+    std::lock_guard lock(mutex_);
+    revisions_.clear();
+    group_index_.clear();
+    leases_.clear();
+    operations_.clear();
+    next_lease_id_ = 1;
+    next_operation_id_ = 1;
+}
+
 std::string WeightCatalog::MakePageToken(
     const WeightRevisionIdentity& identity) {
     return identity.revision + kPageTokenSeparator +

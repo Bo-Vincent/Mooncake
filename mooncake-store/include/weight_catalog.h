@@ -53,6 +53,20 @@ struct WeightOperationMutation {
     bool no_op{false};
 };
 
+struct WeightCatalogSnapshot {
+    uint32_t schema_version{1};
+    std::vector<WeightRevisionMetadata> metadata;
+    std::vector<WeightRevisionLease> leases;
+    std::vector<WeightResidencyOperation> operations;
+    uint64_t next_lease_id{1};
+    uint64_t next_operation_id{1};
+
+    friend bool operator==(const WeightCatalogSnapshot&,
+                           const WeightCatalogSnapshot&) = default;
+};
+YLT_REFL(WeightCatalogSnapshot, schema_version, metadata, leases, operations,
+         next_lease_id, next_operation_id);
+
 class WeightCatalog {
    public:
     template <typename T>
@@ -89,6 +103,9 @@ class WeightCatalog {
         const WeightOperationMutation& mutation);
 
     bool IsManagedGroup(const std::string& payload_group_id) const;
+    WeightCatalogSnapshot ExportSnapshot() const;
+    Result<void> RestoreSnapshot(const WeightCatalogSnapshot& snapshot);
+    void Clear();
 
    private:
     static std::string MakePageToken(const WeightRevisionIdentity& identity);

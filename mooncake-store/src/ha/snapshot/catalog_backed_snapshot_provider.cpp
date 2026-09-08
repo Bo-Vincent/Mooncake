@@ -18,6 +18,7 @@
 #include "segment.h"
 #include "serialize/serializer.h"
 #include "common/zstd_util.h"
+#include "weight_catalog.h"
 
 namespace mooncake {
 
@@ -239,7 +240,12 @@ DeserializeStandbyObjectMetadata(
     }
 }
 
-tl::expected<std::vector<StandbyObjectEntry>, ErrorCode>
+struct DecodedStandbySnapshotMetadata {
+    std::vector<StandbyObjectEntry> objects;
+    WeightCatalogSnapshot weight_catalog;
+};
+
+tl::expected<DecodedStandbySnapshotMetadata, ErrorCode>
 DeserializeStandbySnapshotMetadata(const std::vector<uint8_t>& data,
                                    const SegmentView& segment_view) {
     msgpack::object_handle root_handle;
@@ -259,7 +265,27 @@ DeserializeStandbySnapshotMetadata(const std::vector<uint8_t>& data,
         return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
     }
 
-    std::vector<StandbyObjectEntry> snapshot;
+    DecodedStandbySnapshotMetadata snapshot;
+    const auto* weight_catalog = FindMapField(root, "weight_catalog");
+    if (weight_catalog != nullptr) {
+        if (weight_catalog->type != msgpack::type::BIN) {
+            LOG(ERROR) << "Snapshot weight_catalog payload is not binary";
+            return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
+        }
+        const std::string encoded(
+            weight_catalog->via.bin.ptr,
+            weight_catalog->via.bin.ptr + weight_catalog->via.bin.size);
+        if (struct_pack::deserialize_to(snapshot.weight_catalog, encoded) !=
+            struct_pack::errc::ok) {
+            LOG(ERROR) << "Failed to deserialize snapshot weight_catalog";
+            return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
+        }
+        WeightCatalog validator;
+        if (!validator.RestoreSnapshot(snapshot.weight_catalog)) {
+            LOG(ERROR) << "Snapshot weight_catalog failed validation";
+            return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
+        }
+    }
     const auto now = std::chrono::system_clock::now();
     for (uint32_t i = 0; i < shards->via.map.size; ++i) {
         const auto& shard_blob = shards->via.map.ptr[i].val;
@@ -336,7 +362,7 @@ DeserializeStandbySnapshotMetadata(const std::vector<uint8_t>& data,
                 if (!metadata_result->has_value()) {
                     continue;
                 }
-                snapshot.push_back(
+                snapshot.objects.push_back(
                     StandbyObjectEntry{normalized_tenant, key,
                                        std::move(metadata_result->value())});
             } catch (const std::exception& ex) {
@@ -492,7 +518,9 @@ class CatalogBackedSnapshotProvider final : public SnapshotProvider {
         LoadedSnapshot snapshot;
         snapshot.snapshot_id = descriptor.snapshot_id;
         snapshot.snapshot_sequence_id = descriptor.last_included_seq;
-        snapshot.metadata = std::move(deserialize_metadata.value());
+        snapshot.metadata = std::move(deserialize_metadata->objects);
+        snapshot.weight_catalog =
+            std::move(deserialize_metadata->weight_catalog);
 
         // Extract standby segment registry entries from the deserialized
         // SegmentManager. The snapshot's SegmentSerializer::Serialize()

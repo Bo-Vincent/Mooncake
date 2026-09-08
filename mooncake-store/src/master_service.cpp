@@ -3677,9 +3677,11 @@ auto MasterService::QuerySegmentStatusById(const UUID& segment_id)
 tl::expected<void, ErrorCode> MasterService::RestoreFromStandbySnapshot(
     const std::vector<StandbyObjectEntry>& objects,
     uint64_t initial_oplog_sequence_id,
-    const std::vector<StandbySegmentInfo>& segments) {
+    const std::vector<StandbySegmentInfo>& segments,
+    const WeightCatalogSnapshot& weight_catalog) {
     return RestoreFromStandbyState(&objects, nullptr, initial_oplog_sequence_id,
-                                   segments, objects.size(), std::nullopt);
+                                   segments, objects.size(), std::nullopt,
+                                   &weight_catalog);
 }
 
 tl::expected<void, ErrorCode> MasterService::RestoreFromBatchOpLogPromotion(
@@ -3692,7 +3694,7 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromBatchOpLogPromotion(
     return RestoreFromStandbyState(nullptr, std::move(handoff.metadata_store),
                                    handoff.applied_cursor.last_seq,
                                    handoff.segments, chunk_object_count,
-                                   handoff.max_replica_id);
+                                   handoff.max_replica_id, nullptr);
 }
 
 tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
@@ -3700,14 +3702,23 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
     std::unique_ptr<StandbyMetadataStore> metadata_store,
     uint64_t initial_oplog_sequence_id,
     const std::vector<StandbySegmentInfo>& segments, size_t chunk_object_count,
-    std::optional<ReplicaID> expected_max_replica_id) {
+    std::optional<ReplicaID> expected_max_replica_id,
+    const WeightCatalogSnapshot* legacy_weight_catalog) {
     if (enable_dfs_) {
         LOG(ERROR) << "RestoreFromStandbySnapshot: DFS allocator state "
                       "restoration is not supported";
         return tl::make_unexpected(ErrorCode::DFS_SERVICE_UNAVAILABLE);
     }
     if ((legacy_objects == nullptr) == (metadata_store == nullptr) ||
-        (metadata_store && chunk_object_count == 0)) {
+        (metadata_store && chunk_object_count == 0) ||
+        (legacy_objects && legacy_weight_catalog == nullptr)) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    const WeightCatalogSnapshot weight_catalog =
+        metadata_store ? metadata_store->SnapshotWeightCatalog()
+                       : *legacy_weight_catalog;
+    WeightCatalog catalog_validator;
+    if (!catalog_validator.RestoreSnapshot(weight_catalog)) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
     // The ordered writer initializes its sequence from durable_prefix.
@@ -4108,6 +4119,12 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
 
     if (enable_multi_tenants_) {
         RebuildTenantQuotaUsageFromMetadata();
+    }
+
+    auto restored_weight_catalog =
+        weight_catalog_.RestoreSnapshot(weight_catalog);
+    if (!restored_weight_catalog) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
     LOG(INFO) << "Restored from standby: " << restored_object_count
@@ -12718,9 +12735,9 @@ MasterService::MetadataSerializer::Serialize() {
     msgpack::sbuffer sbuf;
     msgpack::packer<msgpack::sbuffer> packer(&sbuf);
 
-    // Create top-level map with 3 fields: "shards", "discarded_replicas",
-    // "replica_next_id"
-    packer.pack_map(3);
+    // Weight catalog is optional on decode so snapshots produced before weight
+    // management remain valid.
+    packer.pack_map(4);
 
     // 1. Serialize metadata shards
     packer.pack("shards");
@@ -12801,6 +12818,13 @@ MasterService::MetadataSerializer::Serialize() {
     packer.pack("replica_next_id");
     packer.pack(static_cast<uint64_t>(Replica::next_id_.load()));
 
+    packer.pack("weight_catalog");
+    const auto weight_catalog = service_->weight_catalog_.ExportSnapshot();
+    const auto encoded_weight_catalog = struct_pack::serialize(weight_catalog);
+    packer.pack_bin(encoded_weight_catalog.size());
+    packer.pack_bin_body(encoded_weight_catalog.data(),
+                         encoded_weight_catalog.size());
+
     return std::vector<uint8_t>(
         reinterpret_cast<const uint8_t*>(sbuf.data()),
         reinterpret_cast<const uint8_t*>(sbuf.data()) + sbuf.size());
@@ -12829,11 +12853,10 @@ MasterService::MetadataSerializer::Deserialize(
                                "Invalid MessagePack format: expected map"));
     }
 
-    // Expected format: top-level map with "shards", "discarded_replicas",
-    // and "replica_next_id"
     const msgpack::object* shards_obj = nullptr;
     const msgpack::object* discarded_replicas_obj = nullptr;
     const msgpack::object* replica_next_id_obj = nullptr;
+    const msgpack::object* weight_catalog_obj = nullptr;
 
     // Extract fields from top-level map
     for (uint32_t i = 0; i < obj.via.map.size; ++i) {
@@ -12846,9 +12869,13 @@ MasterService::MetadataSerializer::Deserialize(
                 discarded_replicas_obj = &obj.via.map.ptr[i].val;
             } else if (key == "replica_next_id") {
                 replica_next_id_obj = &obj.via.map.ptr[i].val;
+            } else if (key == "weight_catalog") {
+                weight_catalog_obj = &obj.via.map.ptr[i].val;
             }
         }
     }
+
+    service_->weight_catalog_.Clear();
 
     // Check required "shards" field
     if (shards_obj == nullptr) {
@@ -12932,6 +12959,31 @@ MasterService::MetadataSerializer::Deserialize(
     auto next_id = replica_next_id_obj->as<uint64_t>();
     Replica::next_id_.store(next_id);
     LOG(INFO) << "Restored Replica::next_id_ to " << next_id;
+
+    if (weight_catalog_obj != nullptr) {
+        if (weight_catalog_obj->type != msgpack::type::BIN) {
+            return tl::make_unexpected(SerializationError(
+                ErrorCode::DESERIALIZE_FAIL,
+                "Invalid MessagePack format: weight_catalog must be binary"));
+        }
+        WeightCatalogSnapshot weight_catalog;
+        const std::string encoded(
+            weight_catalog_obj->via.bin.ptr,
+            weight_catalog_obj->via.bin.ptr + weight_catalog_obj->via.bin.size);
+        if (struct_pack::deserialize_to(weight_catalog, encoded) !=
+            struct_pack::errc::ok) {
+            return tl::make_unexpected(SerializationError(
+                ErrorCode::DESERIALIZE_FAIL,
+                "Failed to deserialize weight_catalog snapshot"));
+        }
+        auto restored =
+            service_->weight_catalog_.RestoreSnapshot(weight_catalog);
+        if (!restored) {
+            return tl::make_unexpected(
+                SerializationError(ErrorCode::DESERIALIZE_FAIL,
+                                   "Invalid weight_catalog snapshot"));
+        }
+    }
     // Migrate old-format snapshots: re-route objects to their hash(tenant, key)
     // shards before rebuilding the group domain (which is derived from
     // metadata).
@@ -12942,6 +12994,7 @@ MasterService::MetadataSerializer::Deserialize(
 }
 
 void MasterService::MetadataSerializer::Reset() {
+    service_->weight_catalog_.Clear();
     service_->soft_pin_deadline_index_.Clear();
     for (auto& shard : service_->metadata_shards_) {
         shard.tenants.clear();
