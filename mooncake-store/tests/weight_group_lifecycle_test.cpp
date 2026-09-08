@@ -3,10 +3,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -628,6 +630,142 @@ TEST_F(WeightGroupLifecycleTest,
         service.ExistKey("payload-a", TenantId::Default()).value_or(false));
     EXPECT_FALSE(
         service.ExistKey(ManifestKey(), TenantId::Default()).value_or(false));
+}
+
+TEST_F(WeightGroupLifecycleTest, ExpiredLeaseDeleteSnapshotRemainsRestorable) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    const auto ready = PublishReady(service, context.client_id);
+    auto lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .holder = "snapshot-reader",
+            .ttl_ms = 5,
+        });
+    ASSERT_TRUE(lease.has_value());
+    std::this_thread::sleep_until(std::chrono::system_clock::time_point{
+        std::chrono::milliseconds(lease->expires_at_ms + 1)});
+
+    auto deleted = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
+        .identity = ready.identity,
+        .expected_metadata_generation = ready.metadata_generation,
+    });
+    ASSERT_TRUE(deleted.has_value());
+    ASSERT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+    const auto snapshot =
+        MasterServiceTestPeer::WeightMetadata(service).ExportSnapshot();
+    EXPECT_TRUE(snapshot.leases.empty());
+
+    WeightMetadataStore restored;
+    auto result = restored.RestoreSnapshot(snapshot);
+    EXPECT_TRUE(result.has_value())
+        << "A snapshot emitted after a successful public delete must restore";
+}
+
+TEST_F(WeightGroupLifecycleTest, CommitRejectsMismatchedAffinityCount) {
+    struct Case {
+        uint64_t declared_count;
+        std::vector<std::string> affinity_ids;
+        bool accepted;
+    };
+    for (const auto& test_case : std::vector<Case>{
+             {2, {"shared-affinity", "shared-affinity"}, false},
+             {1, {"", ""}, false},
+             {2, {"affinity-a", ""}, false},
+             {1, {"shared-affinity", "shared-affinity"}, true},
+             {2, {"affinity-a", "affinity-b"}, true},
+         }) {
+        SCOPED_TRACE(test_case.declared_count);
+        SCOPED_TRACE(test_case.affinity_ids[0] + "/" +
+                     test_case.affinity_ids[1]);
+        MasterService service;
+        const auto context = PrepareSimpleSegment(service);
+        const auto identity = Identity();
+        const std::vector<std::string> keys{"payload-a", "payload-b"};
+        auto importing = service.BeginWeightImport(BeginWeightImportRequest{
+            .identity = identity,
+            .payload_group_id = {},
+            .expected_payload_count = 2,
+            .expected_logical_bytes = 2048,
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::COLD,
+                    .mixed_hot_ratio = 0.5,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = test_case.declared_count,
+                    .affinity_digest = std::string(64, 'c'),
+                },
+        });
+        ASSERT_TRUE(importing.has_value());
+        ReplicateConfig payload_config;
+        payload_config.replica_num = 1;
+        payload_config.with_hard_pin = true;
+        payload_config.group_ids =
+            std::vector<std::string>{importing->manifest.payload_group_id};
+        payload_config.data_type = ObjectDataType::WEIGHT;
+        for (size_t index = 0; index < keys.size(); ++index) {
+            payload_config.residency_affinity_ids =
+                std::vector<std::string>{test_case.affinity_ids[index]};
+            PutCompletedObject(service, context.client_id, keys[index],
+                               payload_config, 1024);
+        }
+        ReplicateConfig manifest_config;
+        manifest_config.replica_num = 1;
+        manifest_config.with_hard_pin = true;
+        manifest_config.group_ids =
+            std::vector<std::string>{importing->manifest.payload_group_id};
+        manifest_config.data_type = ObjectDataType::METADATA;
+        const auto manifest_key = MakeWeightManifestKey(identity);
+        PutCompletedObject(service, context.client_id, manifest_key,
+                           manifest_config, 128);
+        auto committed = service.CommitWeightImport(CommitWeightImportRequest{
+            .identity = identity,
+            .expected_metadata_generation = importing->metadata_generation,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key = manifest_key,
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = importing->manifest.payload_group_id,
+                    .payload_keys_sha256 = ComputeWeightPayloadKeysSha256(keys),
+                    .payload_count = 2,
+                    .logical_bytes = 2048,
+                },
+        });
+        if (!test_case.accepted) {
+            ASSERT_FALSE(committed.has_value());
+            EXPECT_EQ(WeightManagementError::CONFLICT, committed.error());
+            auto view = service.GetWeightRevision(
+                GetWeightRevisionRequest{.identity = identity});
+            ASSERT_TRUE(view.has_value());
+            EXPECT_EQ(WeightAvailabilityState::IMPORTING,
+                      view->metadata.availability);
+            EXPECT_FALSE(view->metadata.operation_id.has_value());
+            continue;
+        }
+        ASSERT_TRUE(committed.has_value());
+        ASSERT_TRUE(committed->operation_id.has_value());
+        for (const auto& key : keys) {
+            AddLocalDiskReplica(service, context.client_id, key, 1024,
+                                "127.0.0.1:19001");
+        }
+        auto reconciled = service.ReconcileWeightRevision(
+            ReconcileWeightRevisionRequest{.identity = identity});
+        ASSERT_TRUE(reconciled.has_value());
+        auto operation =
+            service.QueryWeightOperation(QueryWeightOperationRequest{
+                .operation_id = *committed->operation_id,
+            });
+        ASSERT_TRUE(operation.has_value());
+        EXPECT_EQ("completed", operation->message)
+            << "An accepted import must converge after every payload becomes "
+               "cold; "
+            << "processed=" << operation->processed_units
+            << " total=" << operation->total_units;
+    }
 }
 
 }  // namespace
