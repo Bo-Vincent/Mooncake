@@ -95,6 +95,54 @@ print(store.get("hello_key").decode())
 store.close()
 ```
 
+## Managed Model-Weight Revisions
+
+The high-level `mooncake.reshard.weight.WeightStore` API publishes and loads an
+exact immutable weight revision through the Store catalog:
+
+```python
+from mooncake.reshard.weight import WeightRevisionIdentity, WeightStore
+
+weight_store = WeightStore(store)
+
+plan = weight_store.plan_managed_upload(
+    source_placement,
+    source_bindings,
+    namespace="production",
+    tenant_id="default",
+)
+receipts = []
+for binding in source_bindings:
+    receipts.extend(weight_store.upload(plan, source_placement, binding))
+manifest = weight_store.commit_upload(plan, receipts)
+
+identity = WeightRevisionIdentity(
+    tenant_id="default",
+    namespace="production",
+    resource_id=manifest.resource_id,
+    revision=manifest.revision,
+    weight_generation=manifest.weight_generation,
+)
+view = weight_store.get_weight_revision(identity)
+weight_store.load_weight_revision(identity, target_placement, target_bindings)
+```
+
+`load_weight_revision` acquires and renews a revision lease, validates the
+manifest identity and SHA-256 against the catalog, executes the Store-to-runtime
+loads, and releases the lease after terminal completion. Use
+`list_weight_revisions(namespace=..., resource_id=...)` for bounded discovery.
+
+The native `MooncakeDistributedStore` binding also exposes lower-level
+`begin_weight_import`, `commit_weight_import`, `abort_weight_import`, revision
+get/list, lease acquire/renew/release, residency start/query/reconcile, and
+delete operations. Native management calls return the value, catalog-domain
+error, and transport error separately; most applications should use the typed
+`WeightStore` facade.
+
+`load_manifest(manifest_key)` is retained only for unmanaged compatibility and
+does not hold a revision lease or provide aggregate lifecycle guarantees. See
+[Weight Management Architecture](../../design/weight-management.md).
+
 ## Basic API Usage
 
 ### Simple Get/Put Operations

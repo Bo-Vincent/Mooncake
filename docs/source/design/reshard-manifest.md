@@ -179,3 +179,11 @@ activation, rollback, and other control-plane policies. Framework adapters own
 object inspection and normalization. Planner, Store, and Transfer Engine
 adapters consume the resulting canonical manifests without changing their
 logical identity rules.
+
+`StoredWeightManifest` is the immutable storage specialization of this logical
+contract. It maps tensor fragments to Store object keys, offsets, and byte
+ranges. Store's `WeightRevisionMetadata` references that manifest but does not
+copy its tensors or fragments. Revision discovery, leases, residency, and
+deletion belong to the Weight Catalog described in
+[Weight Management Architecture](weight-management.md); live addresses and
+serving activation remain outside both records.
