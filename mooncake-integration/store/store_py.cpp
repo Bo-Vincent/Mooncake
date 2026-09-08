@@ -2386,6 +2386,20 @@ PYBIND11_MODULE(store, m) {
             py::arg("snapshot"), py::arg("adapter"),
             "Open a model-weight snapshot writer backed by this Store")
         .def(
+            "begin_managed_weight_snapshot",
+            [](MooncakeStorePyWrapper &self, py::object snapshot,
+               py::object adapter, const std::string &tenant_id) -> py::object {
+                py::object raw_store =
+                    py::cast(&self, py::return_value_policy::reference);
+                return py::module_::import("mooncake.reshard.weight.store")
+                    .attr("begin_managed_weight_snapshot")(
+                        raw_store, snapshot, adapter,
+                        py::arg("tenant_id") = tenant_id);
+            },
+            py::arg("snapshot"), py::arg("adapter"),
+            py::arg("tenant_id") = "default",
+            "Open a Store-managed model-weight snapshot writer")
+        .def(
             "_get_pyclient_capsule",
             [make_pyclient_capsule](MooncakeStorePyWrapper &self)
                 -> py::object { return make_pyclient_capsule(self.store_); },

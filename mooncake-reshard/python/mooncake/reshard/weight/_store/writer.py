@@ -27,6 +27,9 @@ class WeightStoreWriter:
         weight_store: WeightStore,
         snapshot: WeightSnapshotDescriptor,
         adapter: WeightSnapshotAdapter,
+        *,
+        managed: bool = False,
+        tenant_id: str = "default",
     ) -> None:
         self._weight_store = weight_store
         self.snapshot = snapshot
@@ -35,11 +38,19 @@ class WeightStoreWriter:
         self._placement = self._source.placement
         self._bindings = tuple(self._source.bindings)
         self._validate_source_identity()
-        self._plan = weight_store.plan_upload(
-            self._placement,
-            self._bindings,
-            namespace=snapshot.namespace,
-        )
+        if managed:
+            self._plan = weight_store.plan_managed_upload(
+                self._placement,
+                self._bindings,
+                namespace=snapshot.namespace,
+                tenant_id=tenant_id,
+            )
+        else:
+            self._plan = weight_store.plan_upload(
+                self._placement,
+                self._bindings,
+                namespace=snapshot.namespace,
+            )
         self._binding_by_participant = {
             binding.participant_id: binding for binding in self._bindings
         }

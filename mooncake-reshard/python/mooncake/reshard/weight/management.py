@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
+from typing import Any, Optional
 
 
 _MAX_U64 = (1 << 64) - 1
@@ -106,12 +106,19 @@ class WeightManifestReference:
     logical_bytes: int
 
     def __post_init__(self) -> None:
-        _require_string(self.manifest_key, "manifest_key")
-        _require_sha256(self.manifest_sha256, "manifest_sha256")
         _require_string(self.payload_group_id, "payload_group_id")
-        _require_sha256(self.payload_keys_sha256, "payload_keys_sha256")
         _require_u64(self.payload_count, "payload_count", nonzero=True)
         _require_u64(self.logical_bytes, "logical_bytes", nonzero=True)
+        unpublished = not (
+            self.manifest_key
+            or self.manifest_sha256
+            or self.payload_keys_sha256
+        )
+        if unpublished:
+            return
+        _require_string(self.manifest_key, "manifest_key")
+        _require_sha256(self.manifest_sha256, "manifest_sha256")
+        _require_sha256(self.payload_keys_sha256, "payload_keys_sha256")
 
 
 @dataclass(frozen=True)
@@ -229,7 +236,7 @@ class WeightRevisionPage:
         object.__setattr__(self, "revisions", revisions)
 
 
-def identity_from_native(value: object) -> WeightRevisionIdentity:
+def identity_from_native(value: Any) -> WeightRevisionIdentity:
     return WeightRevisionIdentity(
         tenant_id=value.tenant_id,
         namespace=value.name_space,
@@ -239,7 +246,7 @@ def identity_from_native(value: object) -> WeightRevisionIdentity:
     )
 
 
-def manifest_reference_from_native(value: object) -> WeightManifestReference:
+def manifest_reference_from_native(value: Any) -> WeightManifestReference:
     return WeightManifestReference(
         manifest_key=value.manifest_key,
         manifest_sha256=value.manifest_sha256,
@@ -250,7 +257,7 @@ def manifest_reference_from_native(value: object) -> WeightManifestReference:
     )
 
 
-def metadata_from_native(value: object) -> WeightRevisionMetadata:
+def metadata_from_native(value: Any) -> WeightRevisionMetadata:
     if isinstance(value, WeightRevisionMetadata):
         return value
     return WeightRevisionMetadata(
@@ -266,7 +273,7 @@ def metadata_from_native(value: object) -> WeightRevisionMetadata:
     )
 
 
-def lease_from_native(value: object) -> WeightRevisionLease:
+def lease_from_native(value: Any) -> WeightRevisionLease:
     if isinstance(value, WeightRevisionLease):
         return value
     return WeightRevisionLease(
@@ -278,7 +285,7 @@ def lease_from_native(value: object) -> WeightRevisionLease:
     )
 
 
-def operation_from_native(value: object) -> WeightResidencyOperation:
+def operation_from_native(value: Any) -> WeightResidencyOperation:
     if isinstance(value, WeightResidencyOperation):
         return value
     return WeightResidencyOperation(
@@ -296,7 +303,7 @@ def operation_from_native(value: object) -> WeightResidencyOperation:
     )
 
 
-def view_from_native(value: object) -> WeightRevisionView:
+def view_from_native(value: Any) -> WeightRevisionView:
     if isinstance(value, WeightRevisionView):
         return value
     return WeightRevisionView(

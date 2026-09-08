@@ -67,6 +67,7 @@ from .store import (
     WeightStoreWriter,
     WeightStore,
     WeightStoreError,
+    begin_managed_weight_snapshot,
 )
 
 __all__ = [
@@ -110,6 +111,7 @@ __all__ = [
     "WeightStoreWriter",
     "WeightStore",
     "WeightStoreError",
+    "begin_managed_weight_snapshot",
     "WeightUploadPlan",
     "plan_weight_upload",
     "BoundWeightFragment",

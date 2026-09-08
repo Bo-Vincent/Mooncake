@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from importlib import import_module
-from typing import Literal, Optional, Protocol, cast
+from typing import Any, Literal, Optional, Protocol, cast
 
 from ..._typing import TypeAlias
 
@@ -205,9 +205,10 @@ class StoreBackend:
         )
         if isinstance(value, WeightRevisionPage):
             return value
+        native = cast(Any, value)
         return WeightRevisionPage(
-            revisions=tuple(view_from_native(item) for item in value.revisions),
-            next_page_token=value.next_page_token,
+            revisions=tuple(view_from_native(item) for item in native.revisions),
+            next_page_token=native.next_page_token,
         )
 
     def acquire_weight_revision_lease(
