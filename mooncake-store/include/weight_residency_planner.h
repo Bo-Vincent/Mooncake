@@ -50,4 +50,7 @@ std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     WeightAutoMigrationSignal signal, uint64_t now_ms,
     uint64_t cooldown_ms);
 
+bool WeightAutoMigrationCandidateLess(const WeightRevisionMetadata& lhs,
+                                      const WeightRevisionMetadata& rhs);
+
 }  // namespace mooncake

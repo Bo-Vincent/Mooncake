@@ -367,17 +367,31 @@ bool OpLogApplier::ApplyWeightMetadataDelete(const OpLogEntry& entry) {
 }
 
 bool OpLogApplier::ApplyWeightLeaseUpsert(const OpLogEntry& entry) {
-    WeightRevisionLease next;
-    if (struct_pack::deserialize_to(next, entry.payload) !=
+    WeightLeaseUpsertOp upsert;
+    if (struct_pack::deserialize_to(upsert, entry.payload) !=
             struct_pack::errc::ok ||
-        next.lease_id == 0 ||
-        !ValidateWeightRevisionIdentity(next.identity).ok() ||
-        !IsValidWeightComponent(next.holder) || next.expires_at_ms == 0 ||
-        next.fenced_metadata_generation == 0 ||
-        NormalizeTenantId(entry.tenant_id) != next.identity.tenant_id ||
-        entry.object_key != MakeWeightLeaseMetadataKey(next.lease_id)) {
+        upsert.last_accessed_at_ms == 0 ||
+        upsert.lease.lease_id == 0 ||
+        !ValidateWeightRevisionIdentity(upsert.lease.identity).ok() ||
+        !IsValidWeightComponent(upsert.lease.holder) ||
+        upsert.lease.expires_at_ms == 0 ||
+        upsert.lease.fenced_metadata_generation == 0 ||
+        NormalizeTenantId(entry.tenant_id) !=
+            upsert.lease.identity.tenant_id ||
+        entry.object_key !=
+            MakeWeightLeaseMetadataKey(upsert.lease.lease_id)) {
         LOG(ERROR) << "OpLogApplier: invalid weight lease upsert, key="
                    << entry.object_key << ", sequence_id=" << entry.sequence_id;
+        return false;
+    }
+    const auto& next = upsert.lease;
+    const auto revision = metadata_store_->GetWeightMetadata(next.identity);
+    if (!revision.has_value() ||
+        revision->metadata_generation < next.fenced_metadata_generation ||
+        upsert.last_accessed_at_ms < revision->created_at_ms) {
+        LOG(ERROR) << "OpLogApplier: weight lease references missing or stale "
+                      "revision, id="
+                   << next.lease_id;
         return false;
     }
     if (metadata_store_->GetWeightLeaseTombstone(next.lease_id).has_value()) {
@@ -386,37 +400,39 @@ bool OpLogApplier::ApplyWeightLeaseUpsert(const OpLogEntry& entry) {
         return false;
     }
     const auto current = metadata_store_->GetWeightLease(next.lease_id);
+    bool lease_applied = false;
     if (!current.has_value()) {
-        const auto revision = metadata_store_->GetWeightMetadata(next.identity);
-        if (!revision.has_value() ||
-            revision->metadata_generation != next.fenced_metadata_generation) {
+        if (revision->metadata_generation !=
+            next.fenced_metadata_generation) {
             LOG(ERROR)
                 << "OpLogApplier: new weight lease references stale revision, "
                 << "id=" << next.lease_id;
             return false;
         }
-        return metadata_store_->PutWeightLease(next);
+        lease_applied = metadata_store_->PutWeightLease(next);
+    } else if (*current == next) {
+        lease_applied = true;
+    } else {
+        if (current->identity != next.identity ||
+            current->holder != next.holder ||
+            current->fenced_metadata_generation !=
+                next.fenced_metadata_generation ||
+            next.expires_at_ms < current->expires_at_ms) {
+            LOG(ERROR) << "OpLogApplier: conflicting weight lease upsert, id="
+                       << next.lease_id;
+            return false;
+        }
+        lease_applied = metadata_store_->PutWeightLease(next);
     }
-    if (*current == next) {
+    if (!lease_applied) {
+        return false;
+    }
+    if (upsert.last_accessed_at_ms <= revision->last_accessed_at_ms) {
         return true;
     }
-    if (current->identity != next.identity || current->holder != next.holder ||
-        current->fenced_metadata_generation !=
-            next.fenced_metadata_generation ||
-        next.expires_at_ms < current->expires_at_ms) {
-        LOG(ERROR) << "OpLogApplier: conflicting weight lease upsert, id="
-                   << next.lease_id;
-        return false;
-    }
-    const auto revision = metadata_store_->GetWeightMetadata(next.identity);
-    if (!revision.has_value() ||
-        revision->metadata_generation < next.fenced_metadata_generation) {
-        LOG(ERROR) << "OpLogApplier: renewed weight lease references missing "
-                      "revision, id="
-                   << next.lease_id;
-        return false;
-    }
-    return metadata_store_->PutWeightLease(next);
+    auto accessed = *revision;
+    accessed.last_accessed_at_ms = upsert.last_accessed_at_ms;
+    return metadata_store_->PutWeightMetadata(accessed);
 }
 
 bool OpLogApplier::ApplyWeightLeaseDelete(const OpLogEntry& entry) {
