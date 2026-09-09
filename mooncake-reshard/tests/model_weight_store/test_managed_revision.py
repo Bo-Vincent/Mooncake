@@ -475,9 +475,7 @@ def test_weight_management_crud_and_operation_facade() -> None:
         sources.bindings,
         tenant_id="tenant-a",
     )
-    receipts = weight_store.weight_put_payload(
-        plan, sources.placement, sources.binding
-    )
+    receipts = weight_store.weight_put_payload(plan, sources.placement, sources.binding)
     manifest = weight_store.weight_put_commit(plan, receipts)
     assert plan.management_identity is not None
     identity = plan.management_identity
@@ -513,9 +511,10 @@ def test_weight_management_crud_and_operation_facade() -> None:
         mixed_hot_ratio=0.25,
         expected_metadata_generation=updated.metadata_generation,
     )
-    assert weight_store.weight_get_operation(
-        operation.operation_id, tenant_id="tenant-a"
-    ) == operation
+    assert (
+        weight_store.weight_get_operation(operation.operation_id, tenant_id="tenant-a")
+        == operation
+    )
 
     migrated = raw.complete_operation(operation.operation_id)
 
