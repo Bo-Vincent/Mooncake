@@ -52,6 +52,7 @@ enum class WeightManagementError : uint8_t {
     LEASE_EXPIRED = 7,
     GENERATION_EXHAUSTED = 8,
     DURABILITY_FAILED = 9,
+    POLICY_UNSATISFIABLE = 10,
 };
 
 struct WeightRevisionIdentity {

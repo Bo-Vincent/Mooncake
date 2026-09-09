@@ -90,6 +90,8 @@ TEST(WeightManagementContractTest, ValidatesSha256AndGeneration) {
 }
 
 TEST(WeightManagementContractTest, RejectsInvalidStoragePolicyEnums) {
+    EXPECT_EQ(10,
+              static_cast<int>(WeightManagementError::POLICY_UNSATISFIABLE));
     auto policy = WeightStoragePolicy{};
     EXPECT_TRUE(ValidateWeightStoragePolicy(policy).ok());
     policy.migration_mode = static_cast<WeightMigrationMode>(255);

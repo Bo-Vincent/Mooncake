@@ -82,6 +82,7 @@ def test_operation_has_kind_target_and_byte_progress() -> None:
         identity=metadata.identity,
         kind=WeightOperationKind.MIGRATING,
         target_residency=WeightResidencyState.COLD,
+        target_hot_ratio=None,
         fenced_metadata_generation=metadata.metadata_generation,
         started_at_ms=20,
         updated_at_ms=21,
@@ -94,6 +95,27 @@ def test_operation_has_kind_target_and_byte_progress() -> None:
     )
     assert operation.kind is WeightOperationKind.MIGRATING
     assert operation.processed_bytes == 1024
+
+
+def test_mixed_operation_requires_target_ratio() -> None:
+    metadata = _metadata()
+    with pytest.raises(ValueError, match="target_hot_ratio"):
+        WeightResidencyOperation(
+            operation_id=7,
+            identity=metadata.identity,
+            kind=WeightOperationKind.MIGRATING,
+            target_residency=WeightResidencyState.MIXED,
+            target_hot_ratio=None,
+            fenced_metadata_generation=metadata.metadata_generation,
+            started_at_ms=20,
+            updated_at_ms=21,
+            processed_units=0,
+            total_units=2,
+            processed_bytes=0,
+            total_bytes=4096,
+            cursor="",
+            message="",
+        )
 
 
 def test_native_metadata_conversion_preserves_exact_identity() -> None:

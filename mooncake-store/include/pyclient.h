@@ -423,6 +423,10 @@ class PyClient {
         const ListWeightRevisionsRequest &) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
+    virtual WeightRpcResult<WeightRevisionMetadata> update_weight_policy(
+        const UpdateWeightPolicyRequest &) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
     virtual WeightRpcResult<WeightRevisionLease> acquire_weight_revision_lease(
         const AcquireWeightRevisionLeaseRequest &) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);

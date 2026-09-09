@@ -228,6 +228,7 @@ class WeightResidencyOperation:
     identity: WeightRevisionIdentity
     kind: WeightOperationKind
     target_residency: WeightResidencyState
+    target_hot_ratio: Optional[float]
     fenced_metadata_generation: int
     started_at_ms: int
     updated_at_ms: int
@@ -246,6 +247,19 @@ class WeightResidencyOperation:
         object.__setattr__(
             self, "target_residency", WeightResidencyState(self.target_residency)
         )
+        if self.target_residency is WeightResidencyState.MIXED:
+            if (
+                type(self.target_hot_ratio) not in (float, int)
+                or not 0.0 < float(self.target_hot_ratio) < 1.0
+            ):
+                raise ValueError(
+                    "target_hot_ratio must be between 0 and 1 for MIXED"
+                )
+            object.__setattr__(
+                self, "target_hot_ratio", float(self.target_hot_ratio)
+            )
+        elif self.target_hot_ratio is not None:
+            raise ValueError("target_hot_ratio is only valid for MIXED")
         for name in (
             "fenced_metadata_generation",
             "started_at_ms",
@@ -358,6 +372,7 @@ def operation_from_native(value: Any) -> WeightResidencyOperation:
         identity=identity_from_native(value.identity),
         kind=WeightOperationKind(int(value.kind)),
         target_residency=WeightResidencyState(int(value.target_residency)),
+        target_hot_ratio=value.target_hot_ratio,
         fenced_metadata_generation=value.fenced_metadata_generation,
         started_at_ms=value.started_at_ms,
         updated_at_ms=value.updated_at_ms,

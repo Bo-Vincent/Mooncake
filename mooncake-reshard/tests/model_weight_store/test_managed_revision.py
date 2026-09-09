@@ -179,6 +179,7 @@ class ManagedInMemoryStore(InMemoryStore):
         current: WeightRevisionMetadata,
         target: WeightResidencyState,
         *,
+        target_hot_ratio: float | None = None,
         preserve_generation: bool = False,
     ) -> tuple[WeightRevisionMetadata, WeightResidencyOperation]:
         operation_id = self.next_operation_id
@@ -193,6 +194,11 @@ class ManagedInMemoryStore(InMemoryStore):
             identity=current.identity,
             kind=WeightOperationKind.MIGRATING,
             target_residency=target,
+            target_hot_ratio=(
+                target_hot_ratio or current.policy.mixed_hot_ratio
+                if target is WeightResidencyState.MIXED
+                else None
+            ),
             fenced_metadata_generation=generation,
             started_at_ms=10,
             updated_at_ms=10,
@@ -318,7 +324,9 @@ class ManagedInMemoryStore(InMemoryStore):
         if args[5] != current.metadata_generation:
             return None, int(WeightManagementErrorCode.STALE_GENERATION), 0
         updated, operation = self._start_operation(
-            current, WeightResidencyState(args[6])
+            current,
+            WeightResidencyState(args[6]),
+            target_hot_ratio=args[7],
         )
         self.catalog[identity] = updated
         return operation, 0, 0

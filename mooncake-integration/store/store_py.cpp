@@ -2037,22 +2037,26 @@ PYBIND11_MODULE(store, m) {
         .value("COLD", WeightResidencyState::COLD)
         .value("MIXED", WeightResidencyState::MIXED)
         .value("ABSENT", WeightResidencyState::ABSENT);
-    py::enum_<WeightOperationState>(m, "WeightOperationState")
-        .value("NONE", WeightOperationState::NONE)
-        .value("EVICTING", WeightOperationState::EVICTING)
-        .value("REHYDRATING", WeightOperationState::REHYDRATING)
-        .value("REPAIRING", WeightOperationState::REPAIRING);
-    py::enum_<WeightCatalogError>(m, "WeightCatalogError")
-        .value("INVALID_ARGUMENT", WeightCatalogError::INVALID_ARGUMENT)
-        .value("NOT_FOUND", WeightCatalogError::NOT_FOUND)
-        .value("CONFLICT", WeightCatalogError::CONFLICT)
-        .value("STALE_GENERATION", WeightCatalogError::STALE_GENERATION)
-        .value("NOT_READY", WeightCatalogError::NOT_READY)
-        .value("BUSY", WeightCatalogError::BUSY)
-        .value("LEASE_EXPIRED", WeightCatalogError::LEASE_EXPIRED)
+    py::enum_<WeightMigrationMode>(m, "WeightMigrationMode")
+        .value("PINNED", WeightMigrationMode::PINNED)
+        .value("MANUAL", WeightMigrationMode::MANUAL)
+        .value("AUTO", WeightMigrationMode::AUTO);
+    py::enum_<WeightOperationKind>(m, "WeightOperationKind")
+        .value("MIGRATING", WeightOperationKind::MIGRATING)
+        .value("REPAIRING", WeightOperationKind::REPAIRING);
+    py::enum_<WeightManagementError>(m, "WeightManagementError")
+        .value("INVALID_ARGUMENT", WeightManagementError::INVALID_ARGUMENT)
+        .value("NOT_FOUND", WeightManagementError::NOT_FOUND)
+        .value("CONFLICT", WeightManagementError::CONFLICT)
+        .value("STALE_GENERATION", WeightManagementError::STALE_GENERATION)
+        .value("NOT_READY", WeightManagementError::NOT_READY)
+        .value("BUSY", WeightManagementError::BUSY)
+        .value("LEASE_EXPIRED", WeightManagementError::LEASE_EXPIRED)
         .value("GENERATION_EXHAUSTED",
-               WeightCatalogError::GENERATION_EXHAUSTED)
-        .value("DURABILITY_FAILED", WeightCatalogError::DURABILITY_FAILED);
+               WeightManagementError::GENERATION_EXHAUSTED)
+        .value("DURABILITY_FAILED", WeightManagementError::DURABILITY_FAILED)
+        .value("POLICY_UNSATISFIABLE",
+               WeightManagementError::POLICY_UNSATISFIABLE);
 
     py::class_<WeightRevisionIdentity>(m, "WeightRevisionIdentity")
         .def_property_readonly(
@@ -2077,13 +2081,23 @@ PYBIND11_MODULE(store, m) {
                       &WeightManifestReference::payload_keys_sha256)
         .def_readonly("payload_count", &WeightManifestReference::payload_count)
         .def_readonly("logical_bytes", &WeightManifestReference::logical_bytes);
+    py::class_<WeightStoragePolicy>(m, "WeightStoragePolicy")
+        .def_readonly("preferred_residency",
+                      &WeightStoragePolicy::preferred_residency)
+        .def_readonly("mixed_hot_ratio", &WeightStoragePolicy::mixed_hot_ratio)
+        .def_readonly("migration_mode", &WeightStoragePolicy::migration_mode);
     py::class_<WeightRevisionMetadata>(m, "WeightRevisionMetadata")
         .def_readonly("identity", &WeightRevisionMetadata::identity)
         .def_readonly("manifest", &WeightRevisionMetadata::manifest)
+        .def_readonly("policy", &WeightRevisionMetadata::policy)
         .def_readonly("availability", &WeightRevisionMetadata::availability)
         .def_readonly("residency", &WeightRevisionMetadata::residency)
-        .def_readonly("operation", &WeightRevisionMetadata::operation)
         .def_readonly("operation_id", &WeightRevisionMetadata::operation_id)
+        .def_readonly("affinity_count", &WeightRevisionMetadata::affinity_count)
+        .def_readonly("affinity_digest",
+                      &WeightRevisionMetadata::affinity_digest)
+        .def_readonly("observed_hot_ratio",
+                      &WeightRevisionMetadata::observed_hot_ratio)
         .def_readonly("metadata_generation",
                       &WeightRevisionMetadata::metadata_generation)
         .def_readonly("created_at_ms", &WeightRevisionMetadata::created_at_ms)
@@ -2108,19 +2122,21 @@ PYBIND11_MODULE(store, m) {
     py::class_<WeightResidencyOperation>(m, "WeightResidencyOperation")
         .def_readonly("operation_id", &WeightResidencyOperation::operation_id)
         .def_readonly("identity", &WeightResidencyOperation::identity)
-        .def_readonly("operation", &WeightResidencyOperation::operation)
+        .def_readonly("kind", &WeightResidencyOperation::kind)
         .def_readonly("target_residency",
                       &WeightResidencyOperation::target_residency)
+        .def_readonly("target_hot_ratio",
+                      &WeightResidencyOperation::target_hot_ratio)
         .def_readonly("fenced_metadata_generation",
                       &WeightResidencyOperation::fenced_metadata_generation)
-        .def_readonly("started_at_ms",
-                      &WeightResidencyOperation::started_at_ms)
-        .def_readonly("updated_at_ms",
-                      &WeightResidencyOperation::updated_at_ms)
-        .def_readonly("processed_members",
-                      &WeightResidencyOperation::processed_members)
-        .def_readonly("total_members",
-                      &WeightResidencyOperation::total_members)
+        .def_readonly("started_at_ms", &WeightResidencyOperation::started_at_ms)
+        .def_readonly("updated_at_ms", &WeightResidencyOperation::updated_at_ms)
+        .def_readonly("processed_units",
+                      &WeightResidencyOperation::processed_units)
+        .def_readonly("total_units", &WeightResidencyOperation::total_units)
+        .def_readonly("processed_bytes",
+                      &WeightResidencyOperation::processed_bytes)
+        .def_readonly("total_bytes", &WeightResidencyOperation::total_bytes)
         .def_readonly("cursor", &WeightResidencyOperation::cursor)
         .def_readonly("message", &WeightResidencyOperation::message);
 
@@ -3360,22 +3376,39 @@ PYBIND11_MODULE(store, m) {
     };
     store_class.def(
         "begin_weight_import",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation,
-                             const std::string &payload_group_id,
-                             uint64_t expected_payload_count,
-                             uint64_t expected_logical_bytes) {
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            const std::string &payload_group_id,
+            uint64_t expected_payload_count, uint64_t expected_logical_bytes,
+            bool has_policy, int preferred_residency, double mixed_hot_ratio,
+            int migration_mode, uint64_t affinity_count,
+            const std::string &affinity_digest) {
             auto request = BeginWeightImportRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
                 .payload_group_id = payload_group_id,
                 .expected_payload_count = expected_payload_count,
                 .expected_logical_bytes = expected_logical_bytes,
+                .policy = has_policy
+                              ? std::optional<WeightStoragePolicy>(
+                                    WeightStoragePolicy{
+                                        .preferred_residency =
+                                            static_cast<WeightResidencyState>(
+                                                preferred_residency),
+                                        .mixed_hot_ratio = mixed_hot_ratio,
+                                        .migration_mode =
+                                            static_cast<WeightMigrationMode>(
+                                                migration_mode),
+                                    })
+                              : std::nullopt,
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = affinity_count,
+                        .affinity_digest = affinity_digest,
+                    },
             };
             WeightRpcResult<WeightRevisionMetadata> result =
                 tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -3387,8 +3420,11 @@ PYBIND11_MODULE(store, m) {
         },
         py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
         py::arg("revision"), py::arg("weight_generation"),
-        py::arg("payload_group_id") = "", py::arg("expected_payload_count"),
-        py::arg("expected_logical_bytes"));
+        py::arg("payload_group_id"), py::arg("expected_payload_count"),
+        py::arg("expected_logical_bytes"), py::arg("has_policy"),
+        py::arg("preferred_residency"), py::arg("mixed_hot_ratio"),
+        py::arg("migration_mode"), py::arg("affinity_count"),
+        py::arg("affinity_digest"));
     store_class.def(
         "commit_weight_import",
         [identity_from_args](
@@ -3504,6 +3540,41 @@ PYBIND11_MODULE(store, m) {
         py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
         py::arg("page_token") = "", py::arg("limit") = 100);
     store_class.def(
+        "update_weight_policy",
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            uint64_t expected_metadata_generation, int preferred_residency,
+            double mixed_hot_ratio, int migration_mode) {
+            auto request = UpdateWeightPolicyRequest{
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
+                .expected_metadata_generation = expected_metadata_generation,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency =
+                            static_cast<WeightResidencyState>(
+                                preferred_residency),
+                        .mixed_hot_ratio = mixed_hot_ratio,
+                        .migration_mode =
+                            static_cast<WeightMigrationMode>(migration_mode),
+                    },
+            };
+            WeightRpcResult<WeightRevisionMetadata> result =
+                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            if (self.store_) {
+                py::gil_scoped_release release;
+                result = self.store_->update_weight_policy(request);
+            }
+            return weight_rpc_result_to_python(std::move(result));
+        },
+        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
+        py::arg("revision"), py::arg("weight_generation"),
+        py::arg("expected_metadata_generation"), py::arg("preferred_residency"),
+        py::arg("mixed_hot_ratio"), py::arg("migration_mode"));
+    store_class.def(
         "acquire_weight_revision_lease",
         [identity_from_args](MooncakeStorePyWrapper &self,
                              const std::string &tenant_id,
@@ -3570,21 +3641,20 @@ PYBIND11_MODULE(store, m) {
         py::arg("tenant_id"), py::arg("lease_id"));
     store_class.def(
         "start_weight_residency_operation",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation,
-                             uint64_t expected_metadata_generation,
-                             int target_residency) {
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            uint64_t expected_metadata_generation, int target_residency,
+            std::optional<double> mixed_hot_ratio) {
             auto request = StartWeightResidencyOperationRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
                 .expected_metadata_generation = expected_metadata_generation,
                 .target_residency =
                     static_cast<WeightResidencyState>(target_residency),
+                .mixed_hot_ratio = mixed_hot_ratio,
             };
             WeightRpcResult<WeightResidencyOperation> result =
                 tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -3596,8 +3666,8 @@ PYBIND11_MODULE(store, m) {
         },
         py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
         py::arg("revision"), py::arg("weight_generation"),
-        py::arg("expected_metadata_generation"),
-        py::arg("target_residency"));
+        py::arg("expected_metadata_generation"), py::arg("target_residency"),
+        py::arg("mixed_hot_ratio") = py::none());
     store_class.def(
         "query_weight_operation",
         [](MooncakeStorePyWrapper &self, const std::string &tenant_id,

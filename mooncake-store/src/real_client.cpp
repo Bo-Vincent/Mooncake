@@ -2356,6 +2356,8 @@ DEFINE_REAL_WEIGHT_METHOD(get_weight_revision, GetWeightRevision,
 DEFINE_REAL_WEIGHT_METHOD(list_weight_revisions, ListWeightRevisions,
                           ListWeightRevisionsRequest,
                           ListWeightRevisionsResponse)
+DEFINE_REAL_WEIGHT_METHOD(update_weight_policy, UpdateWeightPolicy,
+                          UpdateWeightPolicyRequest, WeightRevisionMetadata)
 DEFINE_REAL_WEIGHT_METHOD(acquire_weight_revision_lease,
                           AcquireWeightRevisionLease,
                           AcquireWeightRevisionLeaseRequest,

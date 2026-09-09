@@ -374,6 +374,8 @@ class RealClient : public PyClient {
         const GetWeightRevisionRequest &request) override;
     WeightRpcResult<ListWeightRevisionsResponse> list_weight_revisions(
         const ListWeightRevisionsRequest &request) override;
+    WeightRpcResult<WeightRevisionMetadata> update_weight_policy(
+        const UpdateWeightPolicyRequest &request) override;
     WeightRpcResult<WeightRevisionLease> acquire_weight_revision_lease(
         const AcquireWeightRevisionLeaseRequest &request) override;
     WeightRpcResult<WeightRevisionLease> renew_weight_revision_lease(
