@@ -192,9 +192,7 @@ class WeightRevisionMetadata:
             or not 0.0 <= float(self.observed_hot_ratio) <= 1.0
         ):
             raise ValueError("observed_hot_ratio must be between 0 and 1")
-        object.__setattr__(
-            self, "observed_hot_ratio", float(self.observed_hot_ratio)
-        )
+        object.__setattr__(self, "observed_hot_ratio", float(self.observed_hot_ratio))
         _require_u64(self.metadata_generation, "metadata_generation", nonzero=True)
         _require_u64(self.created_at_ms, "created_at_ms")
         _require_u64(self.updated_at_ms, "updated_at_ms")
@@ -202,9 +200,7 @@ class WeightRevisionMetadata:
         if self.updated_at_ms < self.created_at_ms:
             raise ValueError("updated_at_ms must not precede created_at_ms")
         if self.last_accessed_at_ms < self.created_at_ms:
-            raise ValueError(
-                "last_accessed_at_ms must not precede created_at_ms"
-            )
+            raise ValueError("last_accessed_at_ms must not precede created_at_ms")
 
 
 @dataclass(frozen=True)
@@ -258,12 +254,8 @@ class WeightResidencyOperation:
                 type(self.target_hot_ratio) not in (float, int)
                 or not 0.0 < float(self.target_hot_ratio) < 1.0
             ):
-                raise ValueError(
-                    "target_hot_ratio must be between 0 and 1 for MIXED"
-                )
-            object.__setattr__(
-                self, "target_hot_ratio", float(self.target_hot_ratio)
-            )
+                raise ValueError("target_hot_ratio must be between 0 and 1 for MIXED")
+            object.__setattr__(self, "target_hot_ratio", float(self.target_hot_ratio))
         elif self.target_hot_ratio is not None:
             raise ValueError("target_hot_ratio is only valid for MIXED")
         for name in (
