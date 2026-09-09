@@ -35,6 +35,7 @@ from ..lifetime import (
     acquire_weight_binding_token,
 )
 from .contracts import UploadOperation, UploadReceipt, WeightUploadPlan
+from .backend import set_residency_affinity_ids
 from .errors import WeightStoreError
 from .payload import PayloadStoreOperations
 from .transaction import WeightUploadTransaction
@@ -198,6 +199,11 @@ def _fragment_digest(fragment: PlacementFragment) -> StoredFragmentSnapshotId:
     return StoredFragmentSnapshotId(hashlib.sha256(value).hexdigest()[:24])
 
 
+def _residency_affinity_id(fragment: PlacementFragment) -> str:
+    logical_names = fragment.aliases or (fragment.tensor_id,)
+    return hashlib.sha256("\0".join(sorted(logical_names)).encode()).hexdigest()
+
+
 def plan_weight_upload(
     source_placement: WeightPlacementManifest,
     source_bindings: Sequence[WeightRuntimeBindingManifest],
@@ -256,6 +262,7 @@ def plan_weight_upload(
                 target=target,
                 source_generation=binding_manifest.generation,
                 source_lease_id=binding_manifest.lease_id,
+                residency_affinity_id=_residency_affinity_id(placement_fragment),
             )
         )
     manifest = StoredWeightManifest(
@@ -473,8 +480,12 @@ class WeightUploadService:
                         [operation.target.object_key for operation, _ in batch],
                         [current.address for _, current in batch],
                         [current.nbytes for _, current in batch],
-                        self.client.config_factory(
-                            [plan.manifest.group_id] * len(batch), "payload"
+                        set_residency_affinity_ids(
+                            self.client.config_factory(
+                                [plan.manifest.group_id] * len(batch),
+                                "payload",
+                            ),
+                            [operation.residency_affinity_id for operation, _ in batch],
                         ),
                     )
                     if len(results) != len(batch) or any(
