@@ -26,7 +26,9 @@ class PayloadStoreOperations:
             chunk = list(keys[begin : begin + self.client.max_ranges_per_request])
             results = batch_is_exist(chunk)
             if results is None:
-                results = [self.client.store.weight_is_exist_object(key) for key in chunk]
+                results = [
+                    self.client.store.weight_is_exist_object(key) for key in chunk
+                ]
             if len(results) != len(chunk):
                 raise WeightStoreError("payload existence check returned invalid count")
             for key, result in zip(chunk, results):
