@@ -292,7 +292,7 @@ class WeightUploadService:
         self.payloads = payloads
         self.transaction = transaction
 
-    def plan_upload(
+    def weight_put_plan(
         self,
         source_placement: WeightPlacementManifest,
         source_bindings: Sequence[WeightRuntimeBindingManifest],
@@ -306,7 +306,7 @@ class WeightUploadService:
             key_prefix=self.client.key_prefix,
         )
 
-    def upload(
+    def weight_put_payload(
         self,
         plan: WeightUploadPlan,
         source_placement: WeightPlacementManifest,
@@ -469,7 +469,7 @@ class WeightUploadService:
                         begin : begin + self.client.max_ranges_per_request
                     ]
                     store_io_started = True
-                    results = self.client.store.batch_put_from(
+                    results = self.client.store.weight_batch_put_from(
                         [operation.target.object_key for operation, _ in batch],
                         [current.address for _, current in batch],
                         [current.nbytes for _, current in batch],
