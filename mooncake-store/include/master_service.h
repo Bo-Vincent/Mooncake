@@ -1184,13 +1184,16 @@ class MasterService {
                 committed_soft_pin_timeout = std::nullopt,
             bool enable_hard_pin = false,
             ObjectDataType data_type_ = ObjectDataType::UNKNOWN,
-            std::string group_id_ = "", TenantId tenant_id_ = TenantId(),
+            std::string group_id_ = "",
+            std::string residency_affinity_id_ = "",
+            TenantId tenant_id_ = TenantId(),
             std::string user_key_ = {})
             : client_id(client_id_),
               put_start_time(put_start_time_),
               size(value_length),
               data_type(data_type_),
               group_id(std::move(group_id_)),
+              residency_affinity_id(std::move(residency_affinity_id_)),
               tenant_id(std::move(tenant_id_)),
               user_key(std::move(user_key_)),
               soft_pin_timeout(std::move(committed_soft_pin_timeout)),
@@ -1216,6 +1219,7 @@ class MasterService {
         std::optional<uint64_t> object_checksum;
         const ObjectDataType data_type{ObjectDataType::UNKNOWN};
         const std::string group_id;
+        const std::string residency_affinity_id;
         const TenantId tenant_id;
         const std::string user_key;
 
@@ -1830,6 +1834,7 @@ class MasterService {
 
     struct WeightGroupMemberSnapshot {
         std::string key;
+        std::string residency_affinity_id;
         uint64_t size{0};
         ObjectDataType data_type{ObjectDataType::UNKNOWN};
         bool readable{false};
@@ -2248,7 +2253,9 @@ class MasterService {
     auto InsertMetadata(MetadataShardAccessorRW& shard, const UUID& client_id,
                         const std::string& key, uint64_t value_length,
                         const ReplicateConfig& config,
-                        const std::string& group_id, const TenantId& tenant_id,
+                        const std::string& group_id,
+                        const std::string& residency_affinity_id,
+                        const TenantId& tenant_id,
                         const std::chrono::system_clock::time_point& now,
                         const ResolvedSoftPinRequest& soft_pin_request,
                         std::vector<Replica>&& replicas,
@@ -2263,7 +2270,8 @@ class MasterService {
         MetadataShardAccessorRW& shard, const UUID& client_id,
         const std::string& key, uint64_t value_length,
         const ReplicateConfig& config, const std::string& writer_host_id,
-        const std::string& group_id, const TenantId& tenant_id,
+        const std::string& group_id,
+        const std::string& residency_affinity_id, const TenantId& tenant_id,
         const std::chrono::system_clock::time_point& now,
         const ResolvedSoftPinRequest& soft_pin_request,
         std::optional<std::chrono::system_clock::time_point>

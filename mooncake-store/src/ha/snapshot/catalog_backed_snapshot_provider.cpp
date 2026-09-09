@@ -146,18 +146,21 @@ DeserializeStandbyObjectMetadata(
         // compatibility with MasterService::MetadataSerializer, which appends
         // them over time:
         //   data_type (positive int) appears before the replicas;
-        //   hard_pinned (bool) and group_id (str) trail them.
+        //   hard_pinned (bool), group_id (str), and residency affinity (str)
+        //   trail them.
         //   v1: 7 + replica_count, no optional fields
         //   v2: 8 + replica_count, either data_type or hard_pinned
         //   v3: 9 + replica_count, data_type + hard_pinned or
         //       hard_pinned + group_id
         //   v4: 10 + replica_count, data_type + hard_pinned + group_id
         //   v5: 11 + replica_count, v4 + object_checksum (ignored here)
+        //   v6: 11 + replica_count, v4 + residency_affinity_id
+        //   v7: 12 + replica_count, v6 + object_checksum (ignored here)
         // 64-bit arithmetic keeps an attacker-controlled near-UINT32_MAX
         // replica_count from wrapping the bounds and slipping an out-of-bounds
         // index through.
         constexpr uint64_t kBaseFieldCount = 7;
-        constexpr uint64_t kMaxOptionalFieldCount = 4;
+        constexpr uint64_t kMaxOptionalFieldCount = 5;
         const uint64_t total_elements = object.via.array.size;
         const uint64_t min_elements = kBaseFieldCount + replica_count;
         if (total_elements < min_elements ||
@@ -226,6 +229,11 @@ DeserializeStandbyObjectMetadata(
             group_id = array[index++].as<std::string>();
         }
 
+        std::string residency_affinity_id;
+        if (index < total_elements && array[index].type == msgpack::type::STR) {
+            residency_affinity_id = array[index++].as<std::string>();
+        }
+
         StandbyObjectMetadata metadata;
         metadata.client_id = client_id;
         metadata.size = size;
@@ -233,6 +241,7 @@ DeserializeStandbyObjectMetadata(
         metadata.data_type = data_type;
         metadata.group_id = std::move(group_id);
         metadata.hard_pinned = hard_pinned;
+        metadata.residency_affinity_id = std::move(residency_affinity_id);
         return std::optional<StandbyObjectMetadata>(std::move(metadata));
     } catch (const std::exception& ex) {
         LOG(ERROR) << "Failed to parse snapshot metadata entry: " << ex.what();

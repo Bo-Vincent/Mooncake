@@ -281,6 +281,19 @@ class SnapshotChildProcessTest : public ::testing::Test {
         return false;
     }
 
+    std::string ObjectResidencyAffinityId(const std::string& key,
+                                          size_t shard_idx) {
+        auto& shard = service_->metadata_shards_[shard_idx];
+        SharedMutexLocker lock(&shard.mutex, shared_lock_t{});
+        for (const auto& [tenant_id, tenant_state] : shard.tenants) {
+            auto it = tenant_state.metadata.find(key);
+            if (it != tenant_state.metadata.end()) {
+                return it->second.residency_affinity_id;
+            }
+        }
+        return {};
+    }
+
     std::string FindGroupIdOnDifferentShard(MasterService* svc,
                                             const std::string& key) {
         const size_t key_shard = svc->getShardIndex(key);
@@ -629,6 +642,8 @@ TEST_F(SnapshotChildProcessTest, RestoreRebuildsGroupedObjectRouting) {
     replicate_config.replica_num = 1;
     replicate_config.group_ids = std::vector<std::string>{
         FindGroupIdOnDifferentShard(service_.get(), key)};
+    replicate_config.residency_affinity_ids =
+        std::vector<std::string>{"opaque-affinity-id"};
 
     auto put_start = service_->PutStart(client_id, key, TenantId::Default(),
                                         1024, replicate_config);
@@ -649,6 +664,9 @@ TEST_F(SnapshotChildProcessTest, RestoreRebuildsGroupedObjectRouting) {
     auto restored_replicas = service_->GetReplicaList(key, TenantId::Default());
     ASSERT_TRUE(restored_replicas.has_value())
         << "Grouped key should remain reachable by key after restore";
+    EXPECT_EQ("opaque-affinity-id",
+              ObjectResidencyAffinityId(
+                  key, static_cast<uint32_t>(service_->getShardIndex(key))));
     ASSERT_TRUE(
         service_->Remove(key, TenantId::Default(), /*force=*/true).has_value());
     EXPECT_FALSE(service_->ExistKey(key, TenantId::Default()).value_or(true));
