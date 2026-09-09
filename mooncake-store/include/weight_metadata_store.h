@@ -13,6 +13,8 @@
 
 namespace mooncake {
 
+inline constexpr uint32_t kWeightMetadataSchemaVersion = 2;
+
 enum class WeightMetadataMutationKind : uint8_t {
     UPSERT = 0,
     ERASE = 1,
@@ -32,6 +34,7 @@ struct WeightLeaseMutation {
     uint64_t lease_id{0};
     std::optional<WeightRevisionLease> previous;
     std::optional<WeightRevisionLease> next;
+    std::optional<uint64_t> last_accessed_at_ms;
     bool no_op{false};
 };
 
@@ -43,7 +46,7 @@ struct WeightOperationMutation {
 };
 
 struct WeightMetadataSnapshot {
-    uint32_t schema_version{1};
+    uint32_t schema_version{kWeightMetadataSchemaVersion};
     std::vector<WeightRevisionMetadata> metadata;
     std::vector<WeightRevisionLease> leases;
     std::vector<WeightResidencyOperation> operations;

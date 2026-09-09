@@ -189,6 +189,7 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
         .metadata_generation = 1,
         .created_at_ms = now_ms,
         .updated_at_ms = now_ms,
+        .last_accessed_at_ms = now_ms,
     };
     return WeightMetadataMutation{
         .kind = WeightMetadataMutationKind::UPSERT,
@@ -260,6 +261,7 @@ WeightMetadataStore::PrepareCommitImport(
     next.observed_hot_ratio = 1.0;
     ++next.metadata_generation;
     next.updated_at_ms = std::max(next.updated_at_ms, now_ms);
+    next.last_accessed_at_ms = std::max(next.last_accessed_at_ms, now_ms);
     std::optional<WeightResidencyOperation> operation;
     if (next.policy.preferred_residency != WeightResidencyState::HOT) {
         if (next_operation_id_ == 0 ||
@@ -591,6 +593,7 @@ WeightMetadataStore::PrepareAcquireLease(
                 .fenced_metadata_generation =
                     request.expected_metadata_generation,
             },
+        .last_accessed_at_ms = now_ms,
         .no_op = false,
     };
 }
@@ -620,6 +623,7 @@ WeightMetadataStore::PrepareRenewLease(
         .lease_id = request.lease_id,
         .previous = current->second,
         .next = std::move(next),
+        .last_accessed_at_ms = now_ms,
     };
 }
 
@@ -701,9 +705,15 @@ WeightMetadataStore::Result<WeightRevisionLease> WeightMetadataStore::Publish(
 
     if (mutation.kind == WeightMetadataMutationKind::ERASE ||
         !mutation.next.has_value()) {
+        if (mutation.last_accessed_at_ms.has_value()) {
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+        }
         auto removed = current->second;
         leases_.erase(current);
         return removed;
+    }
+    if (!mutation.last_accessed_at_ms.has_value()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     const auto& next = *mutation.next;
@@ -717,6 +727,9 @@ WeightMetadataStore::Result<WeightRevisionLease> WeightMetadataStore::Publish(
     }
     if (revision->second.availability != WeightAvailabilityState::READY) {
         return tl::make_unexpected(WeightManagementError::NOT_READY);
+    }
+    if (*mutation.last_accessed_at_ms < revision->second.created_at_ms) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     if (revision->second.operation_id.has_value()) {
         const auto operation = operations_.find(*revision->second.operation_id);
@@ -733,6 +746,9 @@ WeightMetadataStore::Result<WeightRevisionLease> WeightMetadataStore::Publish(
     if (!mutation.previous.has_value()) {
         next_lease_id_ = std::max(next_lease_id_, next.lease_id + 1);
     }
+    revision->second.last_accessed_at_ms =
+        std::max(revision->second.last_accessed_at_ms,
+                 *mutation.last_accessed_at_ms);
     return next;
 }
 
@@ -1343,7 +1359,7 @@ bool WeightMetadataStore::AllowsGroupMemberMutation(
 WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
     std::lock_guard lock(mutex_);
     WeightMetadataSnapshot snapshot{
-        .schema_version = 1,
+        .schema_version = kWeightMetadataSchemaVersion,
         .metadata = {},
         .leases = {},
         .operations = {},
@@ -1378,7 +1394,8 @@ WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
 
 WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
     const WeightMetadataSnapshot& snapshot) {
-    if (snapshot.schema_version != 1 || snapshot.next_lease_id == 0 ||
+    if (snapshot.schema_version != kWeightMetadataSchemaVersion ||
+        snapshot.next_lease_id == 0 ||
         snapshot.next_operation_id == 0) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
