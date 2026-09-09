@@ -30,11 +30,24 @@
 
 #include "tent/runtime/transport.h"
 #include "tent/runtime/slab.h"
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
+#include "adaptive_congestion_control.h"
+#endif
 
 namespace mooncake {
 namespace tent {
 struct RdmaSlice;
 class RailMonitor;
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
+struct TentRdmaCongestionControlRoute {
+    explicit TentRdmaCongestionControlRoute(const adaptive_congestion_control::Config& config)
+        : domain(config, 1) {}
+
+    adaptive_congestion_control::DomainState domain;
+    std::atomic<uint32_t> endpoint_generation{0};
+    std::atomic<uint64_t> completed_bytes{0};
+};
+#endif
 
 struct RdmaSliceList {
     RdmaSlice* first = nullptr;
@@ -213,6 +226,11 @@ struct RdmaSlice {
     // rail_monitor. A stale completion/flush must not cancel another slice's
     // in-flight probe on the same per-worker RailMonitor.
     std::atomic<uint64_t> rail_probe_token{0};
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
+    TentRdmaCongestionControlRoute* congestion_control_route = nullptr;
+    adaptive_congestion_control::Permit congestion_control_permit;
+    uint32_t congestion_control_endpoint_generation = 0;
+#endif
     int priority = PRIO_HIGH;
 };
 
