@@ -493,24 +493,23 @@ class WeightStore:
             WeightResidencyState.MIXED,
         ):
             raise WeightStoreError("migration target must be HOT, COLD, or MIXED")
-        ratio = mixed_hot_ratio
-        if ratio is None and target is WeightResidencyState.MIXED:
-            ratio = self.weight_get_metadata(identity).metadata.policy.mixed_hot_ratio
-        if ratio is None:
-            ratio = 0.5
-        if (
-            target is WeightResidencyState.MIXED
-            and (
-                type(ratio) not in (float, int)
-                or not 0.0 < float(ratio) < 1.0
-            )
-        ):
-            raise WeightStoreError("mixed_hot_ratio must be between 0 and 1")
+        ratio: Optional[float] = None
+        if target is WeightResidencyState.MIXED:
+            candidate = mixed_hot_ratio
+            if candidate is None:
+                candidate = self.weight_get_metadata(
+                    identity
+                ).metadata.policy.mixed_hot_ratio
+            if type(candidate) not in (float, int) or not 0.0 < float(candidate) < 1.0:
+                raise WeightStoreError("mixed_hot_ratio must be between 0 and 1")
+            ratio = float(candidate)
+        elif mixed_hot_ratio is not None:
+            raise WeightStoreError("mixed_hot_ratio is only valid for MIXED")
         return self.store.weight_migrate(
             identity,
             expected_metadata_generation=expected_metadata_generation,
             target_residency=target,
-            mixed_hot_ratio=float(ratio),
+            mixed_hot_ratio=ratio,
         )
 
     def weight_get_operation(
@@ -556,9 +555,7 @@ class WeightStore:
                 view.metadata.manifest.manifest_key
             )
             self._verify_managed_manifest(view.metadata, manifest)
-            plan = self.weight_get_plan(
-                manifest, target_placement, target_bindings
-            )
+            plan = self.weight_get_plan(manifest, target_placement, target_bindings)
             for binding in target_bindings:
                 lease_guard.raise_if_failed()
                 if target_allocation_guards is None:
@@ -579,9 +576,7 @@ class WeightStore:
         target_placement: WeightPlacementManifest,
         target_bindings: Sequence[WeightRuntimeBindingManifest],
     ) -> WeightLoadPlan:
-        return self._load.weight_get_plan(
-            manifest, target_placement, target_bindings
-        )
+        return self._load.weight_get_plan(manifest, target_placement, target_bindings)
 
     def plan_load(
         self,
