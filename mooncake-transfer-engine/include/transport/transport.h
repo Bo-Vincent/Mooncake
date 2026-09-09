@@ -33,6 +33,9 @@
 
 #include "common/base/status.h"
 #include "transfer_metadata.h"
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+#include "adaptive_congestion_control.h"
+#endif
 
 namespace mooncake {
 
@@ -141,6 +144,12 @@ class Transport {
         // delete the slice.
         using CleanupCallback = void (*)(Slice *);
         CleanupCallback cleanup_callback = nullptr;
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+        adaptive_cc::Permit rdma_cc_permit;
+        void *rdma_cc_route = nullptr;
+        RdmaEndPoint *rdma_cc_endpoint = nullptr;
+        uint64_t rdma_cc_endpoint_generation = 0;
+#endif
 
         union {
             struct {
@@ -320,6 +329,14 @@ class Transport {
             auto cleanup = slice->cleanup_callback;
             slice->cleanup_callback = nullptr;
             if (cleanup) cleanup(slice);
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+            adaptive_cc::complete(slice->rdma_cc_permit,
+                                  adaptive_cc::OutcomeClass::kDerivedFlush,
+                                  adaptive_cc::FailureScope::kOperation);
+            slice->rdma_cc_route = nullptr;
+            slice->rdma_cc_endpoint = nullptr;
+            slice->rdma_cc_endpoint_generation = 0;
+#endif
 
             if (head_ - tail_ == kLazyDeleteSliceCapacity) {
                 delete slice;
