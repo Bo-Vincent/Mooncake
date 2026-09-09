@@ -44,6 +44,7 @@ class UploadOperation:
     target: StoredFragmentSnapshot
     source_generation: int
     source_lease_id: LeaseId
+    residency_affinity_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_placement, PlacementFragment):
@@ -59,6 +60,15 @@ class UploadOperation:
         ):
             _require_nonempty_string(getattr(self, name), name)
         _require_u64(self.source_generation, "source_generation")
+        _require_nonempty_string(
+            self.residency_affinity_id,
+            "residency_affinity_id",
+        )
+        if len(self.residency_affinity_id) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.residency_affinity_id
+        ):
+            raise ValueError("residency_affinity_id must be a SHA-256 digest")
         if (
             self.source_snapshot.placement_fragment_id
             != self.source_placement.placement_fragment_id
