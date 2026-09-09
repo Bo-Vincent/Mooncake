@@ -493,10 +493,7 @@ class WeightStore:
                 candidate = self.weight_get_metadata(
                     identity
                 ).metadata.policy.mixed_hot_ratio
-            if (
-                type(candidate) not in (float, int)
-                or not 0.0 < float(candidate) < 1.0
-            ):
+            if type(candidate) not in (float, int) or not 0.0 < float(candidate) < 1.0:
                 raise WeightStoreError("mixed_hot_ratio must be between 0 and 1")
             ratio = float(candidate)
         elif mixed_hot_ratio is not None:
@@ -551,9 +548,7 @@ class WeightStore:
                 view.metadata.manifest.manifest_key
             )
             self._verify_managed_manifest(view.metadata, manifest)
-            plan = self.weight_get_plan(
-                manifest, target_placement, target_bindings
-            )
+            plan = self.weight_get_plan(manifest, target_placement, target_bindings)
             for binding in target_bindings:
                 lease_guard.raise_if_failed()
                 if target_allocation_guards is None:
@@ -574,9 +569,7 @@ class WeightStore:
         target_placement: WeightPlacementManifest,
         target_bindings: Sequence[WeightRuntimeBindingManifest],
     ) -> WeightLoadPlan:
-        return self._load.weight_get_plan(
-            manifest, target_placement, target_bindings
-        )
+        return self._load.weight_get_plan(manifest, target_placement, target_bindings)
 
     def plan_load(
         self,

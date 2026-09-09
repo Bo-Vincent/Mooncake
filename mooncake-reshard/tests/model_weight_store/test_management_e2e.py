@@ -60,9 +60,7 @@ def test_managed_revision_public_workflow_end_to_end() -> None:
         revision=sources.placement.revision,
         weight_generation=sources.placement.weight_generation,
     )
-    assert raw.catalog[identity].availability is (
-        WeightAvailabilityState.IMPORTING
-    )
+    assert raw.catalog[identity].availability is (WeightAvailabilityState.IMPORTING)
 
     for binding in sources.bindings:
         fragment = binding.fragments[0]
@@ -75,10 +73,13 @@ def test_managed_revision_public_workflow_end_to_end() -> None:
     view = weight_store.weight_get_metadata(identity)
     assert view.metadata.availability is WeightAvailabilityState.READY
     assert view.metadata.operation_id is not None
-    assert weight_store.weight_get_operation(
-        view.metadata.operation_id,
-        tenant_id="tenant-a",
-    ).kind is WeightOperationKind.MIGRATING
+    assert (
+        weight_store.weight_get_operation(
+            view.metadata.operation_id,
+            tenant_id="tenant-a",
+        ).kind
+        is WeightOperationKind.MIGRATING
+    )
     assert view.metadata.manifest.manifest_key == manifest.manifest_key
     assert view.metadata.manifest.payload_group_id == manifest.group_id
 

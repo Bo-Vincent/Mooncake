@@ -275,9 +275,7 @@ class WeightUploadTransaction:
                 f"upload decision existence check failed: {control_key}: {exists}"
             )
         try:
-            return _decode_decision(
-                self.client.store.weight_get_object(control_key)
-            )
+            return _decode_decision(self.client.store.weight_get_object(control_key))
         except Exception as error:
             raise WeightStoreError(f"invalid upload decision: {control_key}") from error
 
