@@ -500,5 +500,45 @@ TEST_F(WeightGroupLifecycleTest,
         service.ExistKey(ManifestKey(), TenantId::Default()).value_or(false));
 }
 
+TEST_F(WeightGroupLifecycleTest,
+       DeleteBatchesPayloadsAndKeepsManifestUntilLastBatch) {
+    MasterService service;
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
+    std::vector<PayloadSpec> payloads;
+    payloads.reserve(65);
+    for (size_t index = 0; index < 65; ++index) {
+        payloads.push_back(PayloadSpec{
+            .key = "payload-" + std::to_string(index),
+            .size = 1,
+            .affinity_id = "affinity",
+        });
+    }
+    auto ready = PublishReadyWithPayloads(service, context.client_id, payloads);
+
+    auto deleting = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
+        .identity = ready.identity,
+        .expected_metadata_generation = ready.metadata_generation,
+    });
+
+    ASSERT_TRUE(deleting.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DELETING, deleting->availability);
+    const auto remaining = GetWeightGroupResidencyForTest(
+        service, ready.identity, ready.manifest.payload_group_id);
+    ASSERT_EQ(2u, remaining.size());
+    EXPECT_TRUE(std::any_of(remaining.begin(), remaining.end(),
+                            [](const auto& member) {
+                                return member.data_type ==
+                                       ObjectDataType::METADATA;
+                            }));
+
+    auto deleted = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
+        .identity = ready.identity,
+        .expected_metadata_generation = deleting->metadata_generation,
+    });
+    ASSERT_TRUE(deleted.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+    EXPECT_EQ(WeightResidencyState::ABSENT, deleted->residency);
+}
+
 }  // namespace
 }  // namespace mooncake::test
