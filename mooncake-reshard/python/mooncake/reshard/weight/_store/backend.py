@@ -160,6 +160,9 @@ class StoreBackend:
         payload_group_id: str,
         expected_payload_count: int,
         expected_logical_bytes: int,
+        policy: Optional[WeightStoragePolicy],
+        affinity_count: int,
+        affinity_digest: str,
     ) -> WeightRevisionMetadata:
         value = self._management_call(
             "begin_weight_import",
@@ -167,6 +170,12 @@ class StoreBackend:
             payload_group_id,
             expected_payload_count,
             expected_logical_bytes,
+            policy is not None,
+            int(policy.preferred_residency) if policy is not None else 0,
+            policy.mixed_hot_ratio if policy is not None else 0.5,
+            int(policy.migration_mode) if policy is not None else 0,
+            affinity_count,
+            affinity_digest,
         )
         return metadata_from_native(value)
 
@@ -271,12 +280,14 @@ class StoreBackend:
         *,
         expected_metadata_generation: int,
         target_residency: WeightResidencyState,
+        mixed_hot_ratio: Optional[float],
     ) -> WeightResidencyOperation:
         value = self._management_call(
             "start_weight_residency_operation",
             *self._identity_args(identity),
             expected_metadata_generation,
             int(target_residency),
+            mixed_hot_ratio,
         )
         return operation_from_native(value)
 
