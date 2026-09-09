@@ -50,6 +50,7 @@ def _metadata() -> WeightRevisionMetadata:
         metadata_generation=2,
         created_at_ms=10,
         updated_at_ms=20,
+        last_accessed_at_ms=15,
     )
 
 
@@ -127,7 +128,9 @@ def test_native_metadata_conversion_preserves_exact_identity() -> None:
     native.identity = SimpleNamespace(**metadata.identity.__dict__)
     native.manifest = SimpleNamespace(**metadata.manifest.__dict__)
 
-    assert metadata_from_native(native) == metadata
+    converted = metadata_from_native(native)
+    assert converted == metadata
+    assert converted.last_accessed_at_ms == 15
 
 
 def test_error_mapping_retains_domain_code() -> None:
