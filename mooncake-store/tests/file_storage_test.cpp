@@ -661,6 +661,29 @@ TEST_F(FileStorageTest, GroupOffloadingKeysByBucket_deduplicates_carryover) {
     EXPECT_EQ(GetUngroupedOffloadingObjectsSize(fileStorage), 0);
 }
 
+TEST_F(FileStorageTest, GroupOffloadingKeysByBucket_flushes_replayed_tail) {
+    std::unordered_map<std::string, int64_t> offloading_objects;
+    offloading_objects.emplace("tail-0", 1);
+    offloading_objects.emplace("tail-1", 1);
+
+    std::vector<std::vector<std::string>> buckets_keys;
+    auto file_storage_config = FileStorageConfig::FromEnvironment();
+    file_storage_config.storage_filepath = data_path;
+    SetEnv("MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT", "10");
+    FileStorage fileStorage(file_storage_config, nullptr, "localhost:9003");
+
+    ASSERT_TRUE(FileStorageGroupOffloadingKeysByBucket(
+        fileStorage, offloading_objects, buckets_keys));
+    ASSERT_TRUE(buckets_keys.empty());
+    ASSERT_EQ(GetUngroupedOffloadingObjectsSize(fileStorage), 2);
+
+    ASSERT_TRUE(FileStorageGroupOffloadingKeysByBucket(
+        fileStorage, offloading_objects, buckets_keys));
+    ASSERT_EQ(buckets_keys.size(), 1);
+    EXPECT_EQ(buckets_keys.front().size(), 2);
+    EXPECT_EQ(GetUngroupedOffloadingObjectsSize(fileStorage), 0);
+}
+
 TEST_F(FileStorageTest, GroupOffloadingKeysByBucket_bucket_size_limit) {
     std::unordered_map<std::string, int64_t> offloading_objects;
     for (size_t i = 0; i < 35; i++) {
