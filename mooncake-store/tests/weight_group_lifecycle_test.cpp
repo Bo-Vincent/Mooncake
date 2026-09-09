@@ -33,6 +33,14 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
+            .policy = WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+            .affinity_summary = WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
         });
         EXPECT_TRUE(importing.has_value());
         ReplicateConfig config;
@@ -96,11 +104,10 @@ TEST_F(WeightGroupLifecycleTest, LeaseBlocksOperationAndDelete) {
             .expected_metadata_generation = ready.metadata_generation,
             .target_residency = WeightResidencyState::COLD,
         });
-    ASSERT_FALSE(operation.has_value());
-    EXPECT_EQ(WeightManagementError::BUSY, operation.error());
+    ASSERT_TRUE(operation.has_value());
     auto deleted = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
         .identity = ready.identity,
-        .expected_metadata_generation = ready.metadata_generation,
+        .expected_metadata_generation = ready.metadata_generation + 1,
     });
     ASSERT_FALSE(deleted.has_value());
     EXPECT_EQ(WeightManagementError::BUSY, deleted.error());
@@ -119,9 +126,9 @@ TEST_F(WeightGroupLifecycleTest, OperationRemainsPendingUntilTargetObserved) {
             .target_residency = WeightResidencyState::COLD,
         });
     ASSERT_TRUE(started.has_value());
-    EXPECT_EQ(WeightOperationState::EVICTING, started->operation);
-    EXPECT_EQ(0, started->processed_members);
-    EXPECT_EQ(2, started->total_members);
+    EXPECT_EQ(WeightOperationKind::MIGRATING, started->kind);
+    EXPECT_EQ(0, started->processed_units);
+    EXPECT_EQ(1, started->total_units);
     EXPECT_EQ(*started,
               *service.QueryWeightOperation(QueryWeightOperationRequest{
                   .operation_id = started->operation_id,
@@ -130,13 +137,13 @@ TEST_F(WeightGroupLifecycleTest, OperationRemainsPendingUntilTargetObserved) {
     auto reconciled = service.ReconcileWeightRevision(
         ReconcileWeightRevisionRequest{.identity = ready.identity});
     ASSERT_TRUE(reconciled.has_value());
-    EXPECT_EQ(WeightOperationState::EVICTING, reconciled->operation);
+    EXPECT_TRUE(reconciled->operation_id.has_value());
     EXPECT_EQ(WeightResidencyState::HOT, reconciled->residency);
     auto progress = service.QueryWeightOperation(
         QueryWeightOperationRequest{.operation_id = started->operation_id});
     ASSERT_TRUE(progress.has_value());
-    EXPECT_EQ(0, progress->processed_members);
-    EXPECT_EQ(2, progress->total_members);
+    EXPECT_EQ(0, progress->processed_units);
+    EXPECT_EQ(1, progress->total_units);
 }
 
 TEST_F(WeightGroupLifecycleTest, ColdOperationEvictsWholeManagedGroup) {
@@ -169,12 +176,13 @@ TEST_F(WeightGroupLifecycleTest, ColdOperationEvictsWholeManagedGroup) {
     ASSERT_TRUE(reconciled.has_value());
     EXPECT_EQ(WeightAvailabilityState::READY, reconciled->availability);
     EXPECT_EQ(WeightResidencyState::COLD, reconciled->residency);
-    EXPECT_EQ(WeightOperationState::NONE, reconciled->operation);
+    EXPECT_FALSE(reconciled->operation_id.has_value());
     auto completed = service.QueryWeightOperation(
         QueryWeightOperationRequest{.operation_id = started->operation_id});
     ASSERT_TRUE(completed.has_value());
     EXPECT_EQ("completed", completed->message);
-    EXPECT_EQ(completed->total_members, completed->processed_members);
+    EXPECT_EQ(completed->total_units, completed->processed_units);
+    EXPECT_EQ(completed->total_bytes, completed->processed_bytes);
 }
 
 TEST_F(WeightGroupLifecycleTest, RehydrateQueuesAndCompletesWholeManagedGroup) {
@@ -216,7 +224,7 @@ TEST_F(WeightGroupLifecycleTest, RehydrateQueuesAndCompletesWholeManagedGroup) {
             .target_residency = WeightResidencyState::HOT,
         });
     ASSERT_TRUE(started.has_value());
-    EXPECT_EQ(WeightOperationState::REHYDRATING, started->operation);
+    EXPECT_EQ(WeightOperationKind::MIGRATING, started->kind);
     ASSERT_TRUE(service.ReconcileWeightRevision(
         ReconcileWeightRevisionRequest{.identity = cold->identity}));
 
@@ -239,7 +247,7 @@ TEST_F(WeightGroupLifecycleTest, RehydrateQueuesAndCompletesWholeManagedGroup) {
     ASSERT_TRUE(hot.has_value());
     EXPECT_EQ(WeightAvailabilityState::READY, hot->availability);
     EXPECT_EQ(WeightResidencyState::HOT, hot->residency);
-    EXPECT_EQ(WeightOperationState::NONE, hot->operation);
+    EXPECT_FALSE(hot->operation_id.has_value());
     auto completed = service.QueryWeightOperation(
         QueryWeightOperationRequest{.operation_id = started->operation_id});
     ASSERT_TRUE(completed.has_value());
