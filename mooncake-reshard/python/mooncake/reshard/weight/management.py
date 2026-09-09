@@ -167,6 +167,7 @@ class WeightRevisionMetadata:
     metadata_generation: int
     created_at_ms: int
     updated_at_ms: int
+    last_accessed_at_ms: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, WeightRevisionIdentity):
@@ -197,8 +198,13 @@ class WeightRevisionMetadata:
         _require_u64(self.metadata_generation, "metadata_generation", nonzero=True)
         _require_u64(self.created_at_ms, "created_at_ms")
         _require_u64(self.updated_at_ms, "updated_at_ms")
+        _require_u64(self.last_accessed_at_ms, "last_accessed_at_ms")
         if self.updated_at_ms < self.created_at_ms:
             raise ValueError("updated_at_ms must not precede created_at_ms")
+        if self.last_accessed_at_ms < self.created_at_ms:
+            raise ValueError(
+                "last_accessed_at_ms must not precede created_at_ms"
+            )
 
 
 @dataclass(frozen=True)
@@ -349,6 +355,7 @@ def metadata_from_native(value: Any) -> WeightRevisionMetadata:
         metadata_generation=value.metadata_generation,
         created_at_ms=value.created_at_ms,
         updated_at_ms=value.updated_at_ms,
+        last_accessed_at_ms=value.last_accessed_at_ms,
     )
 
 
