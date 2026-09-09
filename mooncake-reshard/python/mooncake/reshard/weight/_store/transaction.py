@@ -98,7 +98,7 @@ class WeightUploadTransaction:
         self.client = client
         self.payloads = payloads
 
-    def abort_upload(
+    def weight_put_abort(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
@@ -120,7 +120,7 @@ class WeightUploadTransaction:
         if failures:
             raise WeightStoreError(f"upload cleanup failed: {failures}")
 
-    def finalize_upload_transaction(self, plan: WeightUploadPlan) -> None:
+    def weight_put_finalize(self, plan: WeightUploadPlan) -> None:
         decision = self._load_decision_if_present(plan.control_key)
         if decision is None:
             persisted = self._load_manifest_if_present(plan.manifest.manifest_key)
@@ -157,7 +157,7 @@ class WeightUploadTransaction:
             if failures:
                 raise WeightStoreError(f"upload cleanup failed: {failures}")
 
-    def commit(
+    def weight_put_commit(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
@@ -275,7 +275,9 @@ class WeightUploadTransaction:
                 f"upload decision existence check failed: {control_key}: {exists}"
             )
         try:
-            return _decode_decision(self.client.store.weight_get_object(control_key))
+            return _decode_decision(
+                self.client.store.weight_get_object(control_key)
+            )
         except Exception as error:
             raise WeightStoreError(f"invalid upload decision: {control_key}") from error
 
