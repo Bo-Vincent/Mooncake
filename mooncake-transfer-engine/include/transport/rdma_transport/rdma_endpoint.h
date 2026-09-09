@@ -151,6 +151,11 @@ class RdmaEndPoint {
     // Failed tasks (which must be submitted) are inserted in failed_slice_list
     int submitPostSend(std::vector<Transport::Slice *> &slice_list,
                        std::vector<Transport::Slice *> &failed_slice_list);
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
+    int submitPostSendLimited(
+        std::vector<Transport::Slice *> &slice_list,
+        std::vector<Transport::Slice *> &failed_slice_list, size_t max_count);
+#endif
 
     // Get the number of QPs in this endpoint
     size_t getQPNumber() const;
