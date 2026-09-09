@@ -2125,7 +2125,9 @@ PYBIND11_MODULE(store, m) {
         .def_readonly("metadata_generation",
                       &WeightRevisionMetadata::metadata_generation)
         .def_readonly("created_at_ms", &WeightRevisionMetadata::created_at_ms)
-        .def_readonly("updated_at_ms", &WeightRevisionMetadata::updated_at_ms);
+        .def_readonly("updated_at_ms", &WeightRevisionMetadata::updated_at_ms)
+        .def_readonly("last_accessed_at_ms",
+                      &WeightRevisionMetadata::last_accessed_at_ms);
     py::class_<WeightRevisionLease>(m, "WeightRevisionLease")
         .def_readonly("lease_id", &WeightRevisionLease::lease_id)
         .def_readonly("identity", &WeightRevisionLease::identity)
