@@ -1388,8 +1388,9 @@ class MasterService {
     GroupEvictionResult EvictManagedWeightMembersToCold(
         const WeightRevisionMetadata& metadata,
         const std::vector<std::string>& member_keys);
-    void QueueManagedWeightMemberOffload(const WeightRevisionMetadata& metadata,
-                                         const std::string& member_key);
+    bool QueueManagedWeightMemberOffload(
+        const WeightRevisionMetadata& metadata,
+        const std::string& member_key);
 
     // Evicts every member of `group_id` across its metadata shards. MUST be
     // called WITHOUT holding any metadata shard lock: the caller releases the
