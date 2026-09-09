@@ -89,6 +89,7 @@ TEST(MasterServiceConfigTest, DefaultWeightPolicyPropagatesToServingConfig) {
         .mixed_hot_ratio = 0.25,
         .migration_mode = WeightMigrationMode::MANUAL,
     };
+    master_config.weight_migration_cooldown_ms = 1234;
     MasterServiceSupervisorConfig supervisor_config(master_config);
     WrappedMasterServiceConfig wrapped_config(supervisor_config, 1);
     MasterServiceConfig service_config(wrapped_config);
@@ -99,6 +100,14 @@ TEST(MasterServiceConfigTest, DefaultWeightPolicyPropagatesToServingConfig) {
               wrapped_config.default_weight_storage_policy);
     EXPECT_EQ(master_config.default_weight_storage_policy,
               service_config.default_weight_storage_policy);
+    EXPECT_EQ(1234u, supervisor_config.weight_migration_cooldown_ms);
+    EXPECT_EQ(1234u, wrapped_config.weight_migration_cooldown_ms);
+    EXPECT_EQ(1234u, service_config.weight_migration_cooldown_ms);
+
+    auto built = MasterServiceConfig::builder()
+                     .set_weight_migration_cooldown_ms(5678)
+                     .build();
+    EXPECT_EQ(5678u, built.weight_migration_cooldown_ms);
 }
 
 }  // namespace mooncake::test
