@@ -36,6 +36,14 @@ TEST(WeightManagementRpcTest, RegistersEveryApiAndBindsTenant) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy = WeightStoragePolicy{
+            .preferred_residency = WeightResidencyState::HOT,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        },
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     };
     auto begin = client.BeginWeightImport(begin_request);
     ASSERT_TRUE(Domain(begin).has_value());

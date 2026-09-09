@@ -308,8 +308,10 @@ WeightMetadataSnapshot MakeWeightMetadataSnapshot() {
                 },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
-            .operation = WeightOperationState::EVICTING,
             .operation_id = 3,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 4,
             .created_at_ms = 100,
             .updated_at_ms = 200,
@@ -324,13 +326,15 @@ WeightMetadataSnapshot MakeWeightMetadataSnapshot() {
         .operations = {WeightResidencyOperation{
             .operation_id = 3,
             .identity = identity,
-            .operation = WeightOperationState::EVICTING,
+            .kind = WeightOperationKind::MIGRATING,
             .target_residency = WeightResidencyState::COLD,
             .fenced_metadata_generation = 4,
             .started_at_ms = 150,
             .updated_at_ms = 200,
-            .processed_members = 0,
-            .total_members = 2,
+            .processed_units = 0,
+            .total_units = 1,
+            .processed_bytes = 0,
+            .total_bytes = 1024,
             .cursor = {},
             .message = {},
         }},
@@ -841,8 +845,8 @@ TEST_F(HotStandbyServiceTest, AppliesNewerWeightMetadataOpLogAfterSnapshot) {
     auto& baseline_metadata = baseline_snapshot.metadata.front();
     baseline_metadata.availability = WeightAvailabilityState::IMPORTING;
     baseline_metadata.residency = WeightResidencyState::UNKNOWN;
-    baseline_metadata.operation = WeightOperationState::NONE;
-    baseline_metadata.operation_id = 0;
+    baseline_metadata.operation_id.reset();
+    baseline_metadata.observed_hot_ratio = 0.0;
     baseline_metadata.metadata_generation = 1;
     baseline_metadata.updated_at_ms = 100;
     LoadedSnapshot loaded;
