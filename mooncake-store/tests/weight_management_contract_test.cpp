@@ -146,6 +146,23 @@ TEST(WeightManagementContractTest, EnforcesStateCombinationAndOperationIds) {
     metadata.residency = WeightResidencyState::ABSENT;
     metadata.observed_hot_ratio = 0.0;
     EXPECT_TRUE(ValidateWeightRevisionMetadata(metadata).ok());
+
+    metadata.availability = WeightAvailabilityState::IMPORTING;
+    EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
+    metadata.residency = WeightResidencyState::UNKNOWN;
+    EXPECT_TRUE(ValidateWeightRevisionMetadata(metadata).ok());
+    metadata.operation_id = 10;
+    EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
+
+    metadata.operation_id.reset();
+    metadata.availability = WeightAvailabilityState::READY;
+    EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
+    metadata.residency = static_cast<WeightResidencyState>(255);
+    EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
+    metadata.residency = WeightResidencyState::HOT;
+    metadata.observed_hot_ratio = 1.0;
+    metadata.availability = static_cast<WeightAvailabilityState>(255);
+    EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
 }
 
 TEST(WeightManagementContractTest, RestrictsAvailabilityTransitions) {

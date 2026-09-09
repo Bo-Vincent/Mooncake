@@ -1404,6 +1404,10 @@ WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
             !IsValidWeightComponent(lease.holder) || lease.expires_at_ms == 0 ||
             lease.fenced_metadata_generation == 0 ||
             revision == revisions.end() ||
+            (revision->second.availability !=
+                 WeightAvailabilityState::READY &&
+             revision->second.availability !=
+                 WeightAvailabilityState::DEGRADED) ||
             lease.fenced_metadata_generation >
                 revision->second.metadata_generation ||
             !leases.emplace(lease.lease_id, lease).second) {
@@ -1435,11 +1439,18 @@ WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
             operation.fenced_metadata_generation == 0 ||
             operation.updated_at_ms < operation.started_at_ms ||
             operation.total_units == 0 || operation.total_bytes == 0 ||
+            revision == revisions.end() ||
+            operation.total_units != revision->second.affinity_count ||
+            operation.total_bytes != revision->second.manifest.logical_bytes ||
             operation.processed_units > operation.total_units ||
             operation.processed_bytes > operation.total_bytes ||
             (!operation.cursor.empty() &&
              !IsValidWeightComponent(operation.cursor)) ||
-            revision == revisions.end() ||
+            (completed &&
+             (revision->second.operation_id == operation.operation_id ||
+              operation.processed_units != operation.total_units ||
+              operation.processed_bytes != operation.total_bytes ||
+              !operation.cursor.empty())) ||
             (!completed &&
              (!revision->second.operation_id.has_value() ||
               *revision->second.operation_id != operation.operation_id ||

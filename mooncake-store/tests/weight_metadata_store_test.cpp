@@ -479,6 +479,53 @@ TEST(WeightMetadataStoreTest, RestoresMultipleCompletedOperations) {
     EXPECT_EQ("completed", restored.QueryOperation(2)->message);
 }
 
+TEST(WeightMetadataStoreTest, RejectsSnapshotWithLeaseOnDeletedRevision) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto lease = metadata_store.PrepareAcquireLease(
+        AcquireWeightRevisionLeaseRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .holder = "worker-1",
+            .ttl_ms = 100,
+        },
+        300);
+    ASSERT_TRUE(lease.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*lease).has_value());
+    auto snapshot = metadata_store.ExportSnapshot();
+    ASSERT_EQ(1, snapshot.metadata.size());
+    snapshot.metadata[0].availability = WeightAvailabilityState::DELETED;
+    snapshot.metadata[0].residency = WeightResidencyState::ABSENT;
+    snapshot.metadata[0].observed_hot_ratio = 0.0;
+
+    WeightMetadataStore restored;
+    auto result = restored.RestoreSnapshot(snapshot);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, result.error());
+}
+
+TEST(WeightMetadataStoreTest, RejectsSnapshotWithMismatchedOperationTotals) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto started = metadata_store.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        300);
+    ASSERT_TRUE(started.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*started).has_value());
+    auto snapshot = metadata_store.ExportSnapshot();
+    ASSERT_EQ(1, snapshot.operations.size());
+    ++snapshot.operations[0].total_units;
+
+    WeightMetadataStore restored;
+    auto result = restored.RestoreSnapshot(snapshot);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, result.error());
+}
+
 TEST(WeightMetadataStoreTest, DeleteRetainsAbsentTombstone) {
     WeightMetadataStore metadata_store;
     auto ready = PublishReady(metadata_store);

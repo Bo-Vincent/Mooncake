@@ -460,6 +460,20 @@ inline bool IsWeightResidencyTarget(WeightResidencyState residency) {
            residency == WeightResidencyState::MIXED;
 }
 
+inline bool IsValidWeightAvailabilityState(WeightAvailabilityState state) {
+    return state == WeightAvailabilityState::IMPORTING ||
+           state == WeightAvailabilityState::READY ||
+           state == WeightAvailabilityState::DEGRADED ||
+           state == WeightAvailabilityState::DELETING ||
+           state == WeightAvailabilityState::DELETED;
+}
+
+inline bool IsValidWeightResidencyState(WeightResidencyState state) {
+    return state == WeightResidencyState::UNKNOWN ||
+           IsWeightResidencyTarget(state) ||
+           state == WeightResidencyState::ABSENT;
+}
+
 inline WeightValidationResult ValidateWeightStoragePolicy(
     const WeightStoragePolicy& policy) {
     if (!IsWeightResidencyTarget(policy.preferred_residency)) {
@@ -536,6 +550,10 @@ inline WeightValidationResult ValidateWeightRevisionMetadata(
         metadata.observed_hot_ratio > 1.0) {
         return WeightValidationResult::Failure("invalid observed_hot_ratio");
     }
+    if (!IsValidWeightAvailabilityState(metadata.availability) ||
+        !IsValidWeightResidencyState(metadata.residency)) {
+        return WeightValidationResult::Failure("invalid weight state");
+    }
     if ((metadata.residency == WeightResidencyState::HOT &&
          metadata.observed_hot_ratio != 1.0) ||
         ((metadata.residency == WeightResidencyState::UNKNOWN ||
@@ -555,6 +573,20 @@ inline WeightValidationResult ValidateWeightRevisionMetadata(
         if (!manifest_result.ok()) {
             return manifest_result;
         }
+    }
+    if ((metadata.availability == WeightAvailabilityState::IMPORTING &&
+         (metadata.residency != WeightResidencyState::UNKNOWN ||
+          metadata.operation_id.has_value())) ||
+        (metadata.availability == WeightAvailabilityState::READY &&
+         !IsWeightResidencyTarget(metadata.residency)) ||
+        (metadata.availability == WeightAvailabilityState::DEGRADED &&
+         metadata.residency == WeightResidencyState::UNKNOWN) ||
+        (metadata.operation_id.has_value() &&
+         (*metadata.operation_id == 0 ||
+          (metadata.availability != WeightAvailabilityState::READY &&
+           metadata.availability != WeightAvailabilityState::DEGRADED)))) {
+        return WeightValidationResult::Failure(
+            "availability and residency state disagree");
     }
     if (metadata.availability == WeightAvailabilityState::DELETED &&
         (metadata.residency != WeightResidencyState::ABSENT ||
