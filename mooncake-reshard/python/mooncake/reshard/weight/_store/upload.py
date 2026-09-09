@@ -292,7 +292,7 @@ class WeightUploadService:
         self.payloads = payloads
         self.transaction = transaction
 
-    def plan_upload(
+    def weight_put_plan(
         self,
         source_placement: WeightPlacementManifest,
         source_bindings: Sequence[WeightRuntimeBindingManifest],
@@ -306,7 +306,7 @@ class WeightUploadService:
             key_prefix=self.client.key_prefix,
         )
 
-    def upload(
+    def weight_put_payload(
         self,
         plan: WeightUploadPlan,
         source_placement: WeightPlacementManifest,
