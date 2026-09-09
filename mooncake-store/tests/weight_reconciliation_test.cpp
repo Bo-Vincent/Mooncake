@@ -38,6 +38,14 @@ class WeightReconciliationTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
+            .policy = WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+            .affinity_summary = WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
         });
         EXPECT_TRUE(importing.has_value());
         const auto payload_key = identity.revision + "-payload";
@@ -88,6 +96,10 @@ TEST_F(WeightReconciliationTest, ExpiresLeasesAndAbortsAbandonedImports) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     });
     ASSERT_TRUE(importing.has_value());
     const uint64_t now_ms =
@@ -120,12 +132,20 @@ TEST_F(WeightReconciliationTest, WorkLimitBoundsAbandonedImportTransitions) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     });
     auto second = service.BeginWeightImport(BeginWeightImportRequest{
         .identity = Identity("step-b"),
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     });
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());

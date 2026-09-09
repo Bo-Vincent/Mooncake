@@ -12,13 +12,16 @@ namespace {
 bool SameImmutableWeightReference(const WeightRevisionMetadata& lhs,
                                   const WeightRevisionMetadata& rhs) {
     if (lhs.identity != rhs.identity ||
-        lhs.created_at_ms != rhs.created_at_ms) {
+        lhs.created_at_ms != rhs.created_at_ms ||
+        lhs.affinity_count != rhs.affinity_count ||
+        lhs.affinity_digest != rhs.affinity_digest) {
         return false;
     }
     if (lhs.availability == WeightAvailabilityState::IMPORTING) {
         return lhs.manifest.payload_group_id == rhs.manifest.payload_group_id &&
                lhs.manifest.payload_count == rhs.manifest.payload_count &&
-               lhs.manifest.logical_bytes == rhs.manifest.logical_bytes;
+               lhs.manifest.logical_bytes == rhs.manifest.logical_bytes &&
+               lhs.policy == rhs.policy;
     }
     return lhs.manifest == rhs.manifest;
 }
@@ -247,18 +250,33 @@ bool OpLogApplier::ApplyWeightMetadataUpsert(const OpLogEntry& entry) {
         return false;
     }
     const auto& next = upsert.metadata;
-    if ((next.operation != WeightOperationState::NONE &&
+    if ((next.operation_id.has_value() &&
          (!upsert.operation.has_value() ||
           upsert.operation->identity != next.identity ||
-          upsert.operation->operation_id != next.operation_id ||
-          upsert.operation->operation != next.operation ||
+          upsert.operation->operation_id != *next.operation_id ||
           upsert.operation->fenced_metadata_generation !=
               next.metadata_generation ||
-          upsert.operation->processed_members >
-              upsert.operation->total_members ||
+          (upsert.operation->kind != WeightOperationKind::MIGRATING &&
+           upsert.operation->kind != WeightOperationKind::REPAIRING) ||
+          !IsWeightResidencyTarget(upsert.operation->target_residency) ||
+          (upsert.operation->target_residency ==
+               WeightResidencyState::MIXED &&
+           (!upsert.operation->target_hot_ratio.has_value() ||
+            !std::isfinite(*upsert.operation->target_hot_ratio) ||
+            *upsert.operation->target_hot_ratio <= 0.0 ||
+            *upsert.operation->target_hot_ratio >= 1.0)) ||
+          (upsert.operation->target_residency !=
+               WeightResidencyState::MIXED &&
+           upsert.operation->target_hot_ratio.has_value()) ||
+          upsert.operation->total_units == 0 ||
+          upsert.operation->total_bytes == 0 ||
+          upsert.operation->processed_units >
+              upsert.operation->total_units ||
+          upsert.operation->processed_bytes >
+              upsert.operation->total_bytes ||
           (!upsert.operation->cursor.empty() &&
            !IsValidWeightComponent(upsert.operation->cursor)))) ||
-        (next.operation == WeightOperationState::NONE &&
+        (!next.operation_id.has_value() &&
          upsert.operation.has_value() &&
          (upsert.operation->identity != next.identity ||
           upsert.operation->message != "completed" ||

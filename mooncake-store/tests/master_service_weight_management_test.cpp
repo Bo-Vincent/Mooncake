@@ -33,6 +33,14 @@ class MasterServiceWeightManagementTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = payload_count,
             .expected_logical_bytes = logical_bytes,
+            .policy = WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+            .affinity_summary = WeightAffinitySummary{
+                .affinity_count = payload_count,
+                .affinity_digest = std::string(64, 'c'),
+            },
         });
         EXPECT_TRUE(result.has_value());
         return *result;

@@ -87,7 +87,9 @@ WeightRevisionMetadata MakeWeightMetadata(uint64_t metadata_generation) {
             },
         .availability = WeightAvailabilityState::READY,
         .residency = WeightResidencyState::HOT,
-        .operation = WeightOperationState::NONE,
+        .affinity_count = 2,
+        .affinity_digest = std::string(64, 'c'),
+        .observed_hot_ratio = 1.0,
         .metadata_generation = metadata_generation,
         .created_at_ms = 100,
         .updated_at_ms = 100 + metadata_generation,
@@ -154,6 +156,7 @@ TEST_F(OpLogApplierTest, AppliesImportingToReadyTransition) {
     importing.manifest.payload_keys_sha256.clear();
     importing.availability = WeightAvailabilityState::IMPORTING;
     importing.residency = WeightResidencyState::UNKNOWN;
+    importing.observed_hot_ratio = 0.0;
     auto ready = MakeWeightMetadata(2);
     ready.created_at_ms = importing.created_at_ms;
     const auto key = MakeWeightRevisionMetadataKey(importing.identity);
@@ -189,19 +192,20 @@ TEST_F(OpLogApplierTest, ReplaysWeightOperationStartAndCompletion) {
 
     auto evicting = ready;
     evicting.metadata_generation = 2;
-    evicting.operation = WeightOperationState::EVICTING;
     evicting.operation_id = 9;
     evicting.updated_at_ms = 200;
     WeightResidencyOperation operation{
         .operation_id = 9,
         .identity = ready.identity,
-        .operation = WeightOperationState::EVICTING,
+        .kind = WeightOperationKind::MIGRATING,
         .target_residency = WeightResidencyState::COLD,
         .fenced_metadata_generation = 2,
         .started_at_ms = 200,
         .updated_at_ms = 200,
-        .processed_members = 0,
-        .total_members = 2,
+        .processed_units = 0,
+        .total_units = 2,
+        .processed_bytes = 0,
+        .total_bytes = 2048,
         .cursor = {},
         .message = {},
     };
@@ -213,9 +217,9 @@ TEST_F(OpLogApplierTest, ReplaysWeightOperationStartAndCompletion) {
 
     auto cold = evicting;
     cold.metadata_generation = 3;
-    cold.operation = WeightOperationState::NONE;
-    cold.operation_id = 0;
+    cold.operation_id.reset();
     cold.residency = WeightResidencyState::COLD;
+    cold.observed_hot_ratio = 0.0;
     cold.updated_at_ms = 300;
     operation.updated_at_ms = 300;
     operation.message = "completed";

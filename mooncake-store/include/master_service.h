@@ -215,6 +215,8 @@ class MasterService {
         const GetWeightRevisionRequest& request) const;
     WeightMetadataStore::Result<ListWeightRevisionsResponse> ListWeightRevisions(
         const ListWeightRevisionsRequest& request) const;
+    WeightMetadataStore::Result<WeightRevisionMetadata> UpdateWeightPolicy(
+        const UpdateWeightPolicyRequest& request);
     WeightMetadataStore::Result<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request);
     WeightMetadataStore::Result<WeightRevisionLease> RenewWeightRevisionLease(

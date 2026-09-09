@@ -142,8 +142,10 @@ WeightMetadataSnapshot MakeWeightMetadataSnapshot() {
                 },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
-            .operation = WeightOperationState::EVICTING,
             .operation_id = 3,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 4,
             .created_at_ms = 100,
             .updated_at_ms = 200,
@@ -158,13 +160,15 @@ WeightMetadataSnapshot MakeWeightMetadataSnapshot() {
         .operations = {WeightResidencyOperation{
             .operation_id = 3,
             .identity = identity,
-            .operation = WeightOperationState::EVICTING,
+            .kind = WeightOperationKind::MIGRATING,
             .target_residency = WeightResidencyState::COLD,
             .fenced_metadata_generation = 4,
             .started_at_ms = 150,
             .updated_at_ms = 200,
-            .processed_members = 0,
-            .total_members = 2,
+            .processed_units = 0,
+            .total_units = 1,
+            .processed_bytes = 0,
+            .total_bytes = 1024,
             .cursor = {},
             .message = {},
         }},
@@ -514,7 +518,7 @@ TEST_F(HotStandbyServiceTest, SnapshotWeightMetadataSurvivesPromotionExport) {
     StandbySnapshot exported;
     ASSERT_EQ(ErrorCode::OK,
               service_->PromoteAndExportSnapshot(exported));
-    ASSERT_TRUE(exported.weight_metadata_store.has_value());
+    ASSERT_TRUE(exported.weight_metadata.has_value());
     EXPECT_EQ(MakeWeightMetadataSnapshot(), exported.weight_metadata.value());
 }
 
@@ -527,22 +531,22 @@ TEST_F(HotStandbyServiceTest, AppliesNewerWeightMetadataOpLogAfterSnapshot) {
     service_ = std::make_unique<HotStandbyService>(config_);
     service_->SetCatchUpBatchKvBackendForTesting(backend);
 
-    auto baseline_metadata = MakeWeightMetadataSnapshot();
-    baseline_metadata.leases.clear();
-    baseline_metadata.operations.clear();
-    baseline_metadata.next_lease_id = 1;
-    baseline_metadata.next_operation_id = 1;
-    auto& baseline_metadata = baseline_metadata.metadata.front();
+    auto baseline_snapshot = MakeWeightMetadataSnapshot();
+    baseline_snapshot.leases.clear();
+    baseline_snapshot.operations.clear();
+    baseline_snapshot.next_lease_id = 1;
+    baseline_snapshot.next_operation_id = 1;
+    auto& baseline_metadata = baseline_snapshot.metadata.front();
     baseline_metadata.availability = WeightAvailabilityState::IMPORTING;
     baseline_metadata.residency = WeightResidencyState::UNKNOWN;
-    baseline_metadata.operation = WeightOperationState::NONE;
-    baseline_metadata.operation_id = 0;
+    baseline_metadata.operation_id.reset();
+    baseline_metadata.observed_hot_ratio = 0.0;
     baseline_metadata.metadata_generation = 1;
     baseline_metadata.updated_at_ms = 100;
     LoadedSnapshot loaded;
     loaded.snapshot_id = "weight-baseline";
     loaded.snapshot_sequence_id = 1;
-    loaded.weight_metadata = baseline_metadata;
+    loaded.weight_metadata = baseline_snapshot;
     service_->SetSnapshotProvider(std::make_unique<FakeSnapshotProvider>(
         std::optional<LoadedSnapshot>(std::move(loaded))));
 
@@ -578,7 +582,7 @@ TEST_F(HotStandbyServiceTest, AppliesNewerWeightMetadataOpLogAfterSnapshot) {
     StandbySnapshot promoted;
     ASSERT_EQ(ErrorCode::OK,
               service_->PromoteAndExportSnapshot(promoted));
-    ASSERT_TRUE(promoted.weight_metadata_store.has_value());
+    ASSERT_TRUE(promoted.weight_metadata.has_value());
     ASSERT_EQ(1u, promoted.weight_metadata->metadata.size());
     EXPECT_EQ(ready, promoted.weight_metadata->metadata.front());
 }

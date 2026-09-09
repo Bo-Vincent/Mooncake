@@ -26,6 +26,14 @@ WeightRevisionMetadata PublishReady(WeightMetadataStore& metadata_store, uint64_
             .payload_group_id = group_id,
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
+            .policy = WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+            .affinity_summary = WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
         },
         now_ms);
     EXPECT_TRUE(begin.has_value());

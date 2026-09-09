@@ -1827,6 +1827,19 @@ MasterService::ListWeightRevisions(
     return weight_metadata_.List(request, now_ms);
 }
 
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_metadata_.PrepareUpdatePolicy(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return PersistAndPublishWeightMutation(*mutation);
+}
+
 WeightMetadataStore::Result<WeightRevisionLease>
 MasterService::AcquireWeightRevisionLease(
     const AcquireWeightRevisionLeaseRequest& request) {
@@ -1895,7 +1908,6 @@ MasterService::StartWeightResidencyOperation(
                                 1) {
             return tl::make_unexpected(WeightManagementError::NOT_READY);
         }
-        mutation->next->total_members = members->size();
     }
     return PersistAndPublishWeightOperationMutation(*mutation);
 }
@@ -1930,16 +1942,28 @@ MasterService::ReconcileWeightRevision(
     if (current.availability == WeightAvailabilityState::DELETED) {
         return current;
     }
-    if (current.operation == WeightOperationState::EVICTING) {
-        EvictManagedWeightGroupToCold(current);
-    } else if (current.operation == WeightOperationState::REHYDRATING) {
-        const auto tenant_id = TenantId(current.identity.tenant_id);
-        for (const auto& key : GetGroupMemberKeys(
-                 tenant_id, current.manifest.payload_group_id)) {
-            const auto result = TryPushPromotionQueue(
-                MakeObjectIdentity(key, tenant_id), false, true);
-            VLOG(1) << "weight_rehydrate_promotion key=" << key
-                    << " result=" << static_cast<int>(result);
+    std::optional<WeightResidencyOperation> active_operation;
+    if (current.operation_id.has_value()) {
+        auto operation = weight_metadata_.QueryOperation(*current.operation_id);
+        if (!operation) {
+            return tl::make_unexpected(operation.error());
+        }
+        active_operation = *operation;
+        if (operation->kind == WeightOperationKind::MIGRATING &&
+            operation->target_residency == WeightResidencyState::COLD &&
+            view->active_lease_count == 0) {
+            EvictManagedWeightGroupToCold(current);
+        } else if (operation->kind == WeightOperationKind::MIGRATING &&
+                   operation->target_residency ==
+                       WeightResidencyState::HOT) {
+            const auto tenant_id = TenantId(current.identity.tenant_id);
+            for (const auto& key : GetGroupMemberKeys(
+                     tenant_id, current.manifest.payload_group_id)) {
+                const auto result = TryPushPromotionQueue(
+                    MakeObjectIdentity(key, tenant_id), false, true);
+                VLOG(1) << "weight_rehydrate_promotion key=" << key
+                        << " result=" << static_cast<int>(result);
+            }
         }
     }
 
@@ -1966,25 +1990,32 @@ MasterService::ReconcileWeightRevision(
     bool complete = !absent &&
                     members->size() == current.manifest.payload_count + 1;
     bool manifest_found = false;
-    bool all_memory = complete;
-    bool all_cold = complete;
-    bool any_readable = false;
+    bool all_payload_memory = complete;
+    bool all_payload_cold = complete;
+    bool any_payload_readable = false;
     uint64_t logical_bytes = 0;
+    uint64_t hot_bytes = 0;
     std::vector<std::string> payload_keys;
     if (!absent) {
         for (const auto& member : *members) {
             complete = complete && member.readable;
-            any_readable = any_readable || member.readable;
-            all_memory = all_memory && member.has_memory;
-            all_cold = all_cold && member.has_cold && !member.has_memory;
             if (member.key == current.manifest.manifest_key &&
                 member.data_type == ObjectDataType::METADATA) {
-                manifest_found = true;
+                manifest_found = member.readable && member.has_memory;
             } else if (member.data_type == ObjectDataType::WEIGHT &&
                        member.size <= std::numeric_limits<uint64_t>::max() -
                                           logical_bytes) {
                 logical_bytes += member.size;
                 payload_keys.push_back(member.key);
+                any_payload_readable =
+                    any_payload_readable || member.readable;
+                all_payload_memory =
+                    all_payload_memory && member.has_memory;
+                all_payload_cold = all_payload_cold && member.has_cold &&
+                                   !member.has_memory;
+                if (member.has_memory) {
+                    hot_bytes += member.size;
+                }
             } else {
                 complete = false;
             }
@@ -1996,20 +2027,24 @@ MasterService::ReconcileWeightRevision(
                ComputeWeightPayloadKeysSha256(payload_keys) ==
                    current.manifest.payload_keys_sha256;
     const auto observed_residency =
-        absent || !any_readable
+        absent || !any_payload_readable
             ? WeightResidencyState::ABSENT
-            : (all_memory ? WeightResidencyState::HOT
-                          : (all_cold ? WeightResidencyState::COLD
-                                      : WeightResidencyState::MIXED));
+            : (all_payload_memory
+                   ? WeightResidencyState::HOT
+                   : (all_payload_cold ? WeightResidencyState::COLD
+                                       : WeightResidencyState::MIXED));
+    const double observed_hot_ratio =
+        current.manifest.logical_bytes == 0
+            ? 0.0
+            : static_cast<double>(hot_bytes) /
+                  static_cast<double>(current.manifest.logical_bytes);
 
-    if (current.operation != WeightOperationState::NONE) {
-        auto operation = weight_metadata_.QueryOperation(current.operation_id);
-        if (!operation) {
-            return tl::make_unexpected(operation.error());
-        }
+    if (active_operation.has_value()) {
+        const auto& operation = *active_operation;
         if (complete && observed_residency == operation->target_residency) {
             auto mutation = weight_metadata_.PrepareFinishOperation(
-                operation->operation_id, observed_residency, now_ms);
+                operation.operation_id, observed_residency,
+                observed_hot_ratio, now_ms);
             if (!mutation) {
                 return tl::make_unexpected(mutation.error());
             }
@@ -2023,25 +2058,28 @@ MasterService::ReconcileWeightRevision(
             }
             return reconciled->metadata;
         }
-        uint64_t processed_members = 0;
+        uint64_t processed_units = 0;
+        uint64_t processed_bytes = 0;
         std::string cursor;
         if (!absent) {
             for (const auto& member : *members) {
                 const bool satisfied =
-                    operation->target_residency == WeightResidencyState::HOT
+                    operation.target_residency == WeightResidencyState::HOT
                         ? member.has_memory
                         : member.has_cold && !member.has_memory;
-                if (satisfied) {
-                    ++processed_members;
+                if (satisfied && member.data_type == ObjectDataType::WEIGHT) {
+                    ++processed_units;
+                    processed_bytes += member.size;
                     cursor = member.key;
                 }
             }
         }
         auto progress = weight_metadata_.PrepareUpdateOperationProgress(
-            operation->operation_id, processed_members,
-            operation->total_members == 0
-                ? current.manifest.payload_count + 1
-                : operation->total_members,
+            operation.operation_id,
+            std::min(processed_units, operation.total_units),
+            operation.total_units, std::min(processed_bytes,
+                                            operation.total_bytes),
+            operation.total_bytes,
             std::move(cursor), now_ms);
         if (!progress) {
             return tl::make_unexpected(progress.error());
@@ -2057,7 +2095,7 @@ MasterService::ReconcileWeightRevision(
                                        : WeightAvailabilityState::DEGRADED;
     auto mutation = weight_metadata_.PrepareReconcile(
         current.identity, current.metadata_generation, availability,
-        observed_residency, now_ms);
+        observed_residency, observed_hot_ratio, now_ms);
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
@@ -2305,7 +2343,7 @@ MasterService::PersistAndPublishWeightMutation(
         type = OpType::WEIGHT_METADATA_UPSERT;
         const auto encoded = struct_pack::serialize(WeightMetadataUpsertOp{
             .metadata = *mutation.next,
-            .operation = std::nullopt,
+            .operation = mutation.operation,
         });
         payload.assign(encoded.begin(), encoded.end());
     } else if (mutation.previous.has_value()) {

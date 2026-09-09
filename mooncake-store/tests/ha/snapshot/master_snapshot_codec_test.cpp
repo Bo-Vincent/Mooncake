@@ -55,6 +55,14 @@ class MasterSnapshotCodecTest : public ::testing::Test {
                 .payload_group_id = group_id,
                 .expected_payload_count = 1,
                 .expected_logical_bytes = 1024,
+                .policy = WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
+                .affinity_summary = WeightAffinitySummary{
+                    .affinity_count = 1,
+                    .affinity_digest = std::string(64, 'c'),
+                },
             },
             now_ms);
         EXPECT_TRUE(begin.has_value());
@@ -210,8 +218,7 @@ TEST_F(MasterSnapshotCodecTest,
     auto operating_view = target->GetWeightRevision(
         GetWeightRevisionRequest{.identity = operating_identity});
     ASSERT_TRUE(operating_view.has_value());
-    EXPECT_EQ(WeightOperationState::EVICTING,
-              operating_view->metadata.operation);
+    EXPECT_TRUE(operating_view->metadata.operation_id.has_value());
 }
 
 TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightMetadataRestoresEmpty) {
