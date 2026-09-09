@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from ...contracts import ParticipantId, PlacementFragmentId
 from ..storage_manifest import StoredWeightManifest
+from ..management import WeightStoragePolicy
 from .contracts import UploadReceipt, WeightUploadPlan
 from .errors import WeightStoreError
 from .snapshot import (
@@ -30,6 +31,7 @@ class WeightStoreWriter:
         *,
         managed: bool = False,
         tenant_id: str = "default",
+        policy: Optional[WeightStoragePolicy] = None,
     ) -> None:
         self._weight_store = weight_store
         self.snapshot = snapshot
@@ -39,14 +41,15 @@ class WeightStoreWriter:
         self._bindings = tuple(self._source.bindings)
         self._validate_source_identity()
         if managed:
-            self._plan = weight_store.plan_managed_upload(
+            self._plan = weight_store._weight_put_managed_plan(
                 self._placement,
                 self._bindings,
                 namespace=snapshot.namespace,
                 tenant_id=tenant_id,
+                policy=policy,
             )
         else:
-            self._plan = weight_store.plan_upload(
+            self._plan = weight_store.weight_put_plan(
                 self._placement,
                 self._bindings,
                 namespace=snapshot.namespace,
@@ -82,7 +85,7 @@ class WeightStoreWriter:
 
         return self._plan
 
-    def write_tensor(
+    def weight_put_tensor(
         self,
         tensor_id: str,
         tensor: object,
@@ -137,6 +140,15 @@ class WeightStoreWriter:
             raise
         return tuple(flushed)
 
+    def write_tensor(
+        self,
+        tensor_id: str,
+        tensor: object,
+    ) -> tuple[UploadReceipt, ...]:
+        """Write an unmanaged snapshot tensor through the legacy facade."""
+
+        return self.weight_put_tensor(tensor_id, tensor)
+
     def commit(self) -> StoredWeightManifest:
         """Publish the manifest only after every selected fragment is written."""
 
@@ -158,7 +170,7 @@ class WeightStoreWriter:
         if set(self._required_by_participant) != self._flushed_participants:
             self.abort()
             raise WeightStoreError("Weight snapshot has unflushed participants")
-        manifest = self._weight_store._commit_upload_from_writer(
+        manifest = self._weight_store._weight_put_commit_from_writer(
             self._plan,
             self._receipts,
             on_commit_decision_may_exist=self._mark_commit_decision_may_exist,
@@ -178,7 +190,7 @@ class WeightStoreWriter:
             )
         self._closed = True
         if self._receipts:
-            self._weight_store.abort_upload(self._plan, self._receipts)
+            self._weight_store.weight_put_abort(self._plan, self._receipts)
 
     def _mark_commit_decision_may_exist(self) -> None:
         self._commit_decision_may_exist = True
@@ -201,7 +213,7 @@ class WeightStoreWriter:
             raise WeightStoreError(
                 f"snapshot source binding is missing: {participant_id}"
             )
-        receipts = self._weight_store.upload(
+        receipts = self._weight_store.weight_put_payload(
             self._plan,
             self._placement,
             binding,
