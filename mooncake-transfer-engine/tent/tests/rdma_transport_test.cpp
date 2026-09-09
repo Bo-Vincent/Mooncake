@@ -101,6 +101,19 @@ class RdmaTransportTestPeer {
         workers.applyContextEvent(dev_id, context, event);
     }
 
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+    static adaptive_cc::DomainState& enableCongestionControl(Workers& workers,
+                                                             int dev_id) {
+        workers.cc_config_.mode = adaptive_cc::Mode::kEnforce;
+        workers.cc_devices_.clear();
+        for (int i = 0; i <= dev_id; ++i) {
+            workers.cc_devices_.push_back(
+                std::make_unique<adaptive_cc::DomainState>(workers.cc_config_));
+        }
+        return *workers.cc_devices_[dev_id];
+    }
+#endif
+
     // Runs the monitorThread() 1 Hz safety net for contexts whose
     // IBV_EVENT_PORT_ACTIVE never arrived, without starting any threads.
     static void resumePausedContexts(Workers& workers) {
@@ -677,6 +690,27 @@ TEST_F(RdmaContextEventTest, DeviceFatalMarksUnavailableRegardlessOfPort) {
     fire(IBV_EVENT_DEVICE_FATAL, otherPort());  // device-scoped: no port
     EXPECT_FALSE(selector_->isDeviceAvailable(kDev));
 }
+
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+TEST_F(RdmaContextEventTest, OtherPortFailureDoesNotBlockCongestionAdmission) {
+    auto& domain =
+        RdmaTransportTestPeer::enableCongestionControl(*workers_, kDev);
+    fire(IBV_EVENT_PORT_ERR, otherPort());
+    adaptive_cc::controlTick(domain, 1);
+    adaptive_cc::Permit permit;
+    adaptive_cc::PathHandle path{&domain, nullptr,
+                                 adaptive_cc::generation(domain), 0};
+    EXPECT_EQ(adaptive_cc::tryAcquire(path, 64, permit),
+              adaptive_cc::Decision::kAllow);
+    adaptive_cc::complete(permit, adaptive_cc::OutcomeClass::kDerivedFlush,
+                          adaptive_cc::FailureScope::kOperation);
+
+    fire(IBV_EVENT_PORT_ERR, ourPort());
+    adaptive_cc::controlTick(domain, 2);
+    EXPECT_EQ(adaptive_cc::tryAcquire(path, 64, permit),
+              adaptive_cc::Decision::kAvoid);
+}
+#endif
 
 TEST_F(RdmaContextEventTest, CqErrLeavesAvailabilityAlone) {
     fire(IBV_EVENT_CQ_ERR, ourPort());
