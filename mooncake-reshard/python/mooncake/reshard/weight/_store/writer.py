@@ -189,7 +189,7 @@ class WeightStoreWriter:
                 "Weight snapshot commit decision may exist; retry commit instead"
             )
         self._closed = True
-        if self._receipts:
+        if self._receipts or self._plan.management_identity is not None:
             self._weight_store.weight_put_abort(self._plan, self._receipts)
 
     def _mark_commit_decision_may_exist(self) -> None:
