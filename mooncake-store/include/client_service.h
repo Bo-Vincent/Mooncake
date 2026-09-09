@@ -465,6 +465,8 @@ class Client {
         const GetWeightRevisionRequest& request);
     WeightRpcResult<ListWeightRevisionsResponse> ListWeightRevisions(
         const ListWeightRevisionsRequest& request);
+    WeightRpcResult<WeightRevisionMetadata> UpdateWeightPolicy(
+        const UpdateWeightPolicyRequest& request);
     WeightRpcResult<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request);
     WeightRpcResult<WeightRevisionLease> RenewWeightRevisionLease(
