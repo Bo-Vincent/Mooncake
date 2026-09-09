@@ -918,10 +918,20 @@ WeightMetadataStore::Result<WeightOperationMutation>
 WeightMetadataStore::PrepareUpdateOperationProgress(
     uint64_t operation_id, uint64_t processed_units, uint64_t total_units,
     uint64_t processed_bytes, uint64_t total_bytes, std::string cursor,
+    WeightResidencyState observed_residency, double observed_hot_ratio,
     uint64_t now_ms) const {
     if (operation_id == 0 || total_units == 0 || total_bytes == 0 ||
         processed_units > total_units || processed_bytes > total_bytes ||
-        (!cursor.empty() && !IsValidWeightComponent(cursor))) {
+        (!cursor.empty() && !IsValidWeightComponent(cursor)) ||
+        !IsWeightResidencyTarget(observed_residency) ||
+        !std::isfinite(observed_hot_ratio) || observed_hot_ratio < 0.0 ||
+        observed_hot_ratio > 1.0 ||
+        (observed_residency == WeightResidencyState::HOT &&
+         observed_hot_ratio != 1.0) ||
+        (observed_residency == WeightResidencyState::COLD &&
+         observed_hot_ratio != 0.0) ||
+        (observed_residency == WeightResidencyState::MIXED &&
+         (observed_hot_ratio <= 0.0 || observed_hot_ratio >= 1.0))) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
@@ -939,11 +949,16 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
         return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     auto next_operation = operation->second;
-    const bool unchanged = next_operation.processed_units == processed_units &&
-                           next_operation.total_units == total_units &&
-                           next_operation.processed_bytes == processed_bytes &&
-                           next_operation.total_bytes == total_bytes &&
-                           next_operation.cursor == cursor;
+    const bool metadata_unchanged =
+        revision->second.residency == observed_residency &&
+        revision->second.observed_hot_ratio == observed_hot_ratio;
+    const bool unchanged =
+        metadata_unchanged &&
+        next_operation.processed_units == processed_units &&
+        next_operation.total_units == total_units &&
+        next_operation.processed_bytes == processed_bytes &&
+        next_operation.total_bytes == total_bytes &&
+        next_operation.cursor == cursor;
     if (unchanged) {
         return WeightOperationMutation{
             .metadata =
@@ -964,12 +979,26 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
     next_operation.total_bytes = total_bytes;
     next_operation.cursor = std::move(cursor);
     next_operation.updated_at_ms = now_ms;
+    auto next_metadata = revision->second;
+    if (!metadata_unchanged) {
+        if (!CanAdvanceWeightMetadataGeneration(
+                next_metadata.metadata_generation)) {
+            return tl::make_unexpected(
+                WeightManagementError::GENERATION_EXHAUSTED);
+        }
+        next_metadata.residency = observed_residency;
+        next_metadata.observed_hot_ratio = observed_hot_ratio;
+        ++next_metadata.metadata_generation;
+        next_metadata.updated_at_ms = now_ms;
+        next_operation.fenced_metadata_generation =
+            next_metadata.metadata_generation;
+    }
     return WeightOperationMutation{
         .metadata =
             WeightMetadataMutation{
                 .identity = revision->first,
                 .previous = revision->second,
-                .next = revision->second,
+                .next = std::move(next_metadata),
                 .no_op = false,
             },
         .previous = operation->second,

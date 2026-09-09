@@ -2893,6 +2893,8 @@ class MasterService {
     const bool weight_management_mutations_enabled_;
     const WeightStoragePolicy default_weight_storage_policy_;
     const uint64_t weight_migration_cooldown_ms_;
+    const uint64_t weight_migration_max_members_per_round_;
+    const uint64_t weight_migration_max_bytes_per_round_;
     const uint32_t oplog_batch_max_entries_;
 
     // cluster id for persistent sub directory

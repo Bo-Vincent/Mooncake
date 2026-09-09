@@ -485,6 +485,71 @@ TEST_F(WeightGroupLifecycleTest,
     }
 }
 
+TEST_F(WeightGroupLifecycleTest,
+       MigrationBatchLimitsKeepOversizedAffinityWholeAndMakeProgress) {
+    MasterServiceConfig config;
+    config.default_kv_lease_ttl = 0;
+    config.enable_offload = true;
+    config.offload_on_evict = true;
+    config.weight_migration_max_members_per_round = 1;
+    config.weight_migration_max_bytes_per_round = 1000;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    auto ready = PublishReadyWithPayloads(
+        service, context.client_id,
+        {
+            {.key = "payload-a0", .size = 600, .affinity_id = "a"},
+            {.key = "payload-a1", .size = 600, .affinity_id = "a"},
+            {.key = "payload-b", .size = 500, .affinity_id = "b"},
+        });
+    for (const auto& [key, size] :
+         std::vector<std::pair<std::string, int64_t>>{
+             {"payload-a0", 600},
+             {"payload-a1", 600},
+             {"payload-b", 500},
+         }) {
+        AddLocalDiskReplica(service, context.client_id, key, size,
+                            "test_segment");
+    }
+    auto started = service.StartWeightResidencyOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+            .mixed_hot_ratio = std::nullopt,
+        });
+    ASSERT_TRUE(started.has_value());
+
+    auto partial = service.ReconcileWeightRevision(
+        ReconcileWeightRevisionRequest{.identity = ready.identity});
+
+    ASSERT_TRUE(partial.has_value());
+    EXPECT_EQ(WeightResidencyState::MIXED, partial->residency);
+    ASSERT_TRUE(partial->operation_id.has_value());
+    const auto partial_members = GetWeightGroupResidencyForTest(
+        service, ready.identity, ready.manifest.payload_group_id);
+    for (const auto& member : partial_members) {
+        if (member.residency_affinity_id == "a") {
+            EXPECT_FALSE(member.has_memory);
+        } else if (member.residency_affinity_id == "b") {
+            EXPECT_TRUE(member.has_memory);
+        }
+    }
+    auto operation = service.QueryWeightOperation(QueryWeightOperationRequest{
+        .operation_id = started->operation_id,
+    });
+    ASSERT_TRUE(operation.has_value());
+    EXPECT_EQ(1, operation->processed_units);
+    EXPECT_EQ(1200, operation->processed_bytes);
+
+    auto cold = service.ReconcileWeightRevision(
+        ReconcileWeightRevisionRequest{.identity = ready.identity});
+    ASSERT_TRUE(cold.has_value());
+    EXPECT_EQ(WeightResidencyState::COLD, cold->residency);
+    EXPECT_FALSE(cold->operation_id.has_value());
+}
+
 TEST_F(WeightGroupLifecycleTest, RehydrateQueuesAndCompletesWholeManagedGroup) {
     MasterServiceConfig config;
     config.default_kv_lease_ttl = 0;

@@ -276,7 +276,8 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
     ASSERT_TRUE(operation.has_value());
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, 400);
+        operation->operation_id, 0, 4, 0, 4096, {},
+        WeightResidencyState::HOT, 1.0, 400);
     ASSERT_TRUE(progress.has_value());
     EXPECT_FALSE(progress->no_op);
     auto published = metadata_store.Publish(*progress);
@@ -284,7 +285,8 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
     EXPECT_EQ(400, published->updated_at_ms);
 
     auto retry = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, 500);
+        operation->operation_id, 0, 4, 0, 4096, {},
+        WeightResidencyState::HOT, 1.0, 500);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
     auto retried = metadata_store.Publish(*retry);

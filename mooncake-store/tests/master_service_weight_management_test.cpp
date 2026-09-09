@@ -147,6 +147,17 @@ TEST_F(MasterServiceWeightManagementTest,
 }
 
 TEST_F(MasterServiceWeightManagementTest,
+       RejectsZeroMigrationBatchLimits) {
+    MasterServiceConfig config;
+    config.weight_migration_max_members_per_round = 0;
+    EXPECT_THROW(MasterService service(config), std::invalid_argument);
+
+    config.weight_migration_max_members_per_round = 1;
+    config.weight_migration_max_bytes_per_round = 0;
+    EXPECT_THROW(MasterService service(config), std::invalid_argument);
+}
+
+TEST_F(MasterServiceWeightManagementTest,
        PublishesReadyAndRetriesAfterResponseLoss) {
     MasterService service;
     [[maybe_unused]] const auto context = PrepareSimpleSegment(service);

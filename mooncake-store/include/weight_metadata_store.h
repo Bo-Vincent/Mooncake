@@ -99,7 +99,8 @@ class WeightMetadataStore {
     Result<WeightOperationMutation> PrepareUpdateOperationProgress(
         uint64_t operation_id, uint64_t processed_units, uint64_t total_units,
         uint64_t processed_bytes, uint64_t total_bytes, std::string cursor,
-        uint64_t now_ms) const;
+        WeightResidencyState observed_residency,
+        double observed_hot_ratio, uint64_t now_ms) const;
     Result<WeightResidencyOperation> Publish(
         const WeightOperationMutation& mutation);
     Result<WeightResidencyOperation> QueryOperation(
