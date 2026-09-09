@@ -989,6 +989,15 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
         operation->second.message == "completed") {
         return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
+    if (total_units != operation->second.total_units ||
+        total_bytes != operation->second.total_bytes ||
+        processed_units < operation->second.processed_units ||
+        processed_bytes < operation->second.processed_bytes ||
+        (processed_units == operation->second.processed_units &&
+         processed_bytes == operation->second.processed_bytes &&
+         cursor != operation->second.cursor)) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
     auto next_operation = operation->second;
     const bool metadata_unchanged =
         revision->second.residency == observed_residency &&
@@ -1023,7 +1032,8 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
     if (!message.empty()) {
         next_operation.message = std::move(message);
     }
-    next_operation.updated_at_ms = now_ms;
+    next_operation.updated_at_ms =
+        std::max(next_operation.updated_at_ms, now_ms);
     auto next_metadata = revision->second;
     if (!metadata_unchanged) {
         if (!CanAdvanceWeightMetadataGeneration(
@@ -1034,7 +1044,8 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
         next_metadata.residency = observed_residency;
         next_metadata.observed_hot_ratio = observed_hot_ratio;
         ++next_metadata.metadata_generation;
-        next_metadata.updated_at_ms = now_ms;
+        next_metadata.updated_at_ms =
+            std::max(next_metadata.updated_at_ms, now_ms);
         next_operation.fenced_metadata_generation =
             next_metadata.metadata_generation;
     }
