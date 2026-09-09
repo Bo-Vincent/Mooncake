@@ -190,21 +190,32 @@ TEST_F(WeightReconciliationTest, MissingPayloadOrManifestBecomesDegraded) {
     ASSERT_TRUE(service.DropWeightGroupMemberForTesting(
         manifest_loss.identity, ManifestKey(manifest_loss.identity)));
 
-    service.RunWeightReconciliationForTesting(
-        std::max(payload_loss.updated_at_ms, manifest_loss.updated_at_ms) + 1,
-        32);
-    for (const auto& metadata : {payload_loss, manifest_loss}) {
-        auto view = service.GetWeightRevision(
-            GetWeightRevisionRequest{.identity = metadata.identity});
-        ASSERT_TRUE(view.has_value());
-        EXPECT_EQ(WeightAvailabilityState::DEGRADED,
-                  view->metadata.availability);
-        EXPECT_EQ(WeightResidencyState::MIXED, view->metadata.residency);
-    }
+    EXPECT_EQ(2, service.RunWeightReconciliationForTesting(
+                     std::max(payload_loss.updated_at_ms,
+                              manifest_loss.updated_at_ms) +
+                         1,
+                     32));
+    auto payload_loss_view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = payload_loss.identity});
+    ASSERT_TRUE(payload_loss_view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DEGRADED,
+              payload_loss_view->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::ABSENT,
+              payload_loss_view->metadata.residency);
+
+    auto manifest_loss_view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = manifest_loss.identity});
+    ASSERT_TRUE(manifest_loss_view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DEGRADED,
+              manifest_loss_view->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::HOT,
+              manifest_loss_view->metadata.residency);
     EXPECT_EQ(2, MasterMetricManager::instance().get_weight_revision_count(
                      "degraded"));
-    EXPECT_EQ(2, MasterMetricManager::instance().get_weight_residency_count(
-                     "mixed"));
+    EXPECT_EQ(1, MasterMetricManager::instance().get_weight_residency_count(
+                     "absent"));
+    EXPECT_EQ(1,
+              MasterMetricManager::instance().get_weight_residency_count("hot"));
 }
 
 TEST_F(WeightReconciliationTest, ProjectsLeaseAndOperationMetrics) {
