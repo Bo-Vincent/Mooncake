@@ -75,6 +75,7 @@ namespace {
 // each shard exclusively for as long as it took to walk that whole shard,
 // so every RPC that touched those keys stalled behind the sweep.
 constexpr size_t kStaleHandleCleanupBatchSize = 64;
+constexpr size_t kWeightDeleteBatchSize = 64;
 
 // Per-cycle offload cap as a fraction of `offloading_queue_limit_`. Used only
 // when offload-on-evict mode is active. Defers memory eviction for at most
@@ -2267,12 +2268,21 @@ MasterService::DeleteWeightRevision(
                          return lhs != deleting->manifest.manifest_key &&
                                 rhs == deleting->manifest.manifest_key;
                      });
+    size_t processed = 0;
     for (const auto& key : keys) {
+        if (processed == kWeightDeleteBatchSize) {
+            break;
+        }
         auto removed =
             RemoveObject(key, TenantId(request.identity.tenant_id), true, true);
-        if (!removed && removed.error() != ErrorCode::OBJECT_NOT_FOUND) {
-            return tl::make_unexpected(WeightManagementError::BUSY);
+        if (!removed) {
+            if (removed.error() != ErrorCode::OBJECT_NOT_FOUND) {
+                return tl::make_unexpected(WeightManagementError::BUSY);
+            }
+            UnregisterGroupMember(TenantId(request.identity.tenant_id), key,
+                                  deleting->manifest.payload_group_id);
         }
+        ++processed;
     }
     group_operation_lock.lock.unlock();
     return ReconcileWeightRevision(
