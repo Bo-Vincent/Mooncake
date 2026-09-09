@@ -62,4 +62,28 @@ TEST(OpLogTypesTest, WeightDeleteTombstonesRoundTrip) {
     EXPECT_EQ(lease_delete, decoded_lease);
 }
 
+TEST(OpLogTypesTest, WeightLeaseAccessRoundTrips) {
+    const WeightLeaseUpsertOp upsert{
+        .lease = WeightRevisionLease{
+            .lease_id = 42,
+            .identity = WeightRevisionIdentity{
+                .tenant_id = "tenant-a",
+                .name_space = "production",
+                .resource_id = "llama-70b",
+                .revision = "step-100",
+                .weight_generation = 7,
+            },
+            .holder = "reader",
+            .expires_at_ms = 1000,
+            .fenced_metadata_generation = 9,
+        },
+        .last_accessed_at_ms = 500,
+    };
+    const auto bytes = struct_pack::serialize(upsert);
+    WeightLeaseUpsertOp decoded;
+    ASSERT_EQ(struct_pack::errc::ok,
+              struct_pack::deserialize_to(decoded, bytes));
+    EXPECT_EQ(upsert, decoded);
+}
+
 }  // namespace mooncake::test

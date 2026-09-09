@@ -208,6 +208,9 @@ TEST(WeightMetadataStoreTest, LeaseExpiryIsGenerationFencedAndIdempotent) {
     ASSERT_TRUE(candidate.has_value());
     auto lease = metadata_store.Publish(*candidate);
     ASSERT_TRUE(lease.has_value());
+    auto accessed = metadata_store.Get(ready.identity, 300);
+    ASSERT_TRUE(accessed.has_value());
+    EXPECT_EQ(300, accessed->metadata.last_accessed_at_ms);
     EXPECT_TRUE(
         metadata_store.HasActiveLease(ready.identity, ready.metadata_generation, 349));
     EXPECT_TRUE(metadata_store.HasActiveLease(ready.identity,

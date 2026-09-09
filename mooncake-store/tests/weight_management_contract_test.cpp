@@ -79,6 +79,7 @@ TEST(WeightManagementContractTest, ValidatesSha256AndGeneration) {
         .metadata_generation = 0,
         .created_at_ms = 1,
         .updated_at_ms = 1,
+        .last_accessed_at_ms = 1,
     };
     EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
     metadata.metadata_generation = 1;
@@ -134,6 +135,7 @@ TEST(WeightManagementContractTest, EnforcesStateCombinationAndOperationIds) {
         .metadata_generation = 1,
         .created_at_ms = 1,
         .updated_at_ms = 1,
+        .last_accessed_at_ms = 1,
     };
     EXPECT_TRUE(ValidateWeightRevisionMetadata(metadata).ok());
 
@@ -186,6 +188,7 @@ TEST(WeightManagementContractTest, RoundTripsWireEnumsAndMetadata) {
         .metadata_generation = 9,
         .created_at_ms = 100,
         .updated_at_ms = 200,
+        .last_accessed_at_ms = 150,
     };
 
     auto encoded = struct_pack::serialize(metadata);

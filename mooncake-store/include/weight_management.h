@@ -176,13 +176,15 @@ struct WeightRevisionMetadata {
     uint64_t metadata_generation{1};
     uint64_t created_at_ms{0};
     uint64_t updated_at_ms{0};
+    uint64_t last_accessed_at_ms{0};
 
     friend bool operator==(const WeightRevisionMetadata&,
                            const WeightRevisionMetadata&) = default;
 };
 YLT_REFL(WeightRevisionMetadata, identity, manifest, policy, availability,
          residency, operation_id, affinity_count, affinity_digest,
-         observed_hot_ratio, metadata_generation, created_at_ms, updated_at_ms);
+         observed_hot_ratio, metadata_generation, created_at_ms, updated_at_ms,
+         last_accessed_at_ms);
 
 struct WeightRevisionLease {
     uint64_t lease_id{0};
@@ -514,7 +516,8 @@ inline WeightValidationResult ValidateWeightRevisionMetadata(
         metadata.metadata_generation == std::numeric_limits<uint64_t>::max()) {
         return WeightValidationResult::Failure("invalid metadata_generation");
     }
-    if (metadata.updated_at_ms < metadata.created_at_ms) {
+    if (metadata.updated_at_ms < metadata.created_at_ms ||
+        metadata.last_accessed_at_ms < metadata.created_at_ms) {
         return WeightValidationResult::Failure("timestamps are not monotonic");
     }
     auto policy_result = ValidateWeightStoragePolicy(metadata.policy);

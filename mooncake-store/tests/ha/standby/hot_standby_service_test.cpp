@@ -149,6 +149,7 @@ WeightMetadataSnapshot MakeWeightMetadataSnapshot() {
             .metadata_generation = 4,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
         }},
         .leases = {WeightRevisionLease{
             .lease_id = 5,
@@ -553,8 +554,11 @@ TEST_F(HotStandbyServiceTest, AppliesNewerWeightMetadataOpLogAfterSnapshot) {
     auto ready = baseline_metadata;
     ready.availability = WeightAvailabilityState::READY;
     ready.residency = WeightResidencyState::HOT;
+    ready.observed_hot_ratio = 1.0;
     ready.metadata_generation = 2;
     ready.updated_at_ms = 200;
+    const auto ready_validation = ValidateWeightRevisionMetadata(ready);
+    ASSERT_TRUE(ready_validation.ok()) << ready_validation.message();
     const auto encoded = struct_pack::serialize(WeightMetadataUpsertOp{
         .metadata = ready,
         .operation = std::nullopt,

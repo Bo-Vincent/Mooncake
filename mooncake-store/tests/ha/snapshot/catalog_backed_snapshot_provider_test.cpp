@@ -218,6 +218,7 @@ TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightMetadataFromSnapshot) {
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 101,
+            .last_accessed_at_ms = 100,
         }},
         .leases = {},
         .operations = {},

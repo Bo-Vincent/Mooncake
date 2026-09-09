@@ -76,6 +76,7 @@ WeightRevisionMetadata AutoMetadata(WeightResidencyState residency) {
     metadata.metadata_generation = 2;
     metadata.created_at_ms = 100;
     metadata.updated_at_ms = 100;
+    metadata.last_accessed_at_ms = 100;
     return metadata;
 }
 
@@ -142,6 +143,12 @@ TEST(WeightResidencyPlannerTest, AutoDecisionEnforcesEligibilityAndCooldown) {
                      metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
                      149, 50)
                      .has_value());
+    metadata.last_accessed_at_ms = 190;
+    EXPECT_FALSE(PlanAutomaticWeightMigration(
+                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
+                     200, 50)
+                     .has_value());
+    metadata.last_accessed_at_ms = 100;
 
     metadata.policy.migration_mode = WeightMigrationMode::MANUAL;
     EXPECT_FALSE(PlanAutomaticWeightMigration(
@@ -160,6 +167,25 @@ TEST(WeightResidencyPlannerTest, AutoDecisionEnforcesEligibilityAndCooldown) {
                      metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
                      200, 50)
                      .has_value());
+}
+
+TEST(WeightResidencyPlannerTest, AutoCandidatesUsePersistentAccessOrder) {
+    auto older = AutoMetadata(WeightResidencyState::HOT);
+    auto newer = older;
+    older.identity.revision = "older";
+    newer.identity.revision = "newer";
+    older.last_accessed_at_ms = 200;
+    newer.last_accessed_at_ms = 300;
+    older.updated_at_ms = 400;
+    newer.updated_at_ms = 100;
+
+    EXPECT_TRUE(WeightAutoMigrationCandidateLess(older, newer));
+    EXPECT_FALSE(WeightAutoMigrationCandidateLess(newer, older));
+
+    newer.last_accessed_at_ms = older.last_accessed_at_ms;
+    older.manifest.logical_bytes = 1024;
+    newer.manifest.logical_bytes = 2048;
+    EXPECT_TRUE(WeightAutoMigrationCandidateLess(newer, older));
 }
 
 }  // namespace

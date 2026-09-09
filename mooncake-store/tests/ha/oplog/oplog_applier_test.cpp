@@ -93,6 +93,7 @@ WeightRevisionMetadata MakeWeightMetadata(uint64_t metadata_generation) {
         .metadata_generation = metadata_generation,
         .created_at_ms = 100,
         .updated_at_ms = 100 + metadata_generation,
+        .last_accessed_at_ms = 100,
     };
 }
 
@@ -247,8 +248,15 @@ TEST_F(OpLogApplierTest, AppliesWeightLeaseAndDeleteTombstones) {
     };
     EXPECT_TRUE(applier_->ApplyOpLogEntry(
         MakeEntry(2, OpType::WEIGHT_LEASE_UPSERT, "weight-lease:42",
-                  SerializePayload(lease))));
+                  SerializePayload(WeightLeaseUpsertOp{
+                      .lease = lease,
+                      .last_accessed_at_ms = 500,
+                  }))));
     EXPECT_EQ(lease, mock_metadata_store_->GetWeightLease(lease.lease_id));
+    auto accessed =
+        mock_metadata_store_->GetWeightMetadata(metadata.identity);
+    ASSERT_TRUE(accessed.has_value());
+    EXPECT_EQ(500, accessed->last_accessed_at_ms);
 
     WeightLeaseDeleteOp lease_delete{
         .lease_id = lease.lease_id,

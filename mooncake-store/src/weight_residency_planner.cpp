@@ -196,14 +196,17 @@ std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     const WeightRevisionMetadata& metadata, uint64_t active_lease_count,
     WeightAutoMigrationSignal signal, uint64_t now_ms,
     uint64_t cooldown_ms) {
+    const uint64_t cooldown_origin =
+        signal == WeightAutoMigrationSignal::MEMORY_PRESSURE
+            ? std::max(metadata.updated_at_ms, metadata.last_accessed_at_ms)
+            : metadata.updated_at_ms;
     if (metadata.availability != WeightAvailabilityState::READY ||
         metadata.policy.migration_mode != WeightMigrationMode::AUTO ||
         metadata.operation_id.has_value() ||
         (active_lease_count != 0 &&
          signal != WeightAutoMigrationSignal::ACCESS) ||
         !ValidateWeightStoragePolicy(metadata.policy).ok() ||
-        now_ms < metadata.updated_at_ms ||
-        now_ms - metadata.updated_at_ms < cooldown_ms) {
+        now_ms < cooldown_origin || now_ms - cooldown_origin < cooldown_ms) {
         return std::nullopt;
     }
 
@@ -269,6 +272,17 @@ std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
         }
     }
     return std::nullopt;
+}
+
+bool WeightAutoMigrationCandidateLess(const WeightRevisionMetadata& lhs,
+                                      const WeightRevisionMetadata& rhs) {
+    if (lhs.last_accessed_at_ms != rhs.last_accessed_at_ms) {
+        return lhs.last_accessed_at_ms < rhs.last_accessed_at_ms;
+    }
+    if (lhs.manifest.logical_bytes != rhs.manifest.logical_bytes) {
+        return lhs.manifest.logical_bytes > rhs.manifest.logical_bytes;
+    }
+    return lhs.identity < rhs.identity;
 }
 
 }  // namespace mooncake
