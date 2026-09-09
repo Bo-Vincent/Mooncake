@@ -1116,6 +1116,7 @@ class MasterService {
 
     struct WeightGroupMemberSnapshot {
         std::string key;
+        std::string residency_affinity_id;
         uint64_t size{0};
         ObjectDataType data_type{ObjectDataType::UNKNOWN};
         bool readable{false};
@@ -1533,7 +1534,9 @@ class MasterService {
     auto InsertMetadata(MetadataShardAccessorRW& shard, const UUID& client_id,
                         const std::string& key, uint64_t value_length,
                         const ReplicateConfig& config,
-                        const std::string& group_id, const TenantId& tenant_id,
+                        const std::string& group_id,
+                        const std::string& residency_affinity_id,
+                        const TenantId& tenant_id,
                         const std::chrono::system_clock::time_point& now,
                         const ResolvedSoftPinRequest& soft_pin_request,
                         std::vector<Replica>&& replicas,
@@ -1548,7 +1551,8 @@ class MasterService {
         MetadataShardAccessorRW& shard, const UUID& client_id,
         const std::string& key, uint64_t value_length,
         const ReplicateConfig& config, const std::string& writer_host_id,
-        const std::string& group_id, const TenantId& tenant_id,
+        const std::string& group_id,
+        const std::string& residency_affinity_id, const TenantId& tenant_id,
         const std::chrono::system_clock::time_point& now,
         const ResolvedSoftPinRequest& soft_pin_request,
         std::optional<std::chrono::system_clock::time_point>

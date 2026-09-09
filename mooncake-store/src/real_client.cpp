@@ -6756,6 +6756,15 @@ std::vector<int> RealClient::batch_put_session_start(
         return std::vector<int>(
             keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
     }
+    if (config.residency_affinity_ids.has_value() &&
+        config.residency_affinity_ids->size() != keys.size()) {
+        LOG(ERROR) << "batch_put_session_start: residency_affinity_ids.size()="
+                   << config.residency_affinity_ids->size()
+                   << ", keys.size()=" << keys.size()
+                   << ", error=invalid_residency_affinity_ids";
+        return std::vector<int>(
+            keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
+    }
 
     // Session put only writes MEMORY replicas. Reliable configs that require
     // NoF completion cannot be finalized correctly on this path.
@@ -6800,6 +6809,16 @@ std::vector<int> RealClient::batch_put_session_start(
             filtered_group_ids.push_back(start_config.group_ids->at(idx));
         }
         start_config.group_ids = std::move(filtered_group_ids);
+    }
+    if (start_config.residency_affinity_ids.has_value()) {
+        std::vector<std::string> filtered_affinity_ids;
+        filtered_affinity_ids.reserve(start_indices.size());
+        for (size_t idx : start_indices) {
+            filtered_affinity_ids.push_back(
+                start_config.residency_affinity_ids->at(idx));
+        }
+        start_config.residency_affinity_ids =
+            std::move(filtered_affinity_ids);
     }
 
     // Same first half as Client::BatchPut (StartBatchPut → master
