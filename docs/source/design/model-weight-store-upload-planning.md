@@ -52,10 +52,10 @@ not infer model layouts or parallelism from Store keys.
 
 ## Snapshot API
 
-`MooncakeDistributedStore.begin_weight_snapshot(descriptor, adapter)` returns
-one `WeightStoreWriter`. The framework adapter exports the complete source
+`WeightStore.begin_weight_snapshot(descriptor, adapter)` returns one unmanaged
+`WeightStoreWriter`. The framework adapter exports the complete source
 placement and live bindings once. The caller then writes each framework tensor
-through `writer.write_tensor(tensor_id, tensor)`.
+through the compatibility method `writer.write_tensor(tensor_id, tensor)`.
 
 The adapter maps that tensor to canonical placement fragment IDs. The writer
 uploads only the runtime fragments attested by those bindings and
@@ -86,18 +86,21 @@ The adapter rejects an older binding before Store I/O starts.
 
 ## Managed Revision Publication
 
-`plan_managed_upload` is the lifecycle-aware entry point. It first calls the
-Store Master to begin an import and then replaces the draft plan's locally
-derived group with the Store-issued `payload_group_id`. Payloads and the
-immutable manifest are committed into that group; only after the manifest is
-durable does `CommitWeightImport` publish the catalog record as `READY`.
+`WeightStore.weight_put(descriptor, adapter, policy=...)` is the
+lifecycle-aware entry point. It first calls the Store Master to begin an import
+and then replaces the draft plan's locally derived group with the Store-issued
+`payload_group_id`. The caller passes tensors to
+`WeightStoreWriter.weight_put_tensor`; payloads and the immutable manifest are
+committed into that group. Only after the manifest is durable does
+`CommitWeightImport` publish the metadata record as `READY + HOT` and, when
+needed, attach the initial preferred-residency operation.
 
 The resulting `WeightUploadPlan` carries its exact `management_identity` and
-catalog generation. Publication retries use those values and the immutable
-manifest reference, so uncertainty after either the manifest put or catalog
+metadata generation. Publication retries use those values and the immutable
+manifest reference, so uncertainty after either the manifest put or metadata
 commit does not create a second revision.
 
-For lifecycle-aware restore, use `load_weight_revision(identity, ...)`. Direct
+For lifecycle-aware restore, use `weight_get(identity, ...)`. Direct
 `load_manifest(manifest_key)` remains an unmanaged compatibility path and has
 no revision-level lease or group-lifecycle guarantee. See
 [Weight Management Architecture](weight-management.md).

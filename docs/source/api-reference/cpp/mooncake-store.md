@@ -100,11 +100,11 @@ WeightRpcResult<WeightRevisionMetadata> DeleteWeightRevision(
 ```
 
 The same interface also provides abort, lease renew/release, and operation
-query calls. `WeightRpcResult<T>` preserves catalog-domain errors separately
-from RPC transport errors. All state-changing requests are generation-fenced;
-list requests use bounded deterministic pagination.
+query calls. `WeightRpcResult<T>` preserves weight-management-domain errors
+separately from RPC transport errors. All state-changing requests are
+generation-fenced; list requests use bounded deterministic pagination.
 
-The catalog record contains one immutable manifest reference and aggregate
+The metadata record contains one immutable manifest reference and aggregate
 lifecycle state. Tensor descriptors stay in `StoredWeightManifest`, while
 replica addresses stay in ordinary Store object metadata. See
 [Weight Management Architecture](../../design/weight-management.md) for the

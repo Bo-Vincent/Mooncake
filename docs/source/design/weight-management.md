@@ -37,9 +37,9 @@ Generic eviction and removal paths recognize that group as managed and cannot
 independently reclaim one member.
 
 The group is a logical lifecycle boundary, not a distributed transaction.
-Physical work may be partial while an operation is running. The metadata store keeps
-the operation non-terminal until reconciliation observes the required state
-for every member.
+Physical work may be partial while an operation is running. The metadata store
+keeps the operation non-terminal until reconciliation observes the required
+state for every member.
 
 ## Revision Identity and Manifest Location
 
@@ -75,16 +75,26 @@ Availability, physical residency, and an in-progress operation are separate:
 | --- | --- | --- |
 | Availability | `IMPORTING`, `READY`, `DEGRADED`, `DELETING`, `DELETED` | whether the complete revision is safe to discover and load |
 | Residency | `UNKNOWN`, `HOT`, `COLD`, `MIXED`, `ABSENT` | observed placement across required group members |
-| Operation | `NONE`, `EVICTING`, `REHYDRATING`, `REPAIRING` | durable non-terminal group work |
+| Operation | optional operation ID referring to `MIGRATING` or `REPAIRING` | durable non-terminal group work |
 
 `READY` means the manifest and every required payload object have a readable
 replica. DRAM eviction changes residency but does not by itself make a revision
 unavailable. Missing required members produce `DEGRADED`; complete physical
 removal produces the retained `DELETED`/`ABSENT` tombstone.
 
+`MIGRATING` is not a residency value. For example, a revision can be observed
+as `MIXED` while its active operation targets `COLD`. A terminal operation
+remains queryable by ID, but the metadata record clears its active operation
+ID.
+
 Every mutation is fenced by `expected_metadata_generation`. A stale writer
 fails with `STALE_GENERATION`. A retry of an uncertain import commit with the
 same generation and immutable manifest reference is idempotent.
+
+Each revision persists a `WeightStoragePolicy` with a preferred residency
+(`HOT`, `COLD`, or `MIXED`), a MIXED hot-byte ratio, and a migration mode
+(`PINNED`, `MANUAL`, or `AUTO`). A per-import policy overrides the Python
+`WeightStore` default, which overrides the Master cluster default.
 
 ## Import and Publication
 
@@ -95,52 +105,71 @@ The managed upload sequence is:
 2. `WeightStore` writes every payload object into that group.
 3. The immutable `StoredWeightManifest` is committed last into the same group.
 4. `CommitWeightImport` validates exact group membership and the manifest
-   reference, then durably publishes `READY`.
+   reference, then durably publishes `READY + HOT`.
 5. `GetWeightRevision` or bounded `ListWeightRevisions` can discover it.
 
 `READY` is never inferred from key prefixes. An abandoned import is handled by
-the explicit abort/reconciliation policy.
+the explicit abort/reconciliation policy. If the preferred residency is
+`COLD` or `MIXED`, the same durable commit also creates a `MIGRATING`
+operation. Publication does not wait for that operation to converge.
 
 ## Load and Revision Leases
 
-`load_weight_revision` first resolves the exact metadata identity and acquires a
-revision lease against the returned metadata generation. It then reads and
-validates the manifest, plans ranges, and executes Store-to-runtime transfers.
-The client renews short leases in the background until all synchronous transfer
-work reaches a terminal state, and releases the lease in both success and
-exception paths.
+`weight_get` first resolves the exact metadata identity and acquires a revision
+lease against the returned metadata generation. It then reads and validates
+the manifest, plans ranges, and executes Store-to-runtime transfers. The
+client renews short leases in the background until all synchronous transfer
+work reaches a terminal state, and releases the lease in success, exception,
+and cancellation paths. A crashed caller is fenced by lease TTL expiry.
 
-A live revision lease blocks deletion and residency operations that could
-remove the last readable replica. Revision leases do not replace framework
-allocation guards, runtime binding generations, or Store's per-object read
-leases; those protect different ownership boundaries.
+A live revision lease blocks deletion and releasing existing replicas. A
+migration may still create and validate new replicas while the lease is live.
+Revision leases do not replace framework allocation guards, runtime binding
+generations, or Store's per-object read leases; those protect different
+ownership boundaries.
 
-## Residency, Rehydration, and Deletion
+## Residency, Migration, and Deletion
 
 `StartWeightResidencyOperation` durably records the operation ID, target,
 fenced metadata generation, and progress. Reconciliation then uses existing
 per-object primitives:
 
-- `EVICTING` removes memory replicas only after a readable cold replica exists
-  for each affected member;
-- `REHYDRATING` queues promotion for every group member and waits until all
-  required members have readable memory replicas;
+- migration to `COLD` removes memory replicas only after a readable cold
+  replica exists for each affected payload member;
+- migration to `HOT` queues promotion for every payload member and waits until
+  all required payloads have readable memory replicas;
+- migration to `MIXED` moves complete tensor/alias affinity units until the
+  observed hot logical-byte ratio is as close as possible to the target;
 - busy or incomplete members keep the operation in progress;
 - deletion blocks new leases, waits for live leases, removes payload objects,
   removes the manifest last, verifies absence, and retains a tombstone.
+
+The manifest stays hard-pinned and memory-readable in every payload residency.
+Migration work is bounded by member and byte limits, but never splits one
+affinity unit merely to satisfy a batch limit. Cold write failures keep the
+revision `READY` while existing data remains readable and are persisted on the
+retryable operation.
 
 Generic `BatchEvict`, quota eviction, explicit remove, and cleanup paths skip
 managed groups. Only the weight lifecycle path may change their aggregate
 residency or availability.
 
+With `AUTO`, memory pressure selects idle revisions in deterministic
+least-recently-accessed order and demotes them through `HOT`, `MIXED`, and
+`COLD`. Access to a cold or mixed AUTO revision durably records a promotion
+operation before granting the access lease. Cooldown and high/low watermarks
+prevent oscillation. `MANUAL` only moves through an explicit `weight_migrate`;
+`PINNED` rejects later residency changes after initial preferred convergence.
+
 ## Recovery and HA Rollout
 
-Catalog metadata, leases, and operation records use durable-before-visible
+Weight metadata, leases, and operation records use durable-before-visible
 OpLog publication. Standby replay stores them in a separate weight-metadata
 namespace rather than encoding them as fake object metadata. Master snapshots
-carry an optional `weight_metadata` section; an older snapshot without the
-section restores an empty catalog while preserving ordinary KV metadata.
-Derived group indexes are rebuilt from restored metadata records.
+carry an optional `weight_metadata` section for backward decoding: an older
+snapshot without the section restores empty Weight metadata, while a present
+but schema-invalid section fails closed. Derived group indexes are rebuilt from
+restored metadata records.
 
 Clusters using HA plus the etcd batch OpLog fail closed for weight-management
 mutations unless the operator sets
@@ -161,14 +190,15 @@ serving revision.
 
 ## Migration from Unmanaged Manifests
 
-`WeightStore.load_manifest(manifest_key)` remains available for compatibility,
-but it is explicitly unmanaged: it provides no catalog discovery, revision
-lease, aggregate lifecycle, or reclamation guarantee.
+`WeightStore.load_manifest(manifest_key)` and `begin_weight_snapshot` remain
+available for compatibility, but they are explicitly unmanaged: they provide
+no metadata discovery, revision lease, aggregate lifecycle, or reclamation
+guarantee.
 
 New integrations should:
 
-1. publish with `plan_managed_upload` or `begin_managed_weight_snapshot`;
+1. publish with `weight_put` and `WeightStoreWriter.weight_put_tensor`;
 2. retain the returned `WeightRevisionIdentity` rather than a manifest key;
-3. discover with `get_weight_revision` or `list_weight_revisions`;
-4. load with `load_weight_revision`, which verifies the manifest and holds the
+3. discover with `weight_get_metadata` or `weight_list`;
+4. load with `weight_get`, which verifies the manifest and holds the
    revision lease through transfer completion.

@@ -98,23 +98,40 @@ store.close()
 ## Managed Model-Weight Revisions
 
 The high-level `mooncake.reshard.weight.WeightStore` API publishes and loads an
-exact immutable weight revision through the Store catalog:
+exact immutable weight revision through the Store weight metadata:
 
 ```python
-from mooncake.reshard.weight import WeightRevisionIdentity, WeightStore
+from mooncake.reshard.weight import (
+    WeightMigrationMode,
+    WeightResidencyState,
+    WeightRevisionIdentity,
+    WeightSnapshotDescriptor,
+    WeightStoragePolicy,
+    WeightStore,
+)
 
-weight_store = WeightStore(store)
+weight_store = WeightStore(
+    store,
+    default_policy=WeightStoragePolicy(
+        preferred_residency=WeightResidencyState.HOT,
+        migration_mode=WeightMigrationMode.MANUAL,
+    ),
+)
 
-plan = weight_store.plan_managed_upload(
-    source_placement,
-    source_bindings,
+snapshot = WeightSnapshotDescriptor(
+    resource_id=source_placement.resource_id,
+    revision=source_placement.revision,
+    weight_generation=source_placement.weight_generation,
     namespace="production",
+)
+writer = weight_store.weight_put(
+    snapshot,
+    adapter,
     tenant_id="default",
 )
-receipts = []
-for binding in source_bindings:
-    receipts.extend(weight_store.upload(plan, source_placement, binding))
-manifest = weight_store.commit_upload(plan, receipts)
+for tensor_id, tensor in tensors.items():
+    writer.weight_put_tensor(tensor_id, tensor)
+manifest = writer.commit()
 
 identity = WeightRevisionIdentity(
     tenant_id="default",
@@ -123,21 +140,25 @@ identity = WeightRevisionIdentity(
     revision=manifest.revision,
     weight_generation=manifest.weight_generation,
 )
-view = weight_store.get_weight_revision(identity)
-weight_store.load_weight_revision(identity, target_placement, target_bindings)
+view = weight_store.weight_get_metadata(identity)
+weight_store.weight_get(identity, target_placement, target_bindings)
+weight_store.weight_remove(
+    identity,
+    expected_metadata_generation=view.metadata.metadata_generation,
+)
 ```
 
-`load_weight_revision` acquires and renews a revision lease, validates the
-manifest identity and SHA-256 against the catalog, executes the Store-to-runtime
-loads, and releases the lease after terminal completion. Use
-`list_weight_revisions(namespace=..., resource_id=...)` for bounded discovery.
+`weight_get` acquires and renews a revision lease, validates the manifest
+identity and SHA-256 against the metadata record, executes the
+Store-to-runtime loads, and releases the lease after terminal completion. Use
+`weight_list(namespace=..., resource_id=...)` for bounded discovery.
 
 The native `MooncakeDistributedStore` binding also exposes lower-level
 `begin_weight_import`, `commit_weight_import`, `abort_weight_import`, revision
 get/list, lease acquire/renew/release, residency start/query/reconcile, and
-delete operations. Native management calls return the value, catalog-domain
-error, and transport error separately; most applications should use the typed
-`WeightStore` facade.
+delete operations. Native management calls return the value,
+weight-management-domain error, and transport error separately; most
+applications should use the typed `WeightStore` facade.
 
 `load_manifest(manifest_key)` is retained only for unmanaged compatibility and
 does not hold a revision lease or provide aggregate lifecycle guarantees. See
