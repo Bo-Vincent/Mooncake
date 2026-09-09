@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -25,8 +26,52 @@
 
 #include "config.h"
 #include "rdma_context.h"
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+#include "adaptive_congestion_control.h"
+#endif
 
 namespace mooncake {
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+class ClassicRdmaCc {
+   public:
+    using SliceList = std::vector<Transport::Slice *>;
+
+    explicit ClassicRdmaCc(adaptive_cc::Config config);
+    ~ClassicRdmaCc();
+
+    ClassicRdmaCc(const ClassicRdmaCc &) = delete;
+    ClassicRdmaCc &operator=(const ClassicRdmaCc &) = delete;
+
+    bool enabled() const { return mode_ != adaptive_cc::Mode::kOff; }
+    void prepare(Transport::Slice *slice, const std::string &peer_nic_path);
+    void prepare(SliceList &slices, const std::string &peer_nic_path);
+    void bindEndpoint(Transport::Slice *slice, RdmaEndPoint *endpoint);
+    void retireEndpoint(const std::string &peer_nic_path,
+                        RdmaEndPoint *endpoint);
+    size_t gate(SliceList &queued, SliceList &avoided);
+    void complete(Transport::Slice *slice, ibv_wc_status status,
+                  uint32_t vendor_error = 0);
+    void releaseUnposted(Transport::Slice *slice);
+    void tick(uint64_t now_ns);
+    void resetDevice();
+    void recordAsyncEvent(ibv_event_type event,
+                          const std::string *peer_nic_path = nullptr);
+
+   private:
+    struct RouteState;
+
+    RouteState *route(const std::string &peer_nic_path);
+
+    adaptive_cc::Config config_;
+    adaptive_cc::Mode mode_;
+    std::unique_ptr<adaptive_cc::DomainState> device_;
+    std::atomic<uint64_t> completed_bytes_{0};
+    uint64_t last_tick_ns_ = 0;
+    std::mutex routes_mutex_;
+    std::unordered_map<std::string, std::unique_ptr<RouteState>> routes_;
+};
+#endif
+
 class WorkerPoolTestPeer;
 class WorkerPool {
     friend class WorkerPoolTestPeer;
@@ -172,6 +217,9 @@ class WorkerPool {
     std::atomic<int> context_failure_count_{0};
     uint64_t breaker_reactivate_after_ns_{0};
     static constexpr int kLocalCompletionFailureThreshold = 32;
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+    ClassicRdmaCc adaptive_cc_;
+#endif
 };
 }  // namespace mooncake
 
