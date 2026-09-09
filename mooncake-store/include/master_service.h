@@ -2543,7 +2543,8 @@ class MasterService {
                 std::forward_as_tuple(
                     client_id, now, total_length, std::move(replicas),
                     std::nullopt, enable_hard_pin, data_type, group_id,
-                    object_id_.tenant_id, object_id_.user_key));
+                    std::string{}, object_id_.tenant_id,
+                    object_id_.user_key));
             it_ = result.first;
         }
 
