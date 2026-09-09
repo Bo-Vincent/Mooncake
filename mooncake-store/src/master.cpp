@@ -102,6 +102,15 @@ bool ValidateWeightMixedHotRatioFlag(const char* flagname, double value) {
     return true;
 }
 
+bool ValidatePositiveWeightLimitFlag(const char* flagname, uint64_t value) {
+    if (value == 0) {
+        LOG(ERROR) << "Invalid value for --" << flagname
+                   << ": expected a positive integer";
+        return false;
+    }
+    return true;
+}
+
 mooncake::WeightStoragePolicy ParseWeightStoragePolicyOrThrow(
     std::string_view preferred_residency, double mixed_hot_ratio,
     std::string_view migration_mode) {
@@ -206,6 +215,16 @@ DEFINE_double(default_weight_mixed_hot_ratio, 0.5,
 DEFINE_string(default_weight_migration_mode, "auto",
               "Default migration mode for managed weights: pinned, manual, "
               "or auto");
+DEFINE_uint64(weight_migration_cooldown_ms,
+              mooncake::DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS,
+              "Cooldown between managed weight migration decisions");
+DEFINE_uint64(weight_migration_max_members_per_round,
+              mooncake::DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND,
+              "Maximum managed weight members migrated per revision round");
+DEFINE_uint64(weight_migration_max_bytes_per_round,
+              mooncake::DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND,
+              "Maximum managed weight logical bytes migrated per revision "
+              "round");
 DEFINE_bool(allow_evict_soft_pinned_objects,
             mooncake::DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS,
             "Whether to allow eviction of soft pinned objects during eviction");
@@ -218,6 +237,10 @@ DEFINE_validator(default_weight_mixed_hot_ratio,
                  ValidateWeightMixedHotRatioFlag);
 DEFINE_validator(default_weight_migration_mode,
                  ValidateWeightMigrationModeFlag);
+DEFINE_validator(weight_migration_max_members_per_round,
+                 ValidatePositiveWeightLimitFlag);
+DEFINE_validator(weight_migration_max_bytes_per_round,
+                 ValidatePositiveWeightLimitFlag);
 DEFINE_double(eviction_ratio, mooncake::DEFAULT_EVICTION_RATIO,
               "Ratio of objects to evict when Memory space is full");
 DEFINE_double(eviction_high_watermark_ratio,
@@ -593,6 +616,17 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
         ParseWeightStoragePolicyOrThrow(default_weight_preferred_residency,
                                         default_weight_mixed_hot_ratio,
                                         default_weight_migration_mode);
+    default_config.GetUInt64("weight_migration_cooldown_ms",
+                             &master_config.weight_migration_cooldown_ms,
+                             FLAGS_weight_migration_cooldown_ms);
+    default_config.GetUInt64(
+        "weight_migration_max_members_per_round",
+        &master_config.weight_migration_max_members_per_round,
+        FLAGS_weight_migration_max_members_per_round);
+    default_config.GetUInt64(
+        "weight_migration_max_bytes_per_round",
+        &master_config.weight_migration_max_bytes_per_round,
+        FLAGS_weight_migration_max_bytes_per_round);
     default_config.GetBool("allow_evict_soft_pinned_objects",
                            &master_config.allow_evict_soft_pinned_objects,
                            FLAGS_allow_evict_soft_pinned_objects);
@@ -985,6 +1019,27 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         master_config.default_weight_storage_policy.migration_mode =
             *mooncake::ParseWeightMigrationMode(
                 FLAGS_default_weight_migration_mode);
+    }
+    if ((google::GetCommandLineFlagInfo("weight_migration_cooldown_ms",
+                                        &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.weight_migration_cooldown_ms =
+            FLAGS_weight_migration_cooldown_ms;
+    }
+    if ((google::GetCommandLineFlagInfo(
+             "weight_migration_max_members_per_round", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.weight_migration_max_members_per_round =
+            FLAGS_weight_migration_max_members_per_round;
+    }
+    if ((google::GetCommandLineFlagInfo(
+             "weight_migration_max_bytes_per_round", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.weight_migration_max_bytes_per_round =
+            FLAGS_weight_migration_max_bytes_per_round;
     }
     if ((google::GetCommandLineFlagInfo("allow_evict_soft_pinned_objects",
                                         &info) &&
@@ -1756,6 +1811,12 @@ int main(int argc, char* argv[]) {
         << ", default_weight_migration_mode="
         << mooncake::WeightMigrationModeName(
                master_config.default_weight_storage_policy.migration_mode)
+        << ", weight_migration_cooldown_ms="
+        << master_config.weight_migration_cooldown_ms
+        << ", weight_migration_max_members_per_round="
+        << master_config.weight_migration_max_members_per_round
+        << ", weight_migration_max_bytes_per_round="
+        << master_config.weight_migration_max_bytes_per_round
         << ", allow_evict_soft_pinned_objects="
         << master_config.allow_evict_soft_pinned_objects
         << ", eviction_ratio=" << master_config.eviction_ratio
