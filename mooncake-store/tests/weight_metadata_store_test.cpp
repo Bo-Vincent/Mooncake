@@ -435,8 +435,9 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
     ASSERT_TRUE(operation.has_value());
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, {},
-        WeightAvailabilityState::READY, WeightResidencyState::HOT, 1.0, 400);
+        operation->operation_id, 1, operation->total_units, 1024,
+        operation->total_bytes, "unit-1", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.75, 400);
     ASSERT_TRUE(progress.has_value());
     EXPECT_FALSE(progress->no_op);
     auto published = metadata_store.Publish(*progress);
@@ -444,8 +445,9 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
     EXPECT_EQ(400, published->updated_at_ms);
 
     auto retry = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, {},
-        WeightAvailabilityState::READY, WeightResidencyState::HOT, 1.0, 500);
+        operation->operation_id, 1, operation->total_units, 1024,
+        operation->total_bytes, "unit-1", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.75, 500);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
     auto retried = metadata_store.Publish(*retry);
@@ -584,8 +586,9 @@ TEST(WeightMetadataStoreTest, OperationTimestampsRemainMonotonic) {
     ASSERT_TRUE(operation.has_value());
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 1, 2, 1024, 2048, "member-1", {},
-        WeightAvailabilityState::READY, WeightResidencyState::MIXED, 0.5, 250);
+        operation->operation_id, 1, operation->total_units, 1024,
+        operation->total_bytes, "member-1", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.5, 250);
     ASSERT_TRUE(progress.has_value());
     operation = metadata_store.Publish(*progress);
     ASSERT_TRUE(operation.has_value());
@@ -602,6 +605,49 @@ TEST(WeightMetadataStoreTest, OperationTimestampsRemainMonotonic) {
     EXPECT_EQ(300, operation->updated_at_ms);
     EXPECT_TRUE(
         restored.RestoreSnapshot(metadata_store.ExportSnapshot()).has_value());
+}
+
+TEST(WeightMetadataStoreTest, OperationProgressRejectsRegression) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto started = metadata_store.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        300);
+    ASSERT_TRUE(started.has_value());
+    auto operation = metadata_store.Publish(*started);
+    ASSERT_TRUE(operation.has_value());
+
+    auto progress = metadata_store.PrepareUpdateOperationProgress(
+        operation->operation_id, 2, operation->total_units, 2048,
+        operation->total_bytes, "unit-2", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.5, 400);
+    ASSERT_TRUE(progress.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*progress).has_value());
+
+    auto units_regressed = metadata_store.PrepareUpdateOperationProgress(
+        operation->operation_id, 1, operation->total_units, 2048,
+        operation->total_bytes, "unit-1", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.5, 500);
+    ASSERT_FALSE(units_regressed.has_value());
+    EXPECT_EQ(WeightManagementError::CONFLICT, units_regressed.error());
+
+    auto bytes_regressed = metadata_store.PrepareUpdateOperationProgress(
+        operation->operation_id, 2, operation->total_units, 1024,
+        operation->total_bytes, "unit-2", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.5, 500);
+    ASSERT_FALSE(bytes_regressed.has_value());
+    EXPECT_EQ(WeightManagementError::CONFLICT, bytes_regressed.error());
+
+    auto totals_changed = metadata_store.PrepareUpdateOperationProgress(
+        operation->operation_id, 2, operation->total_units + 1, 2048,
+        operation->total_bytes, "unit-2", {}, WeightAvailabilityState::READY,
+        WeightResidencyState::MIXED, 0.5, 500);
+    ASSERT_FALSE(totals_changed.has_value());
+    EXPECT_EQ(WeightManagementError::CONFLICT, totals_changed.error());
 }
 
 TEST(WeightMetadataStoreTest,

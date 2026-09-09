@@ -706,12 +706,21 @@ WeightStoreManager::ReconcileWeightRevision(
             }
             return reconciled->metadata;
         }
+        // Progress is a high-water mark; current readability is reported
+        // independently so lost replicas do not block availability updates.
+        processed_units =
+            std::max(operation.processed_units,
+                     std::min(processed_units, operation.total_units));
+        processed_bytes =
+            std::max(operation.processed_bytes,
+                     std::min(processed_bytes, operation.total_bytes));
+        if (processed_units == operation.processed_units &&
+            processed_bytes == operation.processed_bytes) {
+            cursor = operation.cursor;
+        }
         auto progress = weight_metadata_.PrepareUpdateOperationProgress(
-            operation.operation_id,
-            std::min(processed_units, operation.total_units),
-            operation.total_units,
-            std::min(processed_bytes, operation.total_bytes),
-            operation.total_bytes, std::move(cursor),
+            operation.operation_id, processed_units, operation.total_units,
+            processed_bytes, operation.total_bytes, std::move(cursor),
             offload_failed ? "cold replica write failed" : "",
             complete ? WeightAvailabilityState::READY
                      : WeightAvailabilityState::DEGRADED,
@@ -723,7 +732,11 @@ WeightStoreManager::ReconcileWeightRevision(
         if (!published) {
             return tl::make_unexpected(published.error());
         }
-        return current;
+        auto reconciled = weight_metadata_.Get(request.identity, now_ms);
+        if (!reconciled) {
+            return tl::make_unexpected(reconciled.error());
+        }
+        return reconciled->metadata;
     }
 
     const auto availability = complete ? WeightAvailabilityState::READY
