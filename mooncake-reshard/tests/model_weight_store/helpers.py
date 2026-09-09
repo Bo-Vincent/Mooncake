@@ -115,19 +115,35 @@ def allocation_guards_for_bindings(
 class GuardedWeightStore(WeightStore):
     """Test-only caller adapter that explicitly supplies framework pins."""
 
-    def upload(self, plan, source_placement, source_binding, **kwargs):
+    def weight_put_payload(
+        self, plan, source_placement, source_binding, **kwargs
+    ):
         kwargs.setdefault(
             "source_allocation_guards",
             allocation_guards_for_bindings((source_binding,)),
         )
-        return super().upload(plan, source_placement, source_binding, **kwargs)
+        return super().weight_put_payload(
+            plan, source_placement, source_binding, **kwargs
+        )
 
-    def load(self, plan, target_placement, target_binding, **kwargs):
+    def upload(self, plan, source_placement, source_binding, **kwargs):
+        return self.weight_put_payload(
+            plan, source_placement, source_binding, **kwargs
+        )
+
+    def weight_get_payload(
+        self, plan, target_placement, target_binding, **kwargs
+    ):
         kwargs.setdefault(
             "target_allocation_guards",
             allocation_guards_for_bindings((target_binding,)),
         )
-        return super().load(plan, target_placement, target_binding, **kwargs)
+        return super().weight_get_payload(
+            plan, target_placement, target_binding, **kwargs
+        )
+
+    def load(self, plan, target_placement, target_binding, **kwargs):
+        return self.weight_get_payload(plan, target_placement, target_binding, **kwargs)
 
 
 def with_empty_participant(
