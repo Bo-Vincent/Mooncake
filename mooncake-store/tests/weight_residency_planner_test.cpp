@@ -61,5 +61,100 @@ TEST(WeightResidencyPlannerTest, RejectsMixedForSingleAffinity) {
     EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE, plan.error());
 }
 
+WeightRevisionMetadata AutoMetadata(WeightResidencyState residency) {
+    WeightRevisionMetadata metadata;
+    metadata.policy = WeightStoragePolicy{
+        .preferred_residency = WeightResidencyState::HOT,
+        .mixed_hot_ratio = 0.5,
+        .migration_mode = WeightMigrationMode::AUTO,
+    };
+    metadata.availability = WeightAvailabilityState::READY;
+    metadata.residency = residency;
+    metadata.affinity_count = 2;
+    metadata.observed_hot_ratio =
+        residency == WeightResidencyState::HOT ? 1.0 : 0.0;
+    metadata.metadata_generation = 2;
+    metadata.created_at_ms = 100;
+    metadata.updated_at_ms = 100;
+    return metadata;
+}
+
+TEST(WeightResidencyPlannerTest, AutoPressureStepsTowardCold) {
+    auto hot = AutoMetadata(WeightResidencyState::HOT);
+    auto mixed = AutoMetadata(WeightResidencyState::MIXED);
+
+    EXPECT_EQ((WeightAutoMigrationTarget{
+                  .residency = WeightResidencyState::MIXED,
+                  .mixed_hot_ratio = 0.5,
+              }),
+              PlanAutomaticWeightMigration(
+                  hot, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50));
+    EXPECT_EQ((WeightAutoMigrationTarget{
+                  .residency = WeightResidencyState::COLD,
+                  .mixed_hot_ratio = std::nullopt,
+              }),
+              PlanAutomaticWeightMigration(
+                  mixed, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200,
+                  50));
+
+    hot.affinity_count = 1;
+    EXPECT_EQ((WeightAutoMigrationTarget{
+                  .residency = WeightResidencyState::COLD,
+                  .mixed_hot_ratio = std::nullopt,
+              }),
+              PlanAutomaticWeightMigration(
+                  hot, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50));
+}
+
+TEST(WeightResidencyPlannerTest, AutoAccessPromotesTowardPreferred) {
+    auto cold = AutoMetadata(WeightResidencyState::COLD);
+    auto mixed = AutoMetadata(WeightResidencyState::MIXED);
+    mixed.observed_hot_ratio = 0.5;
+
+    EXPECT_EQ((WeightAutoMigrationTarget{
+                  .residency = WeightResidencyState::HOT,
+                  .mixed_hot_ratio = std::nullopt,
+              }),
+              PlanAutomaticWeightMigration(
+                  cold, 0, WeightAutoMigrationSignal::ACCESS, 200, 50));
+    EXPECT_EQ((WeightAutoMigrationTarget{
+                  .residency = WeightResidencyState::HOT,
+                  .mixed_hot_ratio = std::nullopt,
+              }),
+              PlanAutomaticWeightMigration(
+                  mixed, 0, WeightAutoMigrationSignal::CAPACITY_AVAILABLE, 200,
+                  50));
+}
+
+TEST(WeightResidencyPlannerTest, AutoDecisionEnforcesEligibilityAndCooldown) {
+    auto metadata = AutoMetadata(WeightResidencyState::HOT);
+    EXPECT_FALSE(PlanAutomaticWeightMigration(
+                     metadata, 1, WeightAutoMigrationSignal::MEMORY_PRESSURE,
+                     200, 50)
+                     .has_value());
+    EXPECT_FALSE(PlanAutomaticWeightMigration(
+                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
+                     149, 50)
+                     .has_value());
+
+    metadata.policy.migration_mode = WeightMigrationMode::MANUAL;
+    EXPECT_FALSE(PlanAutomaticWeightMigration(
+                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
+                     200, 50)
+                     .has_value());
+    metadata.policy.migration_mode = WeightMigrationMode::AUTO;
+    metadata.operation_id = 9;
+    EXPECT_FALSE(PlanAutomaticWeightMigration(
+                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
+                     200, 50)
+                     .has_value());
+    metadata.operation_id.reset();
+    metadata.availability = WeightAvailabilityState::DEGRADED;
+    EXPECT_FALSE(PlanAutomaticWeightMigration(
+                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
+                     200, 50)
+                     .has_value());
+}
+
 }  // namespace
 }  // namespace mooncake::test

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,8 +27,27 @@ struct WeightMixedResidencyPlan {
                            const WeightMixedResidencyPlan&) = default;
 };
 
+enum class WeightAutoMigrationSignal : uint8_t {
+    MEMORY_PRESSURE = 0,
+    CAPACITY_AVAILABLE = 1,
+    ACCESS = 2,
+};
+
+struct WeightAutoMigrationTarget {
+    WeightResidencyState residency{WeightResidencyState::UNKNOWN};
+    std::optional<double> mixed_hot_ratio;
+
+    friend bool operator==(const WeightAutoMigrationTarget&,
+                           const WeightAutoMigrationTarget&) = default;
+};
+
 tl::expected<WeightMixedResidencyPlan, WeightManagementError>
 PlanMixedWeightResidency(const std::vector<WeightAffinityUnit>& units,
                          double target_hot_ratio);
+
+std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
+    const WeightRevisionMetadata& metadata, uint64_t active_lease_count,
+    WeightAutoMigrationSignal signal, uint64_t now_ms,
+    uint64_t cooldown_ms);
 
 }  // namespace mooncake

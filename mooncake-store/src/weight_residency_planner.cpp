@@ -192,4 +192,81 @@ PlanMixedWeightResidency(const std::vector<WeightAffinityUnit>& units,
     };
 }
 
+std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
+    const WeightRevisionMetadata& metadata, uint64_t active_lease_count,
+    WeightAutoMigrationSignal signal, uint64_t now_ms,
+    uint64_t cooldown_ms) {
+    if (metadata.availability != WeightAvailabilityState::READY ||
+        metadata.policy.migration_mode != WeightMigrationMode::AUTO ||
+        metadata.operation_id.has_value() || active_lease_count != 0 ||
+        !ValidateWeightStoragePolicy(metadata.policy).ok() ||
+        now_ms < metadata.updated_at_ms ||
+        now_ms - metadata.updated_at_ms < cooldown_ms) {
+        return std::nullopt;
+    }
+
+    if (signal == WeightAutoMigrationSignal::MEMORY_PRESSURE) {
+        if (metadata.residency == WeightResidencyState::HOT) {
+            if (metadata.affinity_count < 2) {
+                return WeightAutoMigrationTarget{
+                    .residency = WeightResidencyState::COLD,
+                    .mixed_hot_ratio = std::nullopt,
+                };
+            }
+            return WeightAutoMigrationTarget{
+                .residency = WeightResidencyState::MIXED,
+                .mixed_hot_ratio = metadata.policy.mixed_hot_ratio,
+            };
+        }
+        if (metadata.residency == WeightResidencyState::MIXED) {
+            return WeightAutoMigrationTarget{
+                .residency = WeightResidencyState::COLD,
+                .mixed_hot_ratio = std::nullopt,
+            };
+        }
+        return std::nullopt;
+    }
+    if (signal != WeightAutoMigrationSignal::CAPACITY_AVAILABLE &&
+        signal != WeightAutoMigrationSignal::ACCESS) {
+        return std::nullopt;
+    }
+
+    if (metadata.residency == WeightResidencyState::COLD) {
+        if (metadata.policy.preferred_residency ==
+            WeightResidencyState::HOT) {
+            return WeightAutoMigrationTarget{
+                .residency = WeightResidencyState::HOT,
+                .mixed_hot_ratio = std::nullopt,
+            };
+        }
+        if (metadata.policy.preferred_residency ==
+            WeightResidencyState::MIXED) {
+            return WeightAutoMigrationTarget{
+                .residency = WeightResidencyState::MIXED,
+                .mixed_hot_ratio = metadata.policy.mixed_hot_ratio,
+            };
+        }
+        return std::nullopt;
+    }
+
+    if (metadata.residency == WeightResidencyState::MIXED) {
+        if (metadata.policy.preferred_residency ==
+            WeightResidencyState::HOT) {
+            return WeightAutoMigrationTarget{
+                .residency = WeightResidencyState::HOT,
+                .mixed_hot_ratio = std::nullopt,
+            };
+        }
+        if (metadata.policy.preferred_residency ==
+                WeightResidencyState::MIXED &&
+            metadata.observed_hot_ratio < metadata.policy.mixed_hot_ratio) {
+            return WeightAutoMigrationTarget{
+                .residency = WeightResidencyState::MIXED,
+                .mixed_hot_ratio = metadata.policy.mixed_hot_ratio,
+            };
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace mooncake
