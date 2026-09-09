@@ -158,6 +158,49 @@ TEST_F(MasterServiceWeightManagementTest,
 }
 
 TEST_F(MasterServiceWeightManagementTest,
+       AutoPolicyUpdatePublishesMigrationAtomically) {
+    MasterService service;
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
+    const UUID client_id = generate_uuid();
+    auto importing = Begin(service, 1, 1024);
+    PutObject(service, client_id, "payload-a",
+              importing.manifest.payload_group_id, ObjectDataType::WEIGHT,
+              1024);
+    PutObject(service, client_id, ManifestKey(),
+              importing.manifest.payload_group_id, ObjectDataType::METADATA,
+              128);
+    auto ready = service.CommitWeightImport(
+        CommitRequest(importing, {"payload-a"}, 1024));
+    ASSERT_TRUE(ready.has_value());
+    const UpdateWeightPolicyRequest request{
+        .identity = ready->identity,
+        .expected_metadata_generation = ready->metadata_generation,
+        .policy = WeightStoragePolicy{
+            .preferred_residency = WeightResidencyState::COLD,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::AUTO,
+        },
+    };
+
+    auto updated = service.UpdateWeightPolicy(request);
+
+    ASSERT_TRUE(updated.has_value());
+    EXPECT_EQ(WeightResidencyState::HOT, updated->residency);
+    ASSERT_TRUE(updated->operation_id.has_value());
+    auto operation = service.QueryWeightOperation(QueryWeightOperationRequest{
+        .operation_id = *updated->operation_id,
+    });
+    ASSERT_TRUE(operation.has_value());
+    EXPECT_EQ(WeightResidencyState::COLD, operation->target_residency);
+    EXPECT_EQ(updated->metadata_generation,
+              operation->fenced_metadata_generation);
+
+    auto retried = service.UpdateWeightPolicy(request);
+    ASSERT_TRUE(retried.has_value());
+    EXPECT_EQ(*updated, *retried);
+}
+
+TEST_F(MasterServiceWeightManagementTest,
        PublishesReadyAndRetriesAfterResponseLoss) {
     MasterService service;
     [[maybe_unused]] const auto context = PrepareSimpleSegment(service);

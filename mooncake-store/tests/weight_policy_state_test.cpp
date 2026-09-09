@@ -156,7 +156,8 @@ TEST(WeightPolicyStateTest, PinnedPolicyRejectsExplicitMigration) {
     EXPECT_FALSE(unchanged->metadata.operation_id.has_value());
 }
 
-TEST(WeightPolicyStateTest, UpdatePolicyIsCasFencedIdempotentAndExclusive) {
+TEST(WeightPolicyStateTest,
+     AutoPolicyUpdateCreatesFencedMigrationAndIsIdempotent) {
     WeightMetadataStore metadata_store;
     auto ready = PublishPolicyCommit(
         metadata_store, WeightStoragePolicy{
@@ -176,9 +177,13 @@ TEST(WeightPolicyStateTest, UpdatePolicyIsCasFencedIdempotentAndExclusive) {
     };
     auto update = metadata_store.PrepareUpdatePolicy(request, 300);
     ASSERT_TRUE(update.has_value());
+    ASSERT_TRUE(update->operation.has_value());
+    EXPECT_EQ(WeightResidencyState::COLD,
+              update->operation->target_residency);
     auto updated = metadata_store.Publish(*update);
     ASSERT_TRUE(updated.has_value());
     EXPECT_EQ(WeightResidencyState::COLD, updated->policy.preferred_residency);
+    ASSERT_TRUE(updated->operation_id.has_value());
 
     auto retry = metadata_store.PrepareUpdatePolicy(request, 301);
     ASSERT_TRUE(retry.has_value());
@@ -190,20 +195,11 @@ TEST(WeightPolicyStateTest, UpdatePolicyIsCasFencedIdempotentAndExclusive) {
     ASSERT_FALSE(stale_result.has_value());
     EXPECT_EQ(WeightManagementError::STALE_GENERATION, stale_result.error());
 
-    auto migration = metadata_store.PrepareStartOperation(
-        StartWeightResidencyOperationRequest{
-            .identity = updated->identity,
-            .expected_metadata_generation = updated->metadata_generation,
-            .target_residency = WeightResidencyState::MIXED,
-            .mixed_hot_ratio = 0.25,
-        },
-        400);
-    ASSERT_TRUE(migration.has_value());
-    ASSERT_TRUE(metadata_store.Publish(*migration).has_value());
-
     auto update_while_migrating = request;
+    update_while_migrating.policy.preferred_residency =
+        WeightResidencyState::HOT;
     update_while_migrating.expected_metadata_generation =
-        updated->metadata_generation + 1;
+        updated->metadata_generation;
     auto blocked_update =
         metadata_store.PrepareUpdatePolicy(update_while_migrating, 401);
     ASSERT_FALSE(blocked_update.has_value());
@@ -212,9 +208,9 @@ TEST(WeightPolicyStateTest, UpdatePolicyIsCasFencedIdempotentAndExclusive) {
     auto second_migration = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = updated->identity,
-            .expected_metadata_generation = updated->metadata_generation + 1,
-            .target_residency = WeightResidencyState::COLD,
-            .mixed_hot_ratio = std::nullopt,
+            .expected_metadata_generation = updated->metadata_generation,
+            .target_residency = WeightResidencyState::MIXED,
+            .mixed_hot_ratio = 0.25,
         },
         401);
     ASSERT_FALSE(second_migration.has_value());
@@ -223,11 +219,39 @@ TEST(WeightPolicyStateTest, UpdatePolicyIsCasFencedIdempotentAndExclusive) {
     auto deletion = metadata_store.PrepareDelete(
         DeleteWeightRevisionRequest{
             .identity = updated->identity,
-            .expected_metadata_generation = updated->metadata_generation + 1,
+            .expected_metadata_generation = updated->metadata_generation,
         },
         401);
     ASSERT_FALSE(deletion.has_value());
     EXPECT_EQ(WeightManagementError::BUSY, deletion.error());
+}
+
+TEST(WeightPolicyStateTest, ManualPolicyUpdateDoesNotStartMigration) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishPolicyCommit(
+        metadata_store, WeightStoragePolicy{
+                            .preferred_residency = WeightResidencyState::HOT,
+                            .mixed_hot_ratio = 0.5,
+                            .migration_mode = WeightMigrationMode::MANUAL,
+                        });
+    auto update = metadata_store.PrepareUpdatePolicy(
+        UpdateWeightPolicyRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .policy = WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::COLD,
+                .mixed_hot_ratio = 0.5,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        },
+        300);
+
+    ASSERT_TRUE(update.has_value());
+    EXPECT_FALSE(update->operation.has_value());
+    auto updated = metadata_store.Publish(*update);
+    ASSERT_TRUE(updated.has_value());
+    EXPECT_FALSE(updated->operation_id.has_value());
+    EXPECT_EQ(WeightResidencyState::HOT, updated->residency);
 }
 
 TEST(WeightPolicyStateTest, LeaseRemainsAvailableDuringMigration) {
