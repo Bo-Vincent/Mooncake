@@ -582,3 +582,11 @@ mpcomm_transport
 
 transfer-engine-bench-tuning
 :::
+
+## Adaptive RDMA Congestion Control
+
+:::{toctree}
+:maxdepth: 1
+
+adaptive-rdma-control
+:::
