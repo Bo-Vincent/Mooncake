@@ -73,6 +73,20 @@ def test_upload_batches_payload_puts_by_range_limit() -> None:
     assert [receipt.object_key for receipt in receipts] == expected_keys
 
 
+def test_upload_passes_per_key_residency_affinity_ids() -> None:
+    store, weight_store = make_weight_store(max_ranges_per_request=1)
+    sources = source_manifests(dp=1, tp=2)
+    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+
+    upload_all(weight_store, plan, sources)
+
+    assert store.residency_affinity_ids == {
+        operation.target.object_key: operation.residency_affinity_id
+        for operation in plan.operations
+    }
+    assert len(set(store.residency_affinity_ids.values())) == 1
+
+
 def test_upload_routes_shared_worker_operations_by_participant() -> None:
     _store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)

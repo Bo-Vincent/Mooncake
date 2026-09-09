@@ -36,6 +36,7 @@ RangeResults: TypeAlias = tuple[tuple[tuple[int, ...], ...], ...]
 
 class _NativeReplicateConfig(Protocol):
     group_ids: list[str]
+    residency_affinity_ids: Optional[list[str]]
     with_hard_pin: bool
     data_type: object
 
@@ -63,6 +64,12 @@ def default_config_factory(
             "native Mooncake Store must expose ReplicateConfig.group_ids"
         ) from error
     try:
+        config.residency_affinity_ids = None
+    except AttributeError as error:
+        raise WeightStoreError(
+            "native Mooncake Store must expose ReplicateConfig.residency_affinity_ids"
+        ) from error
+    try:
         config.with_hard_pin = True
         if record_type == "payload":
             config.data_type = object_data_type.WEIGHT
@@ -71,6 +78,23 @@ def default_config_factory(
     except (AttributeError, TypeError, ValueError) as error:
         raise WeightStoreError(
             "native Mooncake Store configuration is invalid"
+        ) from error
+    return config
+
+
+def set_residency_affinity_ids(
+    config: object,
+    residency_affinity_ids: Sequence[str],
+) -> object:
+    """Attach one opaque residency unit ID to each key in a batch."""
+
+    try:
+        cast(_NativeReplicateConfig, config).residency_affinity_ids = list(
+            residency_affinity_ids
+        )
+    except AttributeError as error:
+        raise WeightStoreError(
+            "native Mooncake Store must expose ReplicateConfig.residency_affinity_ids"
         ) from error
     return config
 
@@ -101,9 +125,7 @@ class StoreBackend:
             raise WeightStoreError(f"is_exist returned invalid status for {key}")
         return result
 
-    def weight_batch_is_exist(
-        self, keys: Sequence[str]
-    ) -> Optional[tuple[int, ...]]:
+    def weight_batch_is_exist(self, keys: Sequence[str]) -> Optional[tuple[int, ...]]:
         candidate = self._optional_method("batch_is_exist")
         if candidate is None:
             return None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import gc
+import hashlib
 import weakref
 
 import pytest
@@ -85,6 +86,30 @@ def test_upload_plan_selects_one_complete_generation_consistent_dp_replica() -> 
     )
     assert plan.manifest.group_id.endswith("/1")
     assert plan.control_key == f"{plan.transaction_group_id}/decision"
+
+
+def test_upload_plan_assigns_one_stable_affinity_per_logical_tensor() -> None:
+    sources = tp_manifests(
+        tp=2,
+        dp=1,
+        pp_rank=0,
+        ep_rank=0,
+        address_base=0x10000,
+        worker_prefix="source",
+    )
+
+    first = plan_weight_upload(sources.placement, sources.bindings)
+    second = plan_weight_upload(sources.placement, sources.bindings)
+
+    affinity_ids = {operation.residency_affinity_id for operation in first.operations}
+    assert len(affinity_ids) == 1
+    logical_names = (sources.placement.tensors[0].tensor_id,)
+    assert affinity_ids == {
+        hashlib.sha256("\0".join(logical_names).encode()).hexdigest()
+    }
+    assert [operation.residency_affinity_id for operation in first.operations] == [
+        operation.residency_affinity_id for operation in second.operations
+    ]
 
 
 def test_upload_plan_rejects_complete_dp_replicas_at_different_generations() -> None:
