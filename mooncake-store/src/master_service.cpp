@@ -71,6 +71,7 @@ namespace {
 
 constexpr int kMaxTenantQuotaEvictionRetries = 2;
 constexpr size_t kWeightDeleteBatchSize = 64;
+constexpr uint64_t kWeightMigrationCooldownMs = 30'000;
 
 // Per-cycle offload cap as a fraction of `offloading_queue_limit_`. Used only
 // when offload-on-evict mode is active. Defers memory eviction for at most
@@ -2351,13 +2352,38 @@ size_t MasterService::ReconcileWeightMetadataOnce(uint64_t now_ms,
         }
     }
 
-    const auto snapshot = weight_metadata_.ExportSnapshot();
+    auto snapshot = weight_metadata_.ExportSnapshot();
+    const double memory_used_ratio =
+        segment_manager_.GetMemoryUsage().used_ratio();
+    const bool memory_pressure =
+        memory_used_ratio > eviction_high_watermark_ratio_ ||
+        need_mem_eviction_.load(std::memory_order_relaxed);
+    const double memory_low_watermark =
+        std::max(0.0, eviction_high_watermark_ratio_ - eviction_ratio_);
+    const bool capacity_available =
+        !memory_pressure && memory_used_ratio < memory_low_watermark;
+    if (memory_pressure) {
+        std::sort(snapshot.metadata.begin(), snapshot.metadata.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      if (lhs.updated_at_ms != rhs.updated_at_ms) {
+                          return lhs.updated_at_ms < rhs.updated_at_ms;
+                      }
+                      if (lhs.manifest.logical_bytes !=
+                          rhs.manifest.logical_bytes) {
+                          return lhs.manifest.logical_bytes >
+                                 rhs.manifest.logical_bytes;
+                      }
+                      return lhs.identity < rhs.identity;
+                  });
+    }
     const size_t revision_count = snapshot.metadata.size();
     const size_t start = revision_count == 0
                              ? 0
-                             : weight_reconciliation_offset_.fetch_add(
-                                   std::max<size_t>(limit, 1)) %
-                                   revision_count;
+                             : memory_pressure
+                                   ? 0
+                                   : weight_reconciliation_offset_.fetch_add(
+                                         std::max<size_t>(limit, 1)) %
+                                         revision_count;
     for (size_t examined = 0;
          examined < revision_count && actions < limit; ++examined) {
         const auto& metadata =
@@ -2385,6 +2411,42 @@ size_t MasterService::ReconcileWeightMetadataOnce(uint64_t now_ms,
             }
             ++actions;
             continue;
+        }
+
+        std::optional<WeightAutoMigrationSignal> auto_signal;
+        if (memory_pressure) {
+            auto_signal = WeightAutoMigrationSignal::MEMORY_PRESSURE;
+        } else if (capacity_available) {
+            auto_signal = WeightAutoMigrationSignal::CAPACITY_AVAILABLE;
+        }
+        if (auto_signal.has_value() &&
+            metadata.availability == WeightAvailabilityState::READY) {
+            auto current = weight_metadata_.Get(metadata.identity, now_ms);
+            if (current) {
+                auto target = PlanAutomaticWeightMigration(
+                    current->metadata, current->active_lease_count,
+                    *auto_signal, now_ms, kWeightMigrationCooldownMs);
+                if (target.has_value()) {
+                    auto started = StartWeightResidencyOperation(
+                        StartWeightResidencyOperationRequest{
+                            .identity = metadata.identity,
+                            .expected_metadata_generation =
+                                current->metadata.metadata_generation,
+                            .target_residency = target->residency,
+                            .mixed_hot_ratio = target->mixed_hot_ratio,
+                        });
+                    if (started) {
+                        ++actions;
+                        continue;
+                    }
+                    if (started.error() !=
+                            WeightManagementError::STALE_GENERATION &&
+                        started.error() != WeightManagementError::BUSY) {
+                        MasterMetricManager::instance()
+                            .inc_weight_reconciliation_failures();
+                    }
+                }
+            }
         }
 
         WeightMetadataStore::Result<WeightRevisionMetadata> reconciled =
