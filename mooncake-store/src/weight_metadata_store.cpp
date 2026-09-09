@@ -957,11 +957,13 @@ WeightMetadataStore::Result<WeightOperationMutation>
 WeightMetadataStore::PrepareUpdateOperationProgress(
     uint64_t operation_id, uint64_t processed_units, uint64_t total_units,
     uint64_t processed_bytes, uint64_t total_bytes, std::string cursor,
-    WeightResidencyState observed_residency, double observed_hot_ratio,
-    uint64_t now_ms) const {
+    std::string message, WeightResidencyState observed_residency,
+    double observed_hot_ratio, uint64_t now_ms) const {
     if (operation_id == 0 || total_units == 0 || total_bytes == 0 ||
         processed_units > total_units || processed_bytes > total_bytes ||
         (!cursor.empty() && !IsValidWeightComponent(cursor)) ||
+        (!message.empty() &&
+         (message == "completed" || !IsValidWeightComponent(message))) ||
         !IsWeightResidencyTarget(observed_residency) ||
         !std::isfinite(observed_hot_ratio) || observed_hot_ratio < 0.0 ||
         observed_hot_ratio > 1.0 ||
@@ -997,7 +999,8 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
         next_operation.total_units == total_units &&
         next_operation.processed_bytes == processed_bytes &&
         next_operation.total_bytes == total_bytes &&
-        next_operation.cursor == cursor;
+        next_operation.cursor == cursor &&
+        (message.empty() || next_operation.message == message);
     if (unchanged) {
         return WeightOperationMutation{
             .metadata =
@@ -1017,6 +1020,9 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
     next_operation.processed_bytes = processed_bytes;
     next_operation.total_bytes = total_bytes;
     next_operation.cursor = std::move(cursor);
+    if (!message.empty()) {
+        next_operation.message = std::move(message);
+    }
     next_operation.updated_at_ms = now_ms;
     auto next_metadata = revision->second;
     if (!metadata_unchanged) {
@@ -1043,6 +1049,57 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
         .previous = operation->second,
         .next = std::move(next_operation),
         .no_op = false,
+    };
+}
+
+WeightMetadataStore::Result<WeightOperationMutation>
+WeightMetadataStore::PrepareRecordOperationError(
+    uint64_t operation_id, std::string message, uint64_t now_ms) const {
+    if (operation_id == 0 || message == "completed" ||
+        !IsValidWeightComponent(message)) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    std::lock_guard lock(mutex_);
+    const auto operation = operations_.find(operation_id);
+    if (operation == operations_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto revision = revisions_.find(operation->second.identity);
+    if (revision == revisions_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    if (!revision->second.operation_id.has_value() ||
+        *revision->second.operation_id != operation_id ||
+        operation->second.message == "completed") {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    if (operation->second.message == message) {
+        return WeightOperationMutation{
+            .metadata =
+                WeightMetadataMutation{
+                    .identity = revision->first,
+                    .previous = revision->second,
+                    .next = revision->second,
+                    .no_op = true,
+                },
+            .previous = operation->second,
+            .next = operation->second,
+            .no_op = true,
+        };
+    }
+    auto next_operation = operation->second;
+    next_operation.message = std::move(message);
+    next_operation.updated_at_ms =
+        std::max(next_operation.updated_at_ms, now_ms);
+    return WeightOperationMutation{
+        .metadata =
+            WeightMetadataMutation{
+                .identity = revision->first,
+                .previous = revision->second,
+                .next = revision->second,
+            },
+        .previous = operation->second,
+        .next = std::move(next_operation),
     };
 }
 

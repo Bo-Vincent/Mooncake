@@ -2110,6 +2110,7 @@ MasterService::ReconcileWeightRevision(
     };
 
     std::set<std::string> hot_affinities;
+    bool offload_failed = false;
     if (active_operation.has_value() && !absent &&
         active_operation->kind == WeightOperationKind::MIGRATING) {
         auto affinities = aggregate_affinities(*members);
@@ -2211,7 +2212,9 @@ MasterService::ReconcileWeightRevision(
                         members->begin(), members->end(),
                         [&](const auto& item) { return item.key == key; });
                     if (member == members->end() || !member->has_cold) {
-                        QueueManagedWeightMemberOffload(current, key);
+                        offload_failed =
+                            !QueueManagedWeightMemberOffload(current, key) ||
+                            offload_failed;
                     }
                 }
             } else if (view->active_lease_count == 0) {
@@ -2324,8 +2327,9 @@ MasterService::ReconcileWeightRevision(
             std::min(processed_units, operation.total_units),
             operation.total_units,
             std::min(processed_bytes, operation.total_bytes),
-            operation.total_bytes, std::move(cursor), observed_residency,
-            observed_hot_ratio, now_ms);
+            operation.total_bytes, std::move(cursor),
+            offload_failed ? "cold replica write failed" : "",
+            observed_residency, observed_hot_ratio, now_ms);
         if (!progress) {
             return tl::make_unexpected(progress.error());
         }
@@ -3034,14 +3038,14 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
     return EvictManagedWeightMembersToCold(revision, weight_keys);
 }
 
-void MasterService::QueueManagedWeightMemberOffload(
+bool MasterService::QueueManagedWeightMemberOffload(
     const WeightRevisionMetadata& revision, const std::string& member_key) {
     const TenantId tenant_id(revision.identity.tenant_id);
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     MetadataAccessorRW accessor(this,
                                 MakeObjectIdentity(member_key, tenant_id));
     if (!accessor.Exists()) {
-        return;
+        return false;
     }
     auto& metadata = accessor.Get();
     if (metadata.group_id != revision.manifest.payload_group_id ||
@@ -3049,12 +3053,13 @@ void MasterService::QueueManagedWeightMemberOffload(
         metadata.HasReplica([this](const Replica& replica) {
             return !replica.is_memory_replica() && IsReplicaReadable(replica);
         })) {
-        return;
+        return metadata.group_id == revision.manifest.payload_group_id &&
+               metadata.data_type == ObjectDataType::WEIGHT;
     }
 
     auto& tenant_state = accessor.GetTenantState();
     if (tenant_state.offloading_tasks.contains(member_key)) {
-        return;
+        return true;
     }
     std::optional<ReplicaID> source_id;
     std::vector<UUID> mirror_clients;
@@ -3078,8 +3083,9 @@ void MasterService::QueueManagedWeightMemberOffload(
         tenant_state.offloading_tasks.emplace(
             member_key,
             OffloadingTask{*source_id, std::chrono::system_clock::now(),
-                           std::move(mirror_clients)});
+                           std::move(mirror_clients), revision.operation_id});
     }
+    return source_id.has_value();
 }
 
 MasterService::GroupEvictionResult
@@ -6614,7 +6620,7 @@ auto MasterService::PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
             tenant_state.offloading_tasks.emplace(
                 object_id.user_key,
                 OffloadingTask{*source_id, std::chrono::system_clock::now(),
-                               std::move(mirror_clients)});
+                               std::move(mirror_clients), std::nullopt});
         }
     }
 
@@ -9676,6 +9682,7 @@ auto MasterService::NotifyOffloadSuccess(
     // below). NACK cleanups still run for the rest of the batch; the caller
     // gets SEGMENT_NOT_FOUND so a rescan stops re-registering.
     bool refused_unmounted = false;
+    std::vector<uint64_t> failed_weight_operation_ids;
 
     for (size_t i = 0; i < tasks.size(); ++i) {
         const auto& task = tasks[i];
@@ -9696,6 +9703,10 @@ auto MasterService::NotifyOffloadSuccess(
                 auto task_it = tenant_state.offloading_tasks.find(
                     request_object_id.user_key);
                 if (task_it != tenant_state.offloading_tasks.end()) {
+                    if (task_it->second.weight_operation_id.has_value()) {
+                        failed_weight_operation_ids.push_back(
+                            *task_it->second.weight_operation_id);
+                    }
                     auto source = accessor.Get().GetReplicaByID(
                         task_it->second.source_id);
                     if (source != nullptr) {
@@ -9836,11 +9847,62 @@ auto MasterService::NotifyOffloadSuccess(
         }
     }
 
+    std::sort(failed_weight_operation_ids.begin(),
+              failed_weight_operation_ids.end());
+    failed_weight_operation_ids.erase(
+        std::unique(failed_weight_operation_ids.begin(),
+                    failed_weight_operation_ids.end()),
+        failed_weight_operation_ids.end());
+    bool operation_error_persist_failed = false;
+    for (const uint64_t operation_id : failed_weight_operation_ids) {
+        auto operation = weight_metadata_.QueryOperation(operation_id);
+        if (!operation) {
+            if (operation.error() != WeightManagementError::NOT_FOUND) {
+                operation_error_persist_failed = true;
+            }
+            continue;
+        }
+        const auto canonical_group =
+            MakeWeightPayloadGroupId(operation->identity);
+        if (canonical_group.empty()) {
+            operation_error_persist_failed = true;
+            continue;
+        }
+        [[maybe_unused]] auto group_operation_lock =
+            AcquireWeightGroupOperationLock(
+                TenantId(operation->identity.tenant_id), canonical_group);
+        const auto now_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        auto mutation = weight_metadata_.PrepareRecordOperationError(
+            operation_id, "cold replica write failed", now_ms);
+        if (!mutation) {
+            if (mutation.error() != WeightManagementError::NOT_FOUND &&
+                mutation.error() != WeightManagementError::CONFLICT) {
+                operation_error_persist_failed = true;
+            }
+            continue;
+        }
+        auto published =
+            PersistAndPublishWeightOperationMutation(*mutation);
+        if (!published) {
+            operation_error_persist_failed = true;
+            LOG(ERROR) << "Failed to persist weight offload error"
+                       << ", operation_id=" << operation_id
+                       << ", error="
+                       << static_cast<int>(published.error());
+        }
+    }
+
     if (refused_unmounted) {
         LOG(WARNING) << "client_id=" << client_id
                      << ", action=notify_offload_success_refused"
                      << ", error=no_local_disk_segment";
         return tl::make_unexpected(ErrorCode::SEGMENT_NOT_FOUND);
+    }
+    if (operation_error_persist_failed) {
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
     return {};
 }
@@ -12336,7 +12398,8 @@ MasterService::EvictTenantMemoryForQuota(const TenantId& tenant_id,
                     replica.inc_refcnt();
                     tenant_state.offloading_tasks.emplace(
                         key, OffloadingTask{replica.id(), now,
-                                            std::move(mirror_clients)});
+                                            std::move(mirror_clients),
+                                            std::nullopt});
                     queued = true;
                 }
             });
@@ -12655,7 +12718,8 @@ void MasterService::BatchEvict(double evict_ratio_target,
                     replica.inc_refcnt();
                     tenant_state.offloading_tasks.emplace(
                         key, OffloadingTask{replica.id(), now,
-                                            std::move(mirror_clients)});
+                                            std::move(mirror_clients),
+                                            std::nullopt});
                     queued = true;
                 }
             });

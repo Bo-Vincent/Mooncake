@@ -276,7 +276,7 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
     ASSERT_TRUE(operation.has_value());
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {},
+        operation->operation_id, 0, 4, 0, 4096, {}, {},
         WeightResidencyState::HOT, 1.0, 400);
     ASSERT_TRUE(progress.has_value());
     EXPECT_FALSE(progress->no_op);
@@ -285,8 +285,49 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
     EXPECT_EQ(400, published->updated_at_ms);
 
     auto retry = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {},
+        operation->operation_id, 0, 4, 0, 4096, {}, {},
         WeightResidencyState::HOT, 1.0, 500);
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_TRUE(retry->no_op);
+    auto retried = metadata_store.Publish(*retry);
+    ASSERT_TRUE(retried.has_value());
+    EXPECT_EQ(400, retried->updated_at_ms);
+}
+
+TEST(WeightMetadataStoreTest,
+     RecordsRetryableOperationErrorWithoutChangingAvailability) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto started = metadata_store.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        300);
+    ASSERT_TRUE(started.has_value());
+    auto operation = metadata_store.Publish(*started);
+    ASSERT_TRUE(operation.has_value());
+    const auto before = metadata_store.Get(ready.identity, 400);
+    ASSERT_TRUE(before.has_value());
+
+    auto failure = metadata_store.PrepareRecordOperationError(
+        operation->operation_id, "cold replica write failed", 400);
+    ASSERT_TRUE(failure.has_value());
+    auto published = metadata_store.Publish(*failure);
+    ASSERT_TRUE(published.has_value());
+    EXPECT_EQ("cold replica write failed", published->message);
+    EXPECT_EQ(400, published->updated_at_ms);
+
+    const auto after = metadata_store.Get(ready.identity, 400);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(before->metadata, after->metadata);
+    EXPECT_EQ(WeightAvailabilityState::READY,
+              after->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::HOT, after->metadata.residency);
+
+    auto retry = metadata_store.PrepareRecordOperationError(
+        operation->operation_id, "cold replica write failed", 500);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
     auto retried = metadata_store.Publish(*retry);

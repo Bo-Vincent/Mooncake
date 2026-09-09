@@ -1670,6 +1670,7 @@ class MasterService {
         // offload is pushed once per completed MEMORY replica and those
         // replicas may live on different clients.
         std::vector<UUID> mirror_clients;
+        std::optional<uint64_t> weight_operation_id;
     };
 
     // Tracks an in-flight LOCAL_DISK -> MEMORY copy. The source
@@ -2087,8 +2088,9 @@ class MasterService {
     GroupEvictionResult EvictManagedWeightMembersToCold(
         const WeightRevisionMetadata& metadata,
         const std::vector<std::string>& member_keys);
-    void QueueManagedWeightMemberOffload(const WeightRevisionMetadata& metadata,
-                                         const std::string& member_key);
+    bool QueueManagedWeightMemberOffload(
+        const WeightRevisionMetadata& metadata,
+        const std::string& member_key);
 
     // Evicts every member of `group_id` across its metadata shards. MUST be
     // called WITHOUT holding any metadata shard lock: the caller releases the
