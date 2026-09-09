@@ -20,13 +20,15 @@ class PayloadStoreOperations:
     def require_complete_payloads(self, keys: Sequence[str]) -> None:
         if not keys:
             return
-        batch_is_exist = self.client.store.batch_is_exist
+        batch_is_exist = self.client.store.weight_batch_is_exist
         incomplete: list[str] = []
         for begin in range(0, len(keys), self.client.max_ranges_per_request):
             chunk = list(keys[begin : begin + self.client.max_ranges_per_request])
             results = batch_is_exist(chunk)
             if results is None:
-                results = [self.client.store.is_exist(key) for key in chunk]
+                results = [
+                    self.client.store.weight_is_exist_object(key) for key in chunk
+                ]
             if len(results) != len(chunk):
                 raise WeightStoreError("payload existence check returned invalid count")
             for key, result in zip(chunk, results):
@@ -93,7 +95,7 @@ class PayloadStoreOperations:
         failures: list[tuple[str, Union[str, int]]] = []
         for key in keys:
             try:
-                result = self.client.store.remove(key, force=True)
+                result = self.client.store.weight_remove_object(key, force=True)
             except Exception as error:
                 failures.append((key, repr(error)))
                 continue
