@@ -164,13 +164,13 @@ operation = weight_store.weight_migrate(
     identity,
     target=WeightResidencyState.MIXED,
     mixed_hot_ratio=0.5,
-    expected_metadata_generation=updated.view.metadata.metadata_generation,
+    expected_metadata_generation=updated.metadata_generation,
 )
 operation = weight_store.weight_get_operation(operation.operation_id)
 
 removed = weight_store.weight_remove(
     identity,
-    expected_metadata_generation=updated.view.metadata.metadata_generation,
+    expected_metadata_generation=updated.metadata_generation,
 )
 ```
 
@@ -432,6 +432,10 @@ snapshot field weight_catalog -> weight_metadata
 
 ## 10. 验收标准
 
+以下标准必须在同一个 exact implementation head 上逐项验证。所有“最终收敛”类
+断言使用有 deadline 的状态轮询，不以固定 `sleep` 代替；无法在当前环境执行的
+项目必须明确记录为未验证边界，不能计为通过。
+
 ### 10.1 API 与命名
 
 - `weight_put -> weight_get_metadata -> weight_get -> weight_remove` E2E 通过；
@@ -448,17 +452,37 @@ snapshot field weight_catalog -> weight_metadata
 
 - policy 的 cluster default、`WeightStore` default、单次 `weight_put` override
   优先级正确，最终值持久化到 revision metadata；
+- cluster default 只影响之后新建的 revision；修改默认值后，已有 revision 的已
+  持久化 policy、generation 和目标 residency 不发生变化；
+- cluster default 的 YAML/CLI 配置等价；非法枚举、非法 MIXED ratio、high/low
+  watermark 逆序、零迁移批限额等配置在启动时 fail closed；
 - 所有 `weight_put` 先完整写入 HOT payload，并在 manifest 最后提交后发布
   `READY + HOT`；任何 payload/manifest 不完整的路径都不能发布 `READY`；
+- import 在 payload、manifest 或 commit 任一阶段失败、超时或调用方退出时，
+  revision 不得对 `weight_is_exist/weight_get` 可见；相同 identity 的恢复、重试或
+  abort 必须 generation-fenced，不能留下可被误判为 READY 的半组数据或重复
+  manifest；
 - preferred 为 HOT 时 `operation_id=None`；preferred 为 MIXED/COLD 时，READY
   metadata 与对应 `MIGRATING(target=preferred)` operation 在同一个 durable
   mutation 中发布，且不阻塞 `weight_put` 返回；
+- `READY` 发布和 preferred 收敛是两个独立检查点：前者只要求 manifest 与全部
+  payload 已可读并且初始 residency 为 HOT；后者由异步 reconciliation 完成，
+  不得把 `READY` 推迟到 MIXED/COLD 迁移结束；
+- preferred 为 MIXED/COLD 时，commit 返回的 view 或暂停 reconciliation 的契约
+  测试必须先验证 `READY + HOT + active MIGRATING`；随后在有 deadline 的轮询内
+  收敛到目标 residency。公共 E2E 不依赖短暂中间态的竞态窗口，但测试集不得只
+  验证最终状态而漏掉 READY 发布点；
 - response 丢失后的相同 put/commit 重试幂等，不生成第二个 group、manifest 或
   operation；
 - 首次 HOT 向 preferred 的收敛对 `PINNED/MANUAL/AUTO` 都执行；首次收敛完成后，
   `PINNED` 固定 residency，`MANUAL` 仅接受显式迁移，`AUTO` 才响应压力和访问；
+- 初始收敛完成后，`PINNED` 下显式迁移被拒绝，`MANUAL/AUTO` 下合法显式迁移被
+  接受；非法 MIXED ratio 和无法满足 durability 的目标返回确定错误且不改变状态；
 - `weight_update` 只能修改 policy；同值更新幂等，过期 generation 返回
   `STALE_GENERATION`，不允许修改 identity、manifest 或观测状态；
+- `weight_update` 不同步篡改 observed residency：更新后若 policy 为 `AUTO` 且当前
+  residency 与 preferred 不一致，则先持久化新 operation 再异步收敛；`MANUAL` 和
+  `PINNED` 不自动创建迁移 operation；
 - 并发 update/migrate/remove 只能有一个 generation-fenced mutation 成功，其余
   返回 `STALE_GENERATION` 或 `BUSY`。
 
@@ -466,7 +490,14 @@ snapshot field weight_catalog -> weight_metadata
 
 - HOT/COLD/MIXED 之间所有显式合法迁移通过，`weight_get_operation` 返回稳定的
   kind、target、processed/total、bytes 和 terminal message；
+- 显式迁移响应丢失后的相同请求返回原 operation，而不是创建第二个 operation；若
+  residency 已满足相同 target，则返回确定的幂等结果且不重复执行物理迁移；
 - metadata 只保存可选 operation ID，不重复保存 kind、target 或 progress；
+- operation ID 在重试、Master restart 和 failover 后保持不变；processed units/bytes
+  及错误信息只能单调推进，不能回退、重复累计或被旧 operation 的迟到回调覆盖；
+- 迁移成功后 metadata 的 residency/`observed_hot_ratio` 与实际 payload replica
+  一致，active `operation_id` 被清空；原 operation ID 仍可查询终态，重复
+  reconciliation 不重复迁移或重复累计进度；
 - 到 COLD/MIXED 时，cold replica 未验证可读前绝不释放对应的最后一个 memory
   replica；到 HOT 时必须验证所有必需 payload 都有可读 memory replica；
 - MIXED 默认 50%、支持 override、按完整 Tensor/alias affinity 迁移，并返回实际
@@ -474,15 +505,26 @@ snapshot field weight_catalog -> weight_metadata
 - payload 为 COLD 时 manifest 仍保持 memory-readable；
 - `weight_get` 在 MIGRATING 期间保持可用；active lease 允许创建新副本，但暂停
   现有副本释放和 revision 删除；
+- `weight_get` 必须先原子获取与当前 revision generation 对应的 lease，再解析
+  manifest/payload；成功、异常和取消路径都会释放 lease，调用方崩溃后 lease 能按
+  TTL 过期，Master restart/failover 后不得永久泄漏或提前失效；
 - migration 失败但数据仍完整可读时保持 `READY` 并保留可重试 operation；只有
   必需 payload 失去全部可读副本时进入 `DEGRADED`；
-- AUTO 在 high/low watermark 和访问事件下按预期迁移，并遵守 cooldown、每轮
-  member/bytes 上限以及无 active lease 的候选约束。
+- AUTO 在 high/low watermark 和访问事件下按预期迁移，并遵守 cooldown 与每轮
+  member/bytes 上限；压力下沉和空闲提升只选择无 active lease 的 revision；
+- COLD/MIXED revision 的访问提升在授予本次 lease 前，以同一个 generation fence
+  先持久化 promotion operation，再基于新 generation 授予 lease；该 lease 只延迟
+  旧副本释放，不阻止创建、校验 HOT 副本，也不生成重复 operation；
+- 压力候选按可持久化的最近访问时间、可释放 HOT bytes 和稳定 identity 确定性
+  排序；Master 重启后相同输入得到相同顺序，迁移批次至少保证一个完整 affinity
+  unit 前进，且绝不为满足 bytes 上限拆分 Tensor/alias affinity。
 
 ### 10.4 Remove、恢复与非回归
 
 - `weight_remove` 执行 `DELETING -> payload 分批删除 -> manifest 最后删除 ->
   DELETED/ABSENT`，并在 active lease 或 migration 存在时返回 `BUSY`；
+- 任一删除批次失败时保持 `DELETING` 和已持久化进度；重试或切主后从剩余 member
+  继续，manifest 仍最后删除，不重新删除已完成 member；
 - remove 响应丢失后的相同请求幂等完成，tombstone 保持可查询且
   `weight_is_exist=False`；
 - 普通 eviction、quota eviction、单 key remove 和 cleanup 不能部分删除 managed
@@ -491,6 +533,10 @@ snapshot field weight_catalog -> weight_metadata
   range，metadata 不复制 Tensor/runtime binding；
 - partial migration、policy update 和 remove 在 Master restart/failover 后从已持久化
   generation、operation 和实际 replica 状态继续；
+- 状态不变量始终成立：`IMPORTING` 对应 `UNKNOWN`；`READY` 只对应
+  `HOT/COLD/MIXED`；`DELETED` 对应 `ABSENT` 且无 active lease/operation；metadata
+  中的 active operation ID 必须指向同 revision 的唯一非终态 operation，终态
+  operation 可按原 ID 查询但不再挂在 metadata 上；
 - active/standby schema capability 未确认时，新 Weight mutation fail closed；
 - 普通 Store、unmanaged WeightStore 和 KVCache 的 put/get/eviction/remove 行为无
   回归。
@@ -509,5 +555,21 @@ pre-commit run --from-ref origin/main --to-ref HEAD
 cd docs && make html
 ```
 
-最终记录 exact base/head SHA、测试数量、失败注入结果、未验证硬件边界，并扫描
-当前 diff，确认所有新增或修改的代码注释均为英文。
+另外必须在 Linux 环境完成至少一条真实公共路径 E2E，而不是只使用 fake client：
+
+- 启动该 exact head 构建出的 Store Master，并使用同一 head 的 native Python
+  binding 执行 `weight_put -> READY/HOT -> 异步收敛 preferred -> weight_get ->
+  weight_remove`；
+- COLD/MIXED E2E 必须实际创建并验证 cold replica，覆盖迁移期间持 lease 读取、
+  lease 释放后再下沉 memory replica，以及 manifest 始终可从内存读取；
+- 在 operation 已 durable、物理迁移未完成的位置重启 Master，验证恢复后从真实
+  replica 状态继续，而不是重新生成 group 或 operation；
+- 至少注入一次 cold 写入/校验失败，验证 revision 保持 `READY`、已有数据可读、
+  operation 错误可查询且可重试；
+- E2E 使用 deadline 轮询等待状态变化，并记录各关键状态及 generation；固定延时
+  后只检查最终结果不算通过。
+
+最终记录 exact base/head SHA、构建参数、测试数量、E2E 拓扑、失败注入结果和未
+验证硬件边界。若验证主机没有 RDMA HCA，只能确认 TCP/本地磁盘路径，不能声称
+RDMA data-plane E2E 已通过。最后扫描当前 diff，确认所有新增或修改的代码注释均
+为英文。
