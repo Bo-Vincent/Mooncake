@@ -13,6 +13,9 @@ max_kv_soft_pin_ttl: 86400000
 default_weight_preferred_residency: "mixed"
 default_weight_mixed_hot_ratio: 0.5
 default_weight_migration_mode: "auto"
+weight_migration_cooldown_ms: 30000
+weight_migration_max_members_per_round: 64
+weight_migration_max_bytes_per_round: 1073741824
 allow_evict_soft_pinned_objects: true
 eviction_ratio: 0.1
 # Overrides the 0.90 code default. A value of 1.0 disables proactive
