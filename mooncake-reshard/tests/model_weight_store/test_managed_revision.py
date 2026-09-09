@@ -107,6 +107,7 @@ class ManagedInMemoryStore(InMemoryStore):
                 metadata_generation=1,
                 created_at_ms=1,
                 updated_at_ms=1,
+                last_accessed_at_ms=1,
             )
             self.catalog[identity] = current
         return current, 0, 0
