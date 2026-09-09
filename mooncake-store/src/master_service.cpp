@@ -76,7 +76,6 @@ namespace {
 // so every RPC that touched those keys stalled behind the sweep.
 constexpr size_t kStaleHandleCleanupBatchSize = 64;
 constexpr size_t kWeightDeleteBatchSize = 64;
-constexpr uint64_t kWeightMigrationCooldownMs = 30'000;
 
 // Per-cycle offload cap as a fraction of `offloading_queue_limit_`. Used only
 // when offload-on-evict mode is active. Defers memory eviction for at most
@@ -239,6 +238,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
             config.ha_backend_type == "etcd") ||
           config.weight_management_oplog_capability_confirmed),
       default_weight_storage_policy_(config.default_weight_storage_policy),
+      weight_migration_cooldown_ms_(config.weight_migration_cooldown_ms),
       oplog_batch_max_entries_(config.oplog_batch_max_entries),
       cluster_id_(config.cluster_id),
       root_fs_dir_(config.root_fs_dir),
@@ -2411,7 +2411,7 @@ size_t MasterService::ReconcileWeightMetadataOnce(uint64_t now_ms,
             if (current) {
                 auto target = PlanAutomaticWeightMigration(
                     current->metadata, current->active_lease_count,
-                    *auto_signal, now_ms, kWeightMigrationCooldownMs);
+                    *auto_signal, now_ms, weight_migration_cooldown_ms_);
                 if (target.has_value()) {
                     auto started = StartWeightResidencyOperation(
                         StartWeightResidencyOperationRequest{

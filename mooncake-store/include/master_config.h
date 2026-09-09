@@ -12,6 +12,8 @@
 
 namespace mooncake {
 
+inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS = 30'000;
+
 struct ClientLivenessConfigSource {
     std::optional<int64_t> active_ttl_sec;
     std::optional<int64_t> legacy_ttl_sec;
@@ -107,6 +109,8 @@ struct MasterConfig {
     uint64_t default_kv_soft_pin_ttl;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     WeightStoragePolicy default_weight_storage_policy{};
+    uint64_t weight_migration_cooldown_ms =
+        DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
     bool allow_evict_soft_pinned_objects;
     double eviction_ratio;
     double eviction_high_watermark_ratio;
@@ -266,6 +270,8 @@ class MasterServiceSupervisorConfig {
         DEFAULT_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     WeightStoragePolicy default_weight_storage_policy{};
+    uint64_t weight_migration_cooldown_ms =
+        DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
     std::string rpc_address = "0.0.0.0";
     std::string metrics_host = "0.0.0.0";
     std::chrono::steady_clock::duration rpc_conn_timeout = std::chrono::seconds(
@@ -367,6 +373,7 @@ class MasterServiceSupervisorConfig {
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
+        weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         eviction_ratio = config.eviction_ratio;
@@ -568,6 +575,8 @@ class WrappedMasterServiceConfig {
     uint64_t default_kv_soft_pin_ttl = DEFAULT_KV_SOFT_PIN_TTL_MS;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     WeightStoragePolicy default_weight_storage_policy{};
+    uint64_t weight_migration_cooldown_ms =
+        DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     bool enable_metric_reporting = true;
@@ -671,6 +680,7 @@ class WrappedMasterServiceConfig {
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
+        weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         enable_metric_reporting = config.enable_metric_reporting;
@@ -802,6 +812,7 @@ class WrappedMasterServiceConfig {
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
+        weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         enable_metric_reporting = config.enable_metric_reporting;
@@ -907,6 +918,8 @@ class MasterServiceConfigBuilder {
     uint64_t default_kv_soft_pin_ttl_ = DEFAULT_KV_SOFT_PIN_TTL_MS;
     uint64_t max_kv_soft_pin_ttl_ = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     WeightStoragePolicy default_weight_storage_policy_{};
+    uint64_t weight_migration_cooldown_ms_ =
+        DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
     bool allow_evict_soft_pinned_objects_ =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     double eviction_ratio_ = DEFAULT_EVICTION_RATIO;
@@ -992,6 +1005,12 @@ class MasterServiceConfigBuilder {
     MasterServiceConfigBuilder& set_default_weight_storage_policy(
         WeightStoragePolicy policy) {
         default_weight_storage_policy_ = policy;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_weight_migration_cooldown_ms(
+        uint64_t cooldown_ms) {
+        weight_migration_cooldown_ms_ = cooldown_ms;
         return *this;
     }
 
@@ -1319,6 +1338,8 @@ class MasterServiceConfig {
     uint64_t default_kv_soft_pin_ttl = DEFAULT_KV_SOFT_PIN_TTL_MS;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     WeightStoragePolicy default_weight_storage_policy{};
+    uint64_t weight_migration_cooldown_ms =
+        DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     double eviction_ratio = DEFAULT_EVICTION_RATIO;
@@ -1420,6 +1441,7 @@ class MasterServiceConfig {
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
+        weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         eviction_ratio = config.eviction_ratio;
@@ -1533,6 +1555,7 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.default_kv_soft_pin_ttl = default_kv_soft_pin_ttl_;
     config.max_kv_soft_pin_ttl = max_kv_soft_pin_ttl_;
     config.default_weight_storage_policy = default_weight_storage_policy_;
+    config.weight_migration_cooldown_ms = weight_migration_cooldown_ms_;
     config.allow_evict_soft_pinned_objects = allow_evict_soft_pinned_objects_;
     config.eviction_ratio = eviction_ratio_;
     config.eviction_high_watermark_ratio = eviction_high_watermark_ratio_;
