@@ -229,6 +229,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
           !(config.enable_ha && config.enable_oplog &&
             config.ha_backend_type == "etcd") ||
           config.weight_management_oplog_capability_confirmed),
+      default_weight_storage_policy_(config.default_weight_storage_policy),
       oplog_batch_max_entries_(config.oplog_batch_max_entries),
       cluster_id_(config.cluster_id),
       root_fs_dir_(config.root_fs_dir),
@@ -254,6 +255,12 @@ MasterService::MasterService(const MasterServiceConfig& config)
               return std::make_unique<OrderedOpLogWriter>(
                   std::move(writer_config), std::move(write_batch));
           }) {
+    const auto weight_policy_validation =
+        ValidateWeightStoragePolicy(default_weight_storage_policy_);
+    if (!weight_policy_validation.ok()) {
+        throw std::invalid_argument("Invalid default weight storage policy: " +
+                                    weight_policy_validation.message());
+    }
     if (default_kv_soft_pin_ttl_ > max_kv_soft_pin_ttl_) {
         LOG(ERROR) << "Invalid soft-pin TTL configuration: default="
                    << default_kv_soft_pin_ttl_
@@ -1767,6 +1774,9 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightIm
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     normalized.payload_group_id = canonical_group;
+    if (!normalized.policy.has_value()) {
+        normalized.policy = default_weight_storage_policy_;
+    }
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
