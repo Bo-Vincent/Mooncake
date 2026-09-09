@@ -30,12 +30,27 @@
 #include "tent/common/utils/os.h"
 #include "tent/common/concurrent/bounded_mpsc_queue.h"
 #include "tent/common/types.h"
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+#include "adaptive_congestion_control.h"
+#endif
 
 namespace mooncake {
 namespace tent {
 
 class RdmaTransport;
 class DeviceSelector;
+
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+adaptive_cc::Decision acquireTentCcAttempt(RdmaSlice& slice,
+                                           TentRdmaCcRoute* route,
+                                           const adaptive_cc::PathHandle& path,
+                                           uint64_t bytes,
+                                           uint32_t endpoint_generation);
+bool completeTentCcAttempt(RdmaSlice& slice, adaptive_cc::OutcomeClass outcome,
+                           adaptive_cc::FailureScope scope);
+void tickTentCcRoute(TentRdmaCcRoute& route, uint64_t now_ns,
+                     uint64_t elapsed_ns);
+#endif
 
 class Workers {
     friend class RdmaTransportTestPeer;
@@ -70,6 +85,7 @@ class Workers {
    private:
     using Task = std::function<void()>;
     struct WorkerContext;
+    struct PostPath;
 
     void workerThread(int thread_id);
 
@@ -161,6 +177,16 @@ class Workers {
     // DeviceSelector::release.
     void releaseSliceQuota(RdmaSlice* slice, uint64_t now_ns,
                            double latency = 0.0);
+
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+    adaptive_cc::Decision acquireCongestionPermit(
+        RdmaSlice* slice, const PostPath& path,
+        const std::shared_ptr<RdmaEndPoint>& endpoint);
+    void completeCongestionPermit(RdmaSlice* slice,
+                                  adaptive_cc::OutcomeClass outcome,
+                                  adaptive_cc::FailureScope scope);
+    void updateCongestionSignals(uint64_t now_ns);
+#endif
 
     // Record that `slice` has reached its source device's hardware. Its
     // submit_ts opens the device's busy stretch when nothing else was
@@ -283,6 +309,10 @@ class Workers {
         }
     };
 
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+    TentRdmaCcRoute* getCongestionRoute(const PostPath& path);
+#endif
+
     std::shared_ptr<RdmaEndPoint> getEndpoint(PostPath path);
 
     void disableEndpoint(RdmaSlice* slice);
@@ -373,6 +403,13 @@ class Workers {
         // invalidate pointers into RailMonitor stored on in-flight slices
         // (see RdmaSlice::rail_monitor).
         std::unordered_map<std::string, std::unique_ptr<RailMonitor>> rails;
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+        // Raw pointers alias cc_routes_, which owns every route until Workers
+        // teardown.
+        std::unordered_map<PostPath, TentRdmaCcRoute*, PostPathHash> cc_routes;
+        uint64_t cc_last_poll_ns = 0;
+        bool cc_poller_stalled = false;
+#endif
         PerfMetricSummary perf;
         uint64_t padding[15];
     };
@@ -402,6 +439,14 @@ class Workers {
     // Opt-in deadline-aware bandwidth arbitration within a priority tier
     // (RFC #2792). Default false = original FIFO order (equal bandwidth split).
     bool deadline_bw_arbitration_ = false;
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+    adaptive_cc::Config cc_config_;
+    std::vector<std::unique_ptr<adaptive_cc::DomainState>> cc_devices_;
+    std::mutex cc_routes_mutex_;
+    std::unordered_map<PostPath, std::shared_ptr<TentRdmaCcRoute>, PostPathHash>
+        cc_routes_;
+    uint64_t cc_last_tick_ns_ = 0;
+#endif
 };
 }  // namespace tent
 }  // namespace mooncake
