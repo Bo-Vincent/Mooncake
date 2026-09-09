@@ -4044,6 +4044,11 @@ WeightRpcResult<ListWeightRevisionsResponse> Client::ListWeightRevisions(
     return master_client_.ListWeightRevisions(request);
 }
 
+WeightRpcResult<WeightRevisionMetadata> Client::UpdateWeightPolicy(
+    const UpdateWeightPolicyRequest& request) {
+    return master_client_.UpdateWeightPolicy(request);
+}
+
 WeightRpcResult<WeightRevisionLease> Client::AcquireWeightRevisionLease(
     const AcquireWeightRevisionLeaseRequest& request) {
     return master_client_.AcquireWeightRevisionLease(request);
