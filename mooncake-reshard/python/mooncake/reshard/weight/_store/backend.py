@@ -271,12 +271,14 @@ class StoreBackend:
         *,
         expected_metadata_generation: int,
         target_residency: WeightResidencyState,
+        mixed_hot_ratio: Optional[float],
     ) -> WeightResidencyOperation:
         value = self._management_call(
             "start_weight_residency_operation",
             *self._identity_args(identity),
             expected_metadata_generation,
             int(target_residency),
+            mixed_hot_ratio,
         )
         return operation_from_native(value)
 
