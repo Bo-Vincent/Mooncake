@@ -10,6 +10,11 @@ from mooncake.reshard.weight.store import WeightStoreWriter
 
 
 class TestWeightSnapshotApi(unittest.TestCase):
+    def test_native_weight_metadata_exposes_access_recency(self) -> None:
+        self.assertTrue(
+            hasattr(native_store.WeightRevisionMetadata, "last_accessed_at_ms")
+        )
+
     def test_native_store_forwards_snapshot_factory(self) -> None:
         store = native_store.MooncakeDistributedStore()
         snapshot = object()
