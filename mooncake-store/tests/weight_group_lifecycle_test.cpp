@@ -39,7 +39,12 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
 
     WeightRevisionMetadata PublishReadyWithPayloads(
         MasterService& service, const UUID& client_id,
-        const std::vector<PayloadSpec>& payloads) {
+        const std::vector<PayloadSpec>& payloads,
+        WeightStoragePolicy policy = {
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        }) {
         uint64_t logical_bytes = 0;
         std::vector<std::string> payload_keys;
         std::set<std::string> affinity_ids;
@@ -53,11 +58,7 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = payloads.size(),
             .expected_logical_bytes = logical_bytes,
-            .policy =
-                WeightStoragePolicy{
-                    .preferred_residency = WeightResidencyState::HOT,
-                    .migration_mode = WeightMigrationMode::MANUAL,
-                },
+            .policy = policy,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = affinity_ids.size(),
@@ -104,10 +105,18 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
     }
 
     WeightRevisionMetadata PublishReady(MasterService& service,
-                                        const UUID& client_id) {
+                                        const UUID& client_id,
+                                        WeightStoragePolicy policy = {
+                                            .preferred_residency =
+                                                WeightResidencyState::HOT,
+                                            .mixed_hot_ratio = 0.5,
+                                            .migration_mode =
+                                                WeightMigrationMode::MANUAL,
+                                        }) {
         return PublishReadyWithPayloads(
             service, client_id,
-            {{.key = "payload-a", .size = 1024, .affinity_id = "affinity-a"}});
+            {{.key = "payload-a", .size = 1024, .affinity_id = "affinity-a"}},
+            policy);
     }
 
     static void AddLocalDiskReplica(MasterService& service,
@@ -341,6 +350,75 @@ TEST_F(WeightGroupLifecycleTest,
             EXPECT_TRUE(member.has_cold);
         }
     }
+}
+
+TEST_F(WeightGroupLifecycleTest,
+       AutoAccessPersistsPromotionBeforeAcquiringLease) {
+    MasterServiceConfig config;
+    config.default_kv_lease_ttl = 0;
+    config.enable_offload = true;
+    config.offload_on_evict = true;
+    config.weight_migration_cooldown_ms = 0;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    auto ready = PublishReady(
+        service, context.client_id,
+        WeightStoragePolicy{
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::AUTO,
+        });
+    AddLocalDiskReplica(service, context.client_id, "payload-a", 1024,
+                        "test_segment");
+    ASSERT_TRUE(service.StartWeightResidencyOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+            .mixed_hot_ratio = std::nullopt,
+        }));
+    auto cold = service.ReconcileWeightRevision(
+        ReconcileWeightRevisionRequest{.identity = ready.identity});
+    ASSERT_TRUE(cold.has_value());
+    ASSERT_EQ(WeightResidencyState::COLD, cold->residency);
+
+    auto stale_lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = cold->identity,
+            .expected_metadata_generation = cold->metadata_generation - 1,
+            .holder = "stale-reader",
+            .ttl_ms = 60'000,
+        });
+    ASSERT_FALSE(stale_lease.has_value());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, stale_lease.error());
+    auto unchanged = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = cold->identity});
+    ASSERT_TRUE(unchanged.has_value());
+    EXPECT_FALSE(unchanged->metadata.operation_id.has_value());
+
+    auto lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = cold->identity,
+            .expected_metadata_generation = cold->metadata_generation,
+            .holder = "reader",
+            .ttl_ms = 60'000,
+        });
+
+    ASSERT_TRUE(lease.has_value());
+    EXPECT_EQ(cold->metadata_generation + 1,
+              lease->fenced_metadata_generation);
+    auto view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = cold->identity});
+    ASSERT_TRUE(view.has_value());
+    EXPECT_EQ(1, view->active_lease_count);
+    EXPECT_EQ(WeightResidencyState::COLD, view->metadata.residency);
+    ASSERT_TRUE(view->metadata.operation_id.has_value());
+    auto operation = service.QueryWeightOperation(QueryWeightOperationRequest{
+        .operation_id = *view->metadata.operation_id,
+    });
+    ASSERT_TRUE(operation.has_value());
+    EXPECT_EQ(WeightResidencyState::HOT, operation->target_residency);
 }
 
 TEST_F(WeightGroupLifecycleTest,

@@ -1828,6 +1828,10 @@ class MasterService {
     WeightMetadataStore::Result<WeightResidencyOperation>
     PersistAndPublishWeightOperationMutation(
         const WeightOperationMutation& mutation);
+    WeightMetadataStore::Result<WeightResidencyOperation>
+    StartWeightResidencyOperationLocked(
+        const StartWeightResidencyOperationRequest& request,
+        uint64_t now_ms);
     WeightMetadataStore::Result<WeightRevisionLease>
     PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
     size_t ReconcileWeightMetadataOnce(uint64_t now_ms, size_t limit);

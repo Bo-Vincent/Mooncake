@@ -122,6 +122,12 @@ TEST(WeightResidencyPlannerTest, AutoAccessPromotesTowardPreferred) {
                   .mixed_hot_ratio = std::nullopt,
               }),
               PlanAutomaticWeightMigration(
+                  cold, 1, WeightAutoMigrationSignal::ACCESS, 200, 50));
+    EXPECT_EQ((WeightAutoMigrationTarget{
+                  .residency = WeightResidencyState::HOT,
+                  .mixed_hot_ratio = std::nullopt,
+              }),
+              PlanAutomaticWeightMigration(
                   mixed, 0, WeightAutoMigrationSignal::CAPACITY_AVAILABLE, 200,
                   50));
 }
