@@ -510,6 +510,20 @@ class MasterServiceTest : public ::testing::Test {
         return {it->second.member_keys.begin(), it->second.member_keys.end()};
     }
 
+    std::vector<std::string> GetWeightGroupAffinityIdsForTest(
+        MasterService& service, const WeightRevisionIdentity& identity,
+        const std::string& group_id) {
+        auto result = service.SnapshotWeightGroup(identity, group_id);
+        EXPECT_TRUE(result.has_value());
+        std::vector<std::string> affinity_ids;
+        if (!result) return affinity_ids;
+        affinity_ids.reserve(result->size());
+        for (const auto& member : *result) {
+            affinity_ids.push_back(member.residency_affinity_id);
+        }
+        return affinity_ids;
+    }
+
     void ClearGroupStateForTest(MasterService& service) {
         MasterService::GroupDomainAccessorRW gs(&service);
         gs->groups.clear();

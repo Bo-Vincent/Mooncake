@@ -124,12 +124,19 @@ struct ReplicateConfig {
     // eviction treats the group as a unit (all-or-none). Object routing is
     // always hash(tenant, key) and is decoupled from groups.
     std::optional<std::vector<std::string>> group_ids{};
+    // Optional per-key opaque IDs. Keys with the same non-empty ID form one
+    // indivisible unit for weight residency planning.
+    std::optional<std::vector<std::string>> residency_affinity_ids{};
 
     ReplicateConfig ForSingleKey(size_t key_index) const {
         ReplicateConfig key_config = *this;
         if (group_ids.has_value()) {
             key_config.group_ids =
                 std::vector<std::string>{group_ids->at(key_index)};
+        }
+        if (residency_affinity_ids.has_value()) {
+            key_config.residency_affinity_ids = std::vector<std::string>{
+                residency_affinity_ids->at(key_index)};
         }
         return key_config;
     }
@@ -174,6 +181,14 @@ struct ReplicateConfig {
             for (size_t i = 0; i < config.group_ids->size(); ++i) {
                 os << config.group_ids->at(i);
                 if (i + 1 < config.group_ids->size()) os << ", ";
+            }
+            os << "]";
+        }
+        if (config.residency_affinity_ids.has_value()) {
+            os << ", residency_affinity_ids: [";
+            for (size_t i = 0; i < config.residency_affinity_ids->size(); ++i) {
+                os << config.residency_affinity_ids->at(i);
+                if (i + 1 < config.residency_affinity_ids->size()) os << ", ";
             }
             os << "]";
         }

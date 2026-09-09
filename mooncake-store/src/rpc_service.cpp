@@ -496,6 +496,13 @@ WrappedMasterService::BatchPutStart(const UUID& client_id,
                    << " != keys.size()=" << keys.size();
         results.assign(keys.size(),
                        tl::make_unexpected(ErrorCode::INVALID_PARAMS));
+    } else if (config.residency_affinity_ids.has_value() &&
+               config.residency_affinity_ids->size() != keys.size()) {
+        LOG(ERROR) << "BatchPutStart: residency_affinity_ids.size()="
+                   << config.residency_affinity_ids->size()
+                   << " != keys.size()=" << keys.size();
+        results.assign(keys.size(),
+                       tl::make_unexpected(ErrorCode::INVALID_PARAMS));
     } else if (!resolved_tenant_id) {
         results.assign(keys.size(),
                        tl::make_unexpected(resolved_tenant_id.error()));
@@ -745,6 +752,13 @@ WrappedMasterService::BatchUpsertStart(
                config.group_ids->size() != keys.size()) {
         LOG(ERROR) << "BatchUpsertStart: group_ids.size()="
                    << config.group_ids->size()
+                   << " != keys.size()=" << keys.size();
+        results.assign(keys.size(),
+                       tl::make_unexpected(ErrorCode::INVALID_PARAMS));
+    } else if (config.residency_affinity_ids.has_value() &&
+               config.residency_affinity_ids->size() != keys.size()) {
+        LOG(ERROR) << "BatchUpsertStart: residency_affinity_ids.size()="
+                   << config.residency_affinity_ids->size()
                    << " != keys.size()=" << keys.size();
         results.assign(keys.size(),
                        tl::make_unexpected(ErrorCode::INVALID_PARAMS));

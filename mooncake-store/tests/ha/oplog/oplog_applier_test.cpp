@@ -519,6 +519,22 @@ TEST_F(OpLogApplierTest, TestApplyPutEnd_PreservesHardPinned) {
     EXPECT_TRUE(meta->hard_pinned.value_or(false));
 }
 
+TEST_F(OpLogApplierTest, TestApplyPutEndPreservesResidencyAffinityId) {
+    MetadataPayload metadata;
+    metadata.client_id = {1, 2};
+    metadata.size = 1024;
+    metadata.residency_affinity_id = "opaque-affinity-id";
+    auto bytes = struct_pack::serialize(metadata);
+    auto entry = MakeEntry(1, OpType::PUT_END, "key1",
+                           std::string(bytes.begin(), bytes.end()));
+
+    ASSERT_TRUE(applier_->ApplyOpLogEntry(entry));
+    auto stored = mock_metadata_store_->GetMetadata("key1");
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_EQ("opaque-affinity-id",
+              stored->residency_affinity_id.value_or(""));
+}
+
 TEST_F(OpLogApplierTest, TestApplyPutEnd_InvalidPayload) {
     std::string invalid_data = "{invalid data}";
     OpLogEntry entry = MakeEntry(1, OpType::PUT_END, "key1", invalid_data);
