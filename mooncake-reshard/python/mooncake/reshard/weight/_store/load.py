@@ -45,9 +45,9 @@ class WeightLoadService:
     def __init__(self, client: WeightStore) -> None:
         self.client = client
 
-    def load_manifest(self, manifest_key: str) -> StoredWeightManifest:
+    def weight_get_manifest(self, manifest_key: str) -> StoredWeightManifest:
         try:
-            raw = self.client.store.get(manifest_key)
+            raw = self.client.store.weight_get_object(manifest_key)
         except Exception as error:
             raise WeightStoreError(f"manifest get failed: {manifest_key}") from error
         try:
@@ -63,7 +63,7 @@ class WeightLoadService:
             )
         return manifest
 
-    def plan_load(
+    def weight_get_plan(
         self,
         manifest: StoredWeightManifest,
         target_placement: WeightPlacementManifest,
@@ -95,7 +95,7 @@ class WeightLoadService:
             ),
         )
 
-    def load(
+    def weight_get_payload(
         self,
         plan: WeightLoadPlan,
         target_placement: WeightPlacementManifest,
@@ -138,7 +138,7 @@ class WeightLoadService:
         )
 
         try:
-            committed_manifest = self.load_manifest(plan.manifest.manifest_key)
+            committed_manifest = self.weight_get_manifest(plan.manifest.manifest_key)
         except WeightStoreError as error:
             raise WeightStoreError("weight manifest is not committed") from error
         if committed_manifest != plan.manifest:
@@ -312,7 +312,7 @@ class WeightLoadService:
             all_target_offsets.append([group[0] for group in object_ranges.values()])
             all_source_offsets.append([group[1] for group in object_ranges.values()])
             all_sizes.append([group[2] for group in object_ranges.values()])
-        results = self.client.store.get_into_ranges(
+        results = self.client.store.weight_get_into_ranges(
             addresses,
             all_keys,
             all_target_offsets,

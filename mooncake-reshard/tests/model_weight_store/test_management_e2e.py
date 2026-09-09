@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from mooncake.reshard.weight.management import WeightAvailabilityState
+from mooncake.reshard.weight.management import (
+    WeightAvailabilityState,
+    WeightOperationKind,
+    WeightRevisionIdentity,
+)
+from mooncake.reshard.weight.store import WeightSnapshotDescriptor
 
 from .helpers import make_weight_store, source_manifests, target_manifests
 from .test_managed_revision import ManagedInMemoryStore
+from .test_snapshot_writer import _SnapshotAdapter
 
 
 def test_managed_revision_public_workflow_end_to_end() -> None:
@@ -12,29 +18,47 @@ def test_managed_revision_public_workflow_end_to_end() -> None:
     sources = source_manifests(dp=1, tp=2)
     targets = target_manifests(dp=1, tp=1)
 
-    plan = weight_store.plan_managed_upload(
-        sources.placement,
-        sources.bindings,
-        namespace="production",
+    writer = weight_store.weight_put(
+        WeightSnapshotDescriptor(
+            resource_id=sources.placement.resource_id,
+            revision=sources.placement.revision,
+            weight_generation=sources.placement.weight_generation,
+            namespace="production",
+        ),
+        _SnapshotAdapter(sources),
         tenant_id="tenant-a",
     )
-    assert plan.management_identity is not None
-    assert raw.catalog[plan.management_identity].availability is (
+    identity = WeightRevisionIdentity(
+        tenant_id="tenant-a",
+        namespace="production",
+        resource_id=sources.placement.resource_id,
+        revision=sources.placement.revision,
+        weight_generation=sources.placement.weight_generation,
+    )
+    assert raw.catalog[identity].availability is (
         WeightAvailabilityState.IMPORTING
     )
 
-    receipts = []
     for binding in sources.bindings:
-        receipts.extend(weight_store.upload(plan, sources.placement, binding))
-    manifest = weight_store.commit_upload(plan, receipts)
+        fragment = binding.fragments[0]
+        writer.weight_put_tensor(
+            sources.placement.tensors[0].tensor_id,
+            fragment.placement_fragment_id,
+        )
+    manifest = writer.commit()
 
-    view = weight_store.get_weight_revision(plan.management_identity)
+    view = weight_store.weight_get_metadata(identity)
     assert view.metadata.availability is WeightAvailabilityState.READY
+    assert view.metadata.operation_id is not None
+    assert weight_store.weight_get_operation(
+        view.metadata.operation_id,
+        tenant_id="tenant-a",
+    ).kind is WeightOperationKind.MIGRATING
     assert view.metadata.manifest.manifest_key == manifest.manifest_key
     assert view.metadata.manifest.payload_group_id == manifest.group_id
 
-    loaded = weight_store.load_weight_revision(
-        plan.management_identity,
+    loaded = weight_store.weight_get(
+        identity,
         targets.placement,
         targets.bindings,
     )

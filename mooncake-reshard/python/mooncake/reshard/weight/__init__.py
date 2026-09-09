@@ -48,7 +48,8 @@ from .management import (
     WeightManagementErrorCode,
     WeightManagementTransportError,
     WeightManifestReference,
-    WeightOperationState,
+    WeightMigrationMode,
+    WeightOperationKind,
     WeightResidencyOperation,
     WeightResidencyState,
     WeightRevisionIdentity,
@@ -56,6 +57,7 @@ from .management import (
     WeightRevisionMetadata,
     WeightRevisionPage,
     WeightRevisionView,
+    WeightStoragePolicy,
 )
 from ._store import UploadOperation, WeightUploadPlan, plan_weight_upload
 from .store import (
@@ -67,7 +69,6 @@ from .store import (
     WeightStoreWriter,
     WeightStore,
     WeightStoreError,
-    begin_managed_weight_snapshot,
 )
 
 __all__ = [
@@ -94,7 +95,8 @@ __all__ = [
     "WeightManagementErrorCode",
     "WeightManagementTransportError",
     "WeightManifestReference",
-    "WeightOperationState",
+    "WeightMigrationMode",
+    "WeightOperationKind",
     "WeightResidencyOperation",
     "WeightResidencyState",
     "WeightRevisionIdentity",
@@ -102,6 +104,7 @@ __all__ = [
     "WeightRevisionMetadata",
     "WeightRevisionPage",
     "WeightRevisionView",
+    "WeightStoragePolicy",
     "UploadOperation",
     "UploadReceipt",
     "StoreRegistrationLease",
@@ -111,7 +114,6 @@ __all__ = [
     "WeightStoreWriter",
     "WeightStore",
     "WeightStoreError",
-    "begin_managed_weight_snapshot",
     "WeightUploadPlan",
     "plan_weight_upload",
     "BoundWeightFragment",

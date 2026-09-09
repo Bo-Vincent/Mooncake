@@ -98,7 +98,7 @@ class WeightUploadTransaction:
         self.client = client
         self.payloads = payloads
 
-    def abort_upload(
+    def weight_put_abort(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
@@ -120,7 +120,7 @@ class WeightUploadTransaction:
         if failures:
             raise WeightStoreError(f"upload cleanup failed: {failures}")
 
-    def finalize_upload_transaction(self, plan: WeightUploadPlan) -> None:
+    def weight_put_finalize(self, plan: WeightUploadPlan) -> None:
         decision = self._load_decision_if_present(plan.control_key)
         if decision is None:
             persisted = self._load_manifest_if_present(plan.manifest.manifest_key)
@@ -157,7 +157,7 @@ class WeightUploadTransaction:
             if failures:
                 raise WeightStoreError(f"upload cleanup failed: {failures}")
 
-    def commit(
+    def weight_put_commit(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
@@ -181,7 +181,7 @@ class WeightUploadTransaction:
         put_error: Optional[Exception] = None
         result: Optional[int] = None
         try:
-            result = self.client.store.put(
+            result = self.client.store.weight_put_object(
                 plan.manifest.manifest_key,
                 plan.manifest.to_json().encode(),
                 self.client.config_factory([plan.manifest.group_id], "metadata"),
@@ -231,7 +231,7 @@ class WeightUploadTransaction:
         put_error: Optional[Exception] = None
         result: Optional[int] = None
         try:
-            result = self.client.store.put(
+            result = self.client.store.weight_put_object(
                 plan.control_key,
                 _decision_payload(plan, decision),
                 self.client.config_factory([plan.transaction_group_id], "metadata"),
@@ -267,7 +267,7 @@ class WeightUploadTransaction:
         self,
         control_key: str,
     ) -> Optional[_UploadDecision]:
-        exists = self.client.store.is_exist(control_key)
+        exists = self.client.store.weight_is_exist_object(control_key)
         if exists == 0:
             return None
         if exists != 1:
@@ -275,7 +275,9 @@ class WeightUploadTransaction:
                 f"upload decision existence check failed: {control_key}: {exists}"
             )
         try:
-            return _decode_decision(self.client.store.get(control_key))
+            return _decode_decision(
+                self.client.store.weight_get_object(control_key)
+            )
         except Exception as error:
             raise WeightStoreError(f"invalid upload decision: {control_key}") from error
 
@@ -283,7 +285,7 @@ class WeightUploadTransaction:
         self,
         manifest_key: str,
     ) -> Optional[StoredWeightManifest]:
-        exists = self.client.store.is_exist(manifest_key)
+        exists = self.client.store.weight_is_exist_object(manifest_key)
         if exists == 0:
             return None
         if exists != 1:

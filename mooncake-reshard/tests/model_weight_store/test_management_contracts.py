@@ -8,12 +8,15 @@ from mooncake.reshard.weight.management import (
     WeightManagementError,
     WeightManagementErrorCode,
     WeightManifestReference,
-    WeightOperationState,
+    WeightMigrationMode,
+    WeightOperationKind,
     WeightResidencyState,
+    WeightResidencyOperation,
     WeightRevisionIdentity,
     WeightRevisionMetadata,
     WeightRevisionPage,
     WeightRevisionView,
+    WeightStoragePolicy,
     metadata_from_native,
 )
 from mooncake.reshard.weight._store.backend import StoreBackend
@@ -39,8 +42,11 @@ def _metadata() -> WeightRevisionMetadata:
         ),
         availability=WeightAvailabilityState.READY,
         residency=WeightResidencyState.HOT,
-        operation=WeightOperationState.NONE,
-        operation_id=0,
+        policy=WeightStoragePolicy(),
+        operation_id=None,
+        affinity_count=2,
+        affinity_digest="c" * 64,
+        observed_hot_ratio=1.0,
         metadata_generation=2,
         created_at_ms=10,
         updated_at_ms=20,
@@ -53,6 +59,41 @@ def test_management_records_are_immutable_and_have_no_tensor_metadata() -> None:
         metadata.metadata_generation = 3  # type: ignore[misc]
     assert not hasattr(metadata, "tensors")
     assert not hasattr(metadata.manifest, "fragments")
+    assert not hasattr(metadata, "operation")
+
+
+def test_storage_policy_defaults_to_mixed_auto() -> None:
+    policy = WeightStoragePolicy()
+    assert policy.preferred_residency is WeightResidencyState.MIXED
+    assert policy.mixed_hot_ratio == 0.5
+    assert policy.migration_mode is WeightMigrationMode.AUTO
+
+
+@pytest.mark.parametrize("ratio", [0.0, 1.0, -0.1, 1.1])
+def test_mixed_policy_requires_strict_interior_ratio(ratio: float) -> None:
+    with pytest.raises(ValueError, match="mixed_hot_ratio"):
+        WeightStoragePolicy(mixed_hot_ratio=ratio)
+
+
+def test_operation_has_kind_target_and_byte_progress() -> None:
+    metadata = _metadata()
+    operation = WeightResidencyOperation(
+        operation_id=7,
+        identity=metadata.identity,
+        kind=WeightOperationKind.MIGRATING,
+        target_residency=WeightResidencyState.COLD,
+        fenced_metadata_generation=metadata.metadata_generation,
+        started_at_ms=20,
+        updated_at_ms=21,
+        processed_units=1,
+        total_units=2,
+        processed_bytes=1024,
+        total_bytes=4096,
+        cursor="unit-1",
+        message="copying",
+    )
+    assert operation.kind is WeightOperationKind.MIGRATING
+    assert operation.processed_bytes == 1024
 
 
 def test_native_metadata_conversion_preserves_exact_identity() -> None:
@@ -79,7 +120,7 @@ def test_backend_maps_domain_errors_without_collapsing_transport_errors() -> Non
             return None, int(WeightManagementErrorCode.STALE_GENERATION), 0
 
     with pytest.raises(WeightManagementError) as error:
-        StoreBackend(Raw()).get_weight_revision(_metadata().identity)
+        StoreBackend(Raw()).weight_get_metadata(_metadata().identity)
     assert error.value.code is WeightManagementErrorCode.STALE_GENERATION
 
 
@@ -95,7 +136,7 @@ def test_backend_converts_bounded_list_page() -> None:
             assert args[-2:] == ("cursor", 17)
             return WeightRevisionPage((view,), "next"), 0, 0
 
-    page = StoreBackend(Raw()).list_weight_revisions(
+    page = StoreBackend(Raw()).weight_list(
         tenant_id="tenant-a",
         namespace="production",
         resource_id="llama-70b",
