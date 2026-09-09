@@ -961,6 +961,15 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
         operation->second.message == "completed") {
         return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
+    if (total_units != operation->second.total_units ||
+        total_bytes != operation->second.total_bytes ||
+        processed_units < operation->second.processed_units ||
+        processed_bytes < operation->second.processed_bytes ||
+        (processed_units == operation->second.processed_units &&
+         processed_bytes == operation->second.processed_bytes &&
+         cursor != operation->second.cursor)) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
     auto next_operation = operation->second;
     const bool metadata_unchanged =
         revision->second.residency == observed_residency &&
