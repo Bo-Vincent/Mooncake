@@ -239,6 +239,10 @@ MasterService::MasterService(const MasterServiceConfig& config)
           config.weight_management_oplog_capability_confirmed),
       default_weight_storage_policy_(config.default_weight_storage_policy),
       weight_migration_cooldown_ms_(config.weight_migration_cooldown_ms),
+      weight_migration_max_members_per_round_(
+          config.weight_migration_max_members_per_round),
+      weight_migration_max_bytes_per_round_(
+          config.weight_migration_max_bytes_per_round),
       oplog_batch_max_entries_(config.oplog_batch_max_entries),
       cluster_id_(config.cluster_id),
       root_fs_dir_(config.root_fs_dir),
@@ -269,6 +273,11 @@ MasterService::MasterService(const MasterServiceConfig& config)
     if (!weight_policy_validation.ok()) {
         throw std::invalid_argument("Invalid default weight storage policy: " +
                                     weight_policy_validation.message());
+    }
+    if (weight_migration_max_members_per_round_ == 0 ||
+        weight_migration_max_bytes_per_round_ == 0) {
+        throw std::invalid_argument(
+            "Weight migration batch limits must be positive");
     }
     if (default_kv_soft_pin_ttl_ > max_kv_soft_pin_ttl_) {
         LOG(ERROR) << "Invalid soft-pin TTL configuration: default="
@@ -2130,6 +2139,7 @@ MasterService::ReconcileWeightRevision(
         std::string affinity_id;
         uint64_t logical_bytes{0};
         bool all_memory{true};
+        bool all_have_cold{true};
         bool all_cold{true};
         bool any_readable{false};
         std::vector<std::string> keys;
@@ -2144,6 +2154,8 @@ MasterService::ReconcileWeightRevision(
             affinity.affinity_id = member.residency_affinity_id;
             affinity.logical_bytes += member.size;
             affinity.all_memory = affinity.all_memory && member.has_memory;
+            affinity.all_have_cold =
+                affinity.all_have_cold && member.has_cold;
             affinity.all_cold =
                 affinity.all_cold && member.has_cold && !member.has_memory;
             affinity.any_readable = affinity.any_readable || member.readable;
@@ -2194,8 +2206,52 @@ MasterService::ReconcileWeightRevision(
                     << " result=" << static_cast<int>(result);
         }
 
+        uint64_t scheduled_affinities = 0;
+        uint64_t scheduled_members = 0;
+        uint64_t scheduled_bytes = 0;
+        auto reserve_affinity = [&](const AffinityObservation& affinity) {
+            const auto member_count =
+                static_cast<uint64_t>(affinity.keys.size());
+            if (scheduled_affinities != 0 &&
+                (scheduled_members >=
+                     weight_migration_max_members_per_round_ ||
+                 member_count > weight_migration_max_members_per_round_ -
+                                    scheduled_members ||
+                 scheduled_bytes >= weight_migration_max_bytes_per_round_ ||
+                 affinity.logical_bytes >
+                     weight_migration_max_bytes_per_round_ -
+                         scheduled_bytes)) {
+                return false;
+            }
+            if (scheduled_affinities == 0) {
+                scheduled_members =
+                    std::min(weight_migration_max_members_per_round_,
+                             member_count);
+                scheduled_bytes =
+                    std::min(weight_migration_max_bytes_per_round_,
+                             affinity.logical_bytes);
+            } else {
+                scheduled_members += member_count;
+                scheduled_bytes += affinity.logical_bytes;
+            }
+            ++scheduled_affinities;
+            return true;
+        };
+
         for (const auto& [affinity_id, affinity] : affinities) {
-            if (hot_affinities.contains(affinity_id)) {
+            const bool should_be_hot = hot_affinities.contains(affinity_id);
+            const bool needs_action =
+                should_be_hot
+                    ? !affinity.all_memory
+                    : (!affinity.all_have_cold ||
+                       (view->active_lease_count == 0 && !affinity.all_cold));
+            if (!needs_action) {
+                continue;
+            }
+            if (!reserve_affinity(affinity)) {
+                break;
+            }
+            if (should_be_hot) {
                 for (const auto& key : affinity.keys) {
                     const auto result = TryPushPromotionQueue(
                         MakeObjectIdentity(key, tenant_id), false, true);
@@ -2337,7 +2393,11 @@ MasterService::ReconcileWeightRevision(
         if (!published) {
             return tl::make_unexpected(published.error());
         }
-        return current;
+        auto reconciled = weight_metadata_.Get(request.identity, now_ms);
+        if (!reconciled) {
+            return tl::make_unexpected(reconciled.error());
+        }
+        return reconciled->metadata;
     }
 
     const auto availability = complete ? WeightAvailabilityState::READY
