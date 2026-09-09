@@ -283,9 +283,9 @@ class MasterServiceHATest : public ::testing::Test {
         service.enable_dfs_ = true;
     }
 
-    static WeightCatalogSnapshot ExportWeightCatalog(
+    static WeightMetadataSnapshot ExportWeightMetadata(
         const MasterService& service) {
-        return service.weight_catalog_.ExportSnapshot();
+        return service.weight_metadata_.ExportSnapshot();
     }
 
     static void SetUpTestSuite() {
@@ -2533,7 +2533,7 @@ TEST_F(MasterServiceHATest,
         .expected_logical_bytes = 2048,
     });
     ASSERT_FALSE(rejected.has_value());
-    EXPECT_EQ(WeightCatalogError::DURABILITY_FAILED, rejected.error());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
     EXPECT_FALSE(
         service.GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
             .has_value());
@@ -2570,7 +2570,7 @@ TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
         .expected_logical_bytes = 2048,
     });
     ASSERT_FALSE(rejected.has_value());
-    EXPECT_EQ(WeightCatalogError::DURABILITY_FAILED, rejected.error());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
     EXPECT_FALSE(
         service
             .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
@@ -2593,7 +2593,7 @@ TEST_F(MasterServiceHATest, WeightLeaseBecomesVisibleOnlyAfterDurableCallback) {
         .revision = "step-100",
         .weight_generation = 7,
     };
-    WeightCatalogSnapshot snapshot{
+    WeightMetadataSnapshot snapshot{
         .metadata = {WeightRevisionMetadata{
             .identity = identity,
             .manifest =
@@ -2653,7 +2653,7 @@ TEST_F(MasterServiceHATest, WeightLeaseBecomesVisibleOnlyAfterDurableCallback) {
     EXPECT_EQ(1u, after->active_lease_count);
 }
 
-TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightCatalog) {
+TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightMetadata) {
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -2661,7 +2661,7 @@ TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightCatalog) {
         .revision = "step-100",
         .weight_generation = 7,
     };
-    const WeightCatalogSnapshot snapshot{
+    const WeightMetadataSnapshot snapshot{
         .metadata = {WeightRevisionMetadata{
             .identity = identity,
             .manifest =
@@ -2708,10 +2708,10 @@ TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightCatalog) {
 
     MasterService service;
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}, snapshot));
-    EXPECT_EQ(snapshot, ExportWeightCatalog(service));
+    EXPECT_EQ(snapshot, ExportWeightMetadata(service));
 }
 
-TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightCatalog) {
+TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadata) {
     MasterService service;
     const WeightRevisionIdentity identity{
         .tenant_id = "default",

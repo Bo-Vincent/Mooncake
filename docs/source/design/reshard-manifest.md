@@ -184,6 +184,6 @@ logical identity rules.
 contract. It maps tensor fragments to Store object keys, offsets, and byte
 ranges. Store's `WeightRevisionMetadata` references that manifest but does not
 copy its tensors or fragments. Revision discovery, leases, residency, and
-deletion belong to the Weight Catalog described in
+deletion belong to the Weight Metadata Store described in
 [Weight Management Architecture](weight-management.md); live addresses and
 serving activation remain outside both records.

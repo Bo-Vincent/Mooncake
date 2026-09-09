@@ -16,7 +16,7 @@
 namespace mooncake {
 
 struct TieredStorageUsageSnapshot;
-struct WeightCatalogSnapshot;
+struct WeightMetadataSnapshot;
 
 class MasterMetricManager {
    public:
@@ -197,7 +197,7 @@ class MasterMetricManager {
     void inc_nof_segments_unmounted_by_heartbeat_total(int64_t val = 1);
     void observe_nof_heartbeat_probe_latency_ms(int64_t latency_ms);
 
-    void project_weight_catalog(const WeightCatalogSnapshot& snapshot,
+    void project_weight_metadata(const WeightMetadataSnapshot& snapshot,
                                 uint64_t now_ms);
     void inc_weight_reconciliation_failures(int64_t val = 1);
     int64_t get_weight_revision_count(const std::string& availability);

@@ -95,7 +95,7 @@ auto WithWeightRequestTenant(Request request, std::string_view raw,
                                                     : TenantId::kDefaultValue);
     if (!tenant_id) {
         return Result(tl::make_unexpected(
-            WeightCatalogError::INVALID_ARGUMENT));
+            WeightManagementError::INVALID_ARGUMENT));
     }
     BindWeightRequestTenant(request, *tenant_id);
     return std::invoke(std::forward<Fn>(fn), request);
@@ -1749,7 +1749,7 @@ WrappedMasterService::QuerySegmentStatusById(const UUID& segment_id) {
     return master_service_.QuerySegmentStatusById(segment_id);
 }
 
-WeightCatalog::Result<WeightRevisionMetadata>
+WeightMetadataStore::Result<WeightRevisionMetadata>
 WrappedMasterService::BeginWeightImport(
     const BeginWeightImportRequest& request, const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -1759,7 +1759,7 @@ WrappedMasterService::BeginWeightImport(
         });
 }
 
-WeightCatalog::Result<WeightRevisionMetadata>
+WeightMetadataStore::Result<WeightRevisionMetadata>
 WrappedMasterService::CommitWeightImport(
     const CommitWeightImportRequest& request, const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -1769,7 +1769,7 @@ WrappedMasterService::CommitWeightImport(
         });
 }
 
-WeightCatalog::Result<WeightRevisionMetadata>
+WeightMetadataStore::Result<WeightRevisionMetadata>
 WrappedMasterService::AbortWeightImport(
     const AbortWeightImportRequest& request, const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -1779,7 +1779,7 @@ WrappedMasterService::AbortWeightImport(
         });
 }
 
-WeightCatalog::Result<WeightRevisionView>
+WeightMetadataStore::Result<WeightRevisionView>
 WrappedMasterService::GetWeightRevision(
     const GetWeightRevisionRequest& request, const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -1789,7 +1789,7 @@ WrappedMasterService::GetWeightRevision(
         });
 }
 
-WeightCatalog::Result<ListWeightRevisionsResponse>
+WeightMetadataStore::Result<ListWeightRevisionsResponse>
 WrappedMasterService::ListWeightRevisions(
     const ListWeightRevisionsRequest& request, const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -1799,7 +1799,7 @@ WrappedMasterService::ListWeightRevisions(
         });
 }
 
-WeightCatalog::Result<WeightRevisionLease>
+WeightMetadataStore::Result<WeightRevisionLease>
 WrappedMasterService::AcquireWeightRevisionLease(
     const AcquireWeightRevisionLeaseRequest& request,
     const std::string& tenant_id) {
@@ -1810,7 +1810,7 @@ WrappedMasterService::AcquireWeightRevisionLease(
         });
 }
 
-WeightCatalog::Result<WeightRevisionLease>
+WeightMetadataStore::Result<WeightRevisionLease>
 WrappedMasterService::RenewWeightRevisionLease(
     const RenewWeightRevisionLeaseRequest& request,
     const std::string& tenant_id) {
@@ -1821,7 +1821,7 @@ WrappedMasterService::RenewWeightRevisionLease(
         });
 }
 
-WeightCatalog::Result<void> WrappedMasterService::ReleaseWeightRevisionLease(
+WeightMetadataStore::Result<void> WrappedMasterService::ReleaseWeightRevisionLease(
     const ReleaseWeightRevisionLeaseRequest& request,
     const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -1831,7 +1831,7 @@ WeightCatalog::Result<void> WrappedMasterService::ReleaseWeightRevisionLease(
         });
 }
 
-WeightCatalog::Result<WeightResidencyOperation>
+WeightMetadataStore::Result<WeightResidencyOperation>
 WrappedMasterService::StartWeightResidencyOperation(
     const StartWeightResidencyOperationRequest& request,
     const std::string& tenant_id) {
@@ -1842,7 +1842,7 @@ WrappedMasterService::StartWeightResidencyOperation(
         });
 }
 
-WeightCatalog::Result<WeightResidencyOperation>
+WeightMetadataStore::Result<WeightResidencyOperation>
 WrappedMasterService::QueryWeightOperation(
     const QueryWeightOperationRequest& request,
     const std::string& tenant_id) {
@@ -1853,7 +1853,7 @@ WrappedMasterService::QueryWeightOperation(
         });
 }
 
-WeightCatalog::Result<WeightRevisionMetadata>
+WeightMetadataStore::Result<WeightRevisionMetadata>
 WrappedMasterService::ReconcileWeightRevision(
     const ReconcileWeightRevisionRequest& request,
     const std::string& tenant_id) {
@@ -1864,7 +1864,7 @@ WrappedMasterService::ReconcileWeightRevision(
         });
 }
 
-WeightCatalog::Result<WeightRevisionMetadata>
+WeightMetadataStore::Result<WeightRevisionMetadata>
 WrappedMasterService::DeleteWeightRevision(
     const DeleteWeightRevisionRequest& request,
     const std::string& tenant_id) {
@@ -1887,9 +1887,9 @@ tl::expected<void, ErrorCode> WrappedMasterService::RestoreFromStandby(
     const std::vector<StandbyObjectEntry>& objects,
     uint64_t initial_oplog_sequence_id,
     const std::vector<StandbySegmentInfo>& segments,
-    const WeightCatalogSnapshot& weight_catalog) {
+    const WeightMetadataSnapshot& weight_metadata) {
     return master_service_.RestoreFromStandbySnapshot(
-        objects, initial_oplog_sequence_id, segments, weight_catalog);
+        objects, initial_oplog_sequence_id, segments, weight_metadata);
 }
 
 tl::expected<void, ErrorCode>

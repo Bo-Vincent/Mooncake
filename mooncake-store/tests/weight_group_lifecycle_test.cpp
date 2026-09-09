@@ -97,13 +97,13 @@ TEST_F(WeightGroupLifecycleTest, LeaseBlocksOperationAndDelete) {
             .target_residency = WeightResidencyState::COLD,
         });
     ASSERT_FALSE(operation.has_value());
-    EXPECT_EQ(WeightCatalogError::BUSY, operation.error());
+    EXPECT_EQ(WeightManagementError::BUSY, operation.error());
     auto deleted = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
         .identity = ready.identity,
         .expected_metadata_generation = ready.metadata_generation,
     });
     ASSERT_FALSE(deleted.has_value());
-    EXPECT_EQ(WeightCatalogError::BUSY, deleted.error());
+    EXPECT_EQ(WeightManagementError::BUSY, deleted.error());
 }
 
 TEST_F(WeightGroupLifecycleTest, OperationRemainsPendingUntilTargetObserved) {

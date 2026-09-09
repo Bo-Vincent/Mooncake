@@ -19,7 +19,7 @@ WeightRevisionIdentity Identity() {
 }
 
 template <typename T>
-const tl::expected<T, WeightCatalogError>& Domain(
+const tl::expected<T, WeightManagementError>& Domain(
     const WeightRpcResult<T>& result) {
     EXPECT_TRUE(result.has_value());
     return *result;
@@ -75,7 +75,7 @@ TEST(WeightManagementRpcTest, RegistersEveryApiAndBindsTenant) {
             },
     });
     ASSERT_FALSE(Domain(commit).has_value());
-    EXPECT_EQ(WeightCatalogError::NOT_FOUND, Domain(commit).error());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(commit).error());
 
     auto acquire = client.AcquireWeightRevisionLease(
         AcquireWeightRevisionLeaseRequest{
@@ -86,12 +86,12 @@ TEST(WeightManagementRpcTest, RegistersEveryApiAndBindsTenant) {
             .ttl_ms = 1000,
         });
     ASSERT_FALSE(Domain(acquire).has_value());
-    EXPECT_EQ(WeightCatalogError::NOT_READY, Domain(acquire).error());
+    EXPECT_EQ(WeightManagementError::NOT_READY, Domain(acquire).error());
 
     auto renew = client.RenewWeightRevisionLease(
         RenewWeightRevisionLeaseRequest{.lease_id = 999, .ttl_ms = 1000});
     ASSERT_FALSE(Domain(renew).has_value());
-    EXPECT_EQ(WeightCatalogError::NOT_FOUND, Domain(renew).error());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(renew).error());
 
     auto release = client.ReleaseWeightRevisionLease(
         ReleaseWeightRevisionLeaseRequest{.lease_id = 999});
@@ -105,12 +105,12 @@ TEST(WeightManagementRpcTest, RegistersEveryApiAndBindsTenant) {
             .target_residency = WeightResidencyState::COLD,
         });
     ASSERT_FALSE(Domain(start).has_value());
-    EXPECT_EQ(WeightCatalogError::NOT_READY, Domain(start).error());
+    EXPECT_EQ(WeightManagementError::NOT_READY, Domain(start).error());
 
     auto query = client.QueryWeightOperation(
         QueryWeightOperationRequest{.operation_id = 999});
     ASSERT_FALSE(Domain(query).has_value());
-    EXPECT_EQ(WeightCatalogError::NOT_FOUND, Domain(query).error());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(query).error());
 
     auto abort = client.AbortWeightImport(AbortWeightImportRequest{
         .identity = Identity(),
@@ -148,7 +148,7 @@ TEST(WeightManagementRpcTest, RejectsUnboundedPaginationExactly) {
         .limit = 1001,
     });
     ASSERT_FALSE(Domain(list).has_value());
-    EXPECT_EQ(WeightCatalogError::INVALID_ARGUMENT, Domain(list).error());
+    EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, Domain(list).error());
 }
 
 }  // namespace

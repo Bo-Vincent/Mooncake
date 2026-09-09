@@ -85,8 +85,8 @@ class StandbyMetadataStore final : public MetadataStore {
         const WeightResidencyOperation& operation) override;
     std::optional<WeightResidencyOperation> GetWeightOperation(
         uint64_t operation_id) const override;
-    bool RestoreWeightCatalog(const WeightCatalogSnapshot& snapshot);
-    WeightCatalogSnapshot SnapshotWeightCatalog() const;
+    bool RestoreWeightMetadata(const WeightMetadataSnapshot& snapshot);
+    WeightMetadataSnapshot SnapshotWeightMetadata() const;
 
     void Snapshot(std::vector<StandbyObjectEntry>& out) const;
     bool ValidateReplicaIds(ReplicaID& max_replica_id) const;

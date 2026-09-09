@@ -12,7 +12,7 @@
 #include "common/byte_size.h"
 #include "segment.h"
 #include "version.h"
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 
 namespace mooncake {
 
@@ -1947,8 +1947,8 @@ int64_t MasterMetricManager::get_update_task_failures() {
     return mark_task_to_complete_failures_.value();
 }
 
-void MasterMetricManager::project_weight_catalog(
-    const WeightCatalogSnapshot& snapshot, uint64_t now_ms) {
+void MasterMetricManager::project_weight_metadata(
+    const WeightMetadataSnapshot& snapshot, uint64_t now_ms) {
     static constexpr std::array availability_labels{
         std::pair{WeightAvailabilityState::IMPORTING, "importing"},
         std::pair{WeightAvailabilityState::READY, "ready"},

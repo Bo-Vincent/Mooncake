@@ -460,7 +460,7 @@ MasterClient::~MasterClient() = default;
     WeightRpcResult<result_type> MasterClient::method(                   \
         const request_type& request) {                                   \
         return invoke_rpc<&WrappedMasterService::method,                 \
-                          tl::expected<result_type, WeightCatalogError>>( \
+                          tl::expected<result_type, WeightManagementError>>( \
             request, tenant_id_.value());                                \
     }
 
@@ -497,7 +497,7 @@ DEFINE_WEIGHT_CLIENT_METHOD(DeleteWeightRevision, DeleteWeightRevisionRequest,
 WeightRpcResult<void> MasterClient::ReleaseWeightRevisionLease(
     const ReleaseWeightRevisionLeaseRequest& request) {
     return invoke_rpc<&WrappedMasterService::ReleaseWeightRevisionLease,
-                      tl::expected<void, WeightCatalogError>>(
+                      tl::expected<void, WeightManagementError>>(
         request, tenant_id_.value());
 }
 

@@ -41,7 +41,7 @@
 #include "tenant_quota_sharded.h"
 #include "tenant_quota_policy_store.h"
 #include "types.h"
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 #include "master_config.h"
 #include "rpc_types.h"
 #include "replica.h"
@@ -205,30 +205,30 @@ class MasterService {
     DeleteTenantQuotaPolicy(const TenantId& tenant_id);
     uint64_t GetTenantQuotaAllocatableCapacityBytes();
 
-    WeightCatalog::Result<WeightRevisionMetadata> BeginWeightImport(
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
-    WeightCatalog::Result<WeightRevisionMetadata> CommitWeightImport(
+    WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
         const CommitWeightImportRequest& request);
-    WeightCatalog::Result<WeightRevisionMetadata> AbortWeightImport(
+    WeightMetadataStore::Result<WeightRevisionMetadata> AbortWeightImport(
         const AbortWeightImportRequest& request);
-    WeightCatalog::Result<WeightRevisionView> GetWeightRevision(
+    WeightMetadataStore::Result<WeightRevisionView> GetWeightRevision(
         const GetWeightRevisionRequest& request) const;
-    WeightCatalog::Result<ListWeightRevisionsResponse> ListWeightRevisions(
+    WeightMetadataStore::Result<ListWeightRevisionsResponse> ListWeightRevisions(
         const ListWeightRevisionsRequest& request) const;
-    WeightCatalog::Result<WeightRevisionLease> AcquireWeightRevisionLease(
+    WeightMetadataStore::Result<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request);
-    WeightCatalog::Result<WeightRevisionLease> RenewWeightRevisionLease(
+    WeightMetadataStore::Result<WeightRevisionLease> RenewWeightRevisionLease(
         const RenewWeightRevisionLeaseRequest& request);
-    WeightCatalog::Result<void> ReleaseWeightRevisionLease(
+    WeightMetadataStore::Result<void> ReleaseWeightRevisionLease(
         const ReleaseWeightRevisionLeaseRequest& request);
-    WeightCatalog::Result<WeightResidencyOperation>
+    WeightMetadataStore::Result<WeightResidencyOperation>
     StartWeightResidencyOperation(
         const StartWeightResidencyOperationRequest& request);
-    WeightCatalog::Result<WeightResidencyOperation> QueryWeightOperation(
+    WeightMetadataStore::Result<WeightResidencyOperation> QueryWeightOperation(
         const QueryWeightOperationRequest& request) const;
-    WeightCatalog::Result<WeightRevisionMetadata> ReconcileWeightRevision(
+    WeightMetadataStore::Result<WeightRevisionMetadata> ReconcileWeightRevision(
         const ReconcileWeightRevisionRequest& request);
-    WeightCatalog::Result<WeightRevisionMetadata> DeleteWeightRevision(
+    WeightMetadataStore::Result<WeightRevisionMetadata> DeleteWeightRevision(
         const DeleteWeightRevisionRequest& request);
     size_t RunWeightReconciliationForTesting(uint64_t now_ms,
                                              size_t limit = 32);
@@ -980,7 +980,7 @@ class MasterService {
         const std::vector<StandbyObjectEntry>& objects,
         uint64_t initial_oplog_sequence_id,
         const std::vector<StandbySegmentInfo>& segments,
-        const WeightCatalogSnapshot& weight_catalog = {});
+        const WeightMetadataSnapshot& weight_metadata = {});
     tl::expected<void, ErrorCode> RestoreFromBatchOpLogPromotion(
         BatchOpLogPromotionHandoff handoff,
         size_t chunk_object_count = kDefaultBatchOpLogPromotionChunkObjects);
@@ -1033,7 +1033,7 @@ class MasterService {
         const std::vector<StandbySegmentInfo>& segments,
         size_t chunk_object_count,
         std::optional<ReplicaID> expected_max_replica_id,
-        const WeightCatalogSnapshot* legacy_weight_catalog);
+        const WeightMetadataSnapshot* legacy_weight_metadata);
 
     std::unique_ptr<ha::SnapshotCatalogStore> CreateSnapshotCatalogStore(
         const MasterServiceConfig& config);
@@ -1799,7 +1799,7 @@ class MasterService {
         std::unordered_map<std::string, GroupState> groups GUARDED_BY(mutex);
     };
     GroupDomain group_domain_;
-    WeightCatalog weight_catalog_;
+    WeightMetadataStore weight_metadata_;
     std::atomic<size_t> weight_reconciliation_offset_{0};
 
     struct WeightGroupMemberSnapshot {
@@ -1811,19 +1811,19 @@ class MasterService {
         bool has_cold{false};
     };
 
-    WeightCatalog::Result<std::vector<WeightGroupMemberSnapshot>>
+    WeightMetadataStore::Result<std::vector<WeightGroupMemberSnapshot>>
     SnapshotWeightGroup(const WeightRevisionIdentity& identity,
                         const std::string& payload_group_id) const;
-    WeightCatalog::Result<void> ValidateWeightGroupForCommit(
+    WeightMetadataStore::Result<void> ValidateWeightGroupForCommit(
         const CommitWeightImportRequest& request) const;
-    WeightCatalog::Result<WeightRevisionMetadata>
-    PersistAndPublishWeightMutation(const WeightCatalogMutation& mutation);
-    WeightCatalog::Result<WeightResidencyOperation>
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
+    WeightMetadataStore::Result<WeightResidencyOperation>
     PersistAndPublishWeightOperationMutation(
         const WeightOperationMutation& mutation);
-    WeightCatalog::Result<WeightRevisionLease>
+    WeightMetadataStore::Result<WeightRevisionLease>
     PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
-    size_t ReconcileWeightCatalogOnce(uint64_t now_ms, size_t limit);
+    size_t ReconcileWeightMetadataOnce(uint64_t now_ms, size_t limit);
     auto RemoveObject(const std::string& key, const TenantId& tenant_id,
                       bool force, bool allow_managed_weight)
         -> tl::expected<void, ErrorCode>;

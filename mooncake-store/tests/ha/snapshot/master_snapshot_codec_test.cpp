@@ -40,16 +40,16 @@ class MasterSnapshotCodecTest : public ::testing::Test {
             service.nof_segment_manager_, service.task_manager_);
     }
 
-    static WeightCatalog& Catalog(MasterService& service) {
-        return service.weight_catalog_;
+    static WeightMetadataStore& MetadataStore(MasterService& service) {
+        return service.weight_metadata_;
     }
 
     static WeightRevisionMetadata PublishReady(MasterService& service,
                                                WeightRevisionIdentity identity,
                                                uint64_t now_ms) {
-        auto& catalog = Catalog(service);
+        auto& metadata_store = MetadataStore(service);
         const auto group_id = MakeWeightPayloadGroupId(identity);
-        auto begin = catalog.PrepareBeginImport(
+        auto begin = metadata_store.PrepareBeginImport(
             BeginWeightImportRequest{
                 .identity = identity,
                 .payload_group_id = group_id,
@@ -58,8 +58,8 @@ class MasterSnapshotCodecTest : public ::testing::Test {
             },
             now_ms);
         EXPECT_TRUE(begin.has_value());
-        EXPECT_TRUE(catalog.Publish(*begin).has_value());
-        auto commit = catalog.PrepareCommitImport(
+        EXPECT_TRUE(metadata_store.Publish(*begin).has_value());
+        auto commit = metadata_store.PrepareCommitImport(
             CommitWeightImportRequest{
                 .identity = identity,
                 .expected_metadata_generation = 1,
@@ -79,12 +79,12 @@ class MasterSnapshotCodecTest : public ::testing::Test {
             },
             now_ms + 1);
         EXPECT_TRUE(commit.has_value());
-        auto ready = catalog.Publish(*commit);
+        auto ready = metadata_store.Publish(*commit);
         EXPECT_TRUE(ready.has_value());
         return ready.value();
     }
 
-    static std::vector<uint8_t> RewriteWeightCatalogField(
+    static std::vector<uint8_t> RewriteWeightMetadataField(
         const std::vector<uint8_t>& metadata, bool keep_field,
         bool corrupt_field = false) {
         auto root = msgpack::unpack(
@@ -97,11 +97,11 @@ class MasterSnapshotCodecTest : public ::testing::Test {
         for (uint32_t i = 0; i < object.via.map.size; ++i) {
             const auto& item = object.via.map.ptr[i];
             const auto key = item.key.as<std::string>();
-            if (key == "weight_catalog" && !keep_field) {
+            if (key == "weight_metadata" && !keep_field) {
                 continue;
             }
             packer.pack(item.key);
-            if (key == "weight_catalog" && corrupt_field) {
+            if (key == "weight_metadata" && corrupt_field) {
                 packer.pack_bin(3);
                 packer.pack_bin_body("bad", 3);
             } else {
@@ -148,7 +148,7 @@ TEST_F(MasterSnapshotCodecTest, EncodeDecodeRoundTrip) {
 }
 
 TEST_F(MasterSnapshotCodecTest,
-       WeightCatalogRoundTripPreservesLeasesOperationsAndDerivedIndex) {
+       WeightMetadataRoundTripPreservesLeasesOperationsAndDerivedIndex) {
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -168,7 +168,7 @@ TEST_F(MasterSnapshotCodecTest,
         PublishReady(*master_service_, operating_identity, now_ms + 10);
 
     auto lease =
-        Catalog(*master_service_)
+        MetadataStore(*master_service_)
             .PrepareAcquireLease(
                 AcquireWeightRevisionLeaseRequest{
                     .identity = leased_identity,
@@ -178,9 +178,9 @@ TEST_F(MasterSnapshotCodecTest,
                 },
                 now_ms + 20);
     ASSERT_TRUE(lease.has_value());
-    ASSERT_TRUE(Catalog(*master_service_).Publish(*lease).has_value());
+    ASSERT_TRUE(MetadataStore(*master_service_).Publish(*lease).has_value());
 
-    auto operation = Catalog(*master_service_)
+    auto operation = MetadataStore(*master_service_)
                          .PrepareStartOperation(
                              StartWeightResidencyOperationRequest{
                                  .identity = operating_identity,
@@ -190,8 +190,8 @@ TEST_F(MasterSnapshotCodecTest,
                              },
                              now_ms + 30);
     ASSERT_TRUE(operation.has_value());
-    ASSERT_TRUE(Catalog(*master_service_).Publish(*operation).has_value());
-    const auto expected_snapshot = Catalog(*master_service_).ExportSnapshot();
+    ASSERT_TRUE(MetadataStore(*master_service_).Publish(*operation).has_value());
+    const auto expected_snapshot = MetadataStore(*master_service_).ExportSnapshot();
 
     MasterSnapshotCodec codec;
     auto state_view = MakeStateView(*master_service_);
@@ -200,8 +200,8 @@ TEST_F(MasterSnapshotCodecTest,
     auto target = MakeMasterService();
     ASSERT_TRUE(codec.Decode(target.get(), *encoded).has_value());
 
-    EXPECT_EQ(expected_snapshot, Catalog(*target).ExportSnapshot());
-    EXPECT_TRUE(Catalog(*target).IsManagedGroup(
+    EXPECT_EQ(expected_snapshot, MetadataStore(*target).ExportSnapshot());
+    EXPECT_TRUE(MetadataStore(*target).IsManagedGroup(
         MakeWeightPayloadGroupId(leased_identity)));
     auto leased_view = target->GetWeightRevision(
         GetWeightRevisionRequest{.identity = leased_identity});
@@ -214,7 +214,7 @@ TEST_F(MasterSnapshotCodecTest,
               operating_view->metadata.operation);
 }
 
-TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightCatalogRestoresEmpty) {
+TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightMetadataRestoresEmpty) {
     PublishReady(*master_service_,
                  WeightRevisionIdentity{
                      .tenant_id = "default",
@@ -229,25 +229,25 @@ TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightCatalogRestoresEmpty) {
     auto encoded = codec.Encode(state_view);
     ASSERT_TRUE(encoded.has_value());
     encoded->metadata =
-        RewriteWeightCatalogField(encoded->metadata, /*keep_field=*/false);
+        RewriteWeightMetadataField(encoded->metadata, /*keep_field=*/false);
 
     auto target = MakeMasterService();
     ASSERT_TRUE(codec.Decode(target.get(), *encoded).has_value());
-    EXPECT_TRUE(Catalog(*target).ExportSnapshot().metadata.empty());
+    EXPECT_TRUE(MetadataStore(*target).ExportSnapshot().metadata.empty());
 }
 
-TEST_F(MasterSnapshotCodecTest, MalformedWeightCatalogFailsClosed) {
+TEST_F(MasterSnapshotCodecTest, MalformedWeightMetadataFailsClosed) {
     MasterSnapshotCodec codec;
     auto state_view = MakeStateView(*master_service_);
     auto encoded = codec.Encode(state_view);
     ASSERT_TRUE(encoded.has_value());
-    encoded->metadata = RewriteWeightCatalogField(
+    encoded->metadata = RewriteWeightMetadataField(
         encoded->metadata, /*keep_field=*/true, /*corrupt_field=*/true);
 
     auto target = MakeMasterService();
     auto decoded = codec.Decode(target.get(), *encoded);
     EXPECT_FALSE(decoded.has_value());
-    EXPECT_TRUE(Catalog(*target).ExportSnapshot().metadata.empty());
+    EXPECT_TRUE(MetadataStore(*target).ExportSnapshot().metadata.empty());
 }
 
 TEST_F(MasterSnapshotCodecTest, EncodeDecodeRoundTripWithMemoryReplica) {

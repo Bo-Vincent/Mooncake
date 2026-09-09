@@ -18,7 +18,7 @@
 #include "segment.h"
 #include "serialize/serializer.h"
 #include "common/zstd_util.h"
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 
 namespace mooncake {
 
@@ -242,7 +242,7 @@ DeserializeStandbyObjectMetadata(
 
 struct DecodedStandbySnapshotMetadata {
     std::vector<StandbyObjectEntry> objects;
-    WeightCatalogSnapshot weight_catalog;
+    WeightMetadataSnapshot weight_metadata;
 };
 
 tl::expected<DecodedStandbySnapshotMetadata, ErrorCode>
@@ -266,23 +266,23 @@ DeserializeStandbySnapshotMetadata(const std::vector<uint8_t>& data,
     }
 
     DecodedStandbySnapshotMetadata snapshot;
-    const auto* weight_catalog = FindMapField(root, "weight_catalog");
-    if (weight_catalog != nullptr) {
-        if (weight_catalog->type != msgpack::type::BIN) {
-            LOG(ERROR) << "Snapshot weight_catalog payload is not binary";
+    const auto* weight_metadata = FindMapField(root, "weight_metadata");
+    if (weight_metadata != nullptr) {
+        if (weight_metadata->type != msgpack::type::BIN) {
+            LOG(ERROR) << "Snapshot weight_metadata payload is not binary";
             return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
         }
         const std::string encoded(
-            weight_catalog->via.bin.ptr,
-            weight_catalog->via.bin.ptr + weight_catalog->via.bin.size);
-        if (struct_pack::deserialize_to(snapshot.weight_catalog, encoded) !=
+            weight_metadata->via.bin.ptr,
+            weight_metadata->via.bin.ptr + weight_metadata->via.bin.size);
+        if (struct_pack::deserialize_to(snapshot.weight_metadata, encoded) !=
             struct_pack::errc::ok) {
-            LOG(ERROR) << "Failed to deserialize snapshot weight_catalog";
+            LOG(ERROR) << "Failed to deserialize snapshot weight_metadata";
             return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
         }
-        WeightCatalog validator;
-        if (!validator.RestoreSnapshot(snapshot.weight_catalog)) {
-            LOG(ERROR) << "Snapshot weight_catalog failed validation";
+        WeightMetadataStore validator;
+        if (!validator.RestoreSnapshot(snapshot.weight_metadata)) {
+            LOG(ERROR) << "Snapshot weight_metadata failed validation";
             return tl::make_unexpected(ErrorCode::DESERIALIZE_FAIL);
         }
     }
@@ -519,8 +519,8 @@ class CatalogBackedSnapshotProvider final : public SnapshotProvider {
         snapshot.snapshot_id = descriptor.snapshot_id;
         snapshot.snapshot_sequence_id = descriptor.last_included_seq;
         snapshot.metadata = std::move(deserialize_metadata->objects);
-        snapshot.weight_catalog =
-            std::move(deserialize_metadata->weight_catalog);
+        snapshot.weight_metadata =
+            std::move(deserialize_metadata->weight_metadata);
 
         // Extract standby segment registry entries from the deserialized
         // SegmentManager. The snapshot's SegmentSerializer::Serialize()

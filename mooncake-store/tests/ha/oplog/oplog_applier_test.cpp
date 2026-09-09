@@ -123,7 +123,7 @@ class OpLogApplierTest : public ::testing::Test {
 
 TEST_F(OpLogApplierTest, AppliesWeightMetadataAndRejectsStaleGeneration) {
     auto generation_one = MakeWeightMetadata(1);
-    const auto key = MakeWeightRevisionCatalogKey(generation_one.identity);
+    const auto key = MakeWeightRevisionMetadataKey(generation_one.identity);
     EXPECT_TRUE(applier_->ApplyOpLogEntry(
         MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT, key,
                   SerializeWeightUpsert(generation_one))));
@@ -156,7 +156,7 @@ TEST_F(OpLogApplierTest, AppliesImportingToReadyTransition) {
     importing.residency = WeightResidencyState::UNKNOWN;
     auto ready = MakeWeightMetadata(2);
     ready.created_at_ms = importing.created_at_ms;
-    const auto key = MakeWeightRevisionCatalogKey(importing.identity);
+    const auto key = MakeWeightRevisionMetadataKey(importing.identity);
 
     EXPECT_TRUE(applier_->ApplyOpLogEntry(MakeEntry(
         1, OpType::WEIGHT_METADATA_UPSERT, key,
@@ -171,7 +171,7 @@ TEST_F(OpLogApplierTest, AppliesImportingToReadyTransition) {
 TEST_F(OpLogApplierTest, WeightMetadataDuplicateReplayIsIdempotent) {
     auto metadata = MakeWeightMetadata(1);
     auto entry = MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT,
-                           MakeWeightRevisionCatalogKey(metadata.identity),
+                           MakeWeightRevisionMetadataKey(metadata.identity),
                            SerializeWeightUpsert(metadata));
     EXPECT_TRUE(applier_->ApplyOpLogEntry(entry));
     EXPECT_TRUE(applier_->ApplyOpLogEntry(entry));
@@ -182,7 +182,7 @@ TEST_F(OpLogApplierTest, WeightMetadataDuplicateReplayIsIdempotent) {
 
 TEST_F(OpLogApplierTest, ReplaysWeightOperationStartAndCompletion) {
     auto ready = MakeWeightMetadata(1);
-    const auto key = MakeWeightRevisionCatalogKey(ready.identity);
+    const auto key = MakeWeightRevisionMetadataKey(ready.identity);
     ASSERT_TRUE(applier_->ApplyOpLogEntry(MakeEntry(
         1, OpType::WEIGHT_METADATA_UPSERT, key,
         SerializeWeightUpsert(ready))));
@@ -229,7 +229,7 @@ TEST_F(OpLogApplierTest, ReplaysWeightOperationStartAndCompletion) {
 
 TEST_F(OpLogApplierTest, AppliesWeightLeaseAndDeleteTombstones) {
     auto metadata = MakeWeightMetadata(1);
-    const auto metadata_key = MakeWeightRevisionCatalogKey(metadata.identity);
+    const auto metadata_key = MakeWeightRevisionMetadataKey(metadata.identity);
     EXPECT_TRUE(applier_->ApplyOpLogEntry(
         MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT, metadata_key,
                   SerializeWeightUpsert(metadata))));
@@ -276,7 +276,7 @@ TEST_F(OpLogApplierTest, RejectsMalformedWeightPayloadAndMismatchedKey) {
     auto metadata = MakeWeightMetadata(1);
     EXPECT_FALSE(applier_->ApplyOpLogEntry(
         MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT,
-                  MakeWeightRevisionCatalogKey(metadata.identity), "invalid")));
+                  MakeWeightRevisionMetadataKey(metadata.identity), "invalid")));
     EXPECT_EQ(1u, applier_->GetExpectedSequenceId());
 
     EXPECT_FALSE(applier_->ApplyOpLogEntry(

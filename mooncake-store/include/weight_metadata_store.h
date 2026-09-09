@@ -13,13 +13,13 @@
 
 namespace mooncake {
 
-enum class WeightCatalogMutationKind : uint8_t {
+enum class WeightMetadataMutationKind : uint8_t {
     UPSERT = 0,
     ERASE = 1,
 };
 
-struct WeightCatalogMutation {
-    WeightCatalogMutationKind kind{WeightCatalogMutationKind::UPSERT};
+struct WeightMetadataMutation {
+    WeightMetadataMutationKind kind{WeightMetadataMutationKind::UPSERT};
     WeightRevisionIdentity identity;
     std::optional<WeightRevisionMetadata> previous;
     std::optional<WeightRevisionMetadata> next;
@@ -27,7 +27,7 @@ struct WeightCatalogMutation {
 };
 
 struct WeightLeaseMutation {
-    WeightCatalogMutationKind kind{WeightCatalogMutationKind::UPSERT};
+    WeightMetadataMutationKind kind{WeightMetadataMutationKind::UPSERT};
     uint64_t lease_id{0};
     std::optional<WeightRevisionLease> previous;
     std::optional<WeightRevisionLease> next;
@@ -35,13 +35,13 @@ struct WeightLeaseMutation {
 };
 
 struct WeightOperationMutation {
-    WeightCatalogMutation metadata;
+    WeightMetadataMutation metadata;
     std::optional<WeightResidencyOperation> previous;
     std::optional<WeightResidencyOperation> next;
     bool no_op{false};
 };
 
-struct WeightCatalogSnapshot {
+struct WeightMetadataSnapshot {
     uint32_t schema_version{1};
     std::vector<WeightRevisionMetadata> metadata;
     std::vector<WeightRevisionLease> leases;
@@ -49,25 +49,25 @@ struct WeightCatalogSnapshot {
     uint64_t next_lease_id{1};
     uint64_t next_operation_id{1};
 
-    friend bool operator==(const WeightCatalogSnapshot&,
-                           const WeightCatalogSnapshot&) = default;
+    friend bool operator==(const WeightMetadataSnapshot&,
+                           const WeightMetadataSnapshot&) = default;
 };
-YLT_REFL(WeightCatalogSnapshot, schema_version, metadata, leases, operations,
+YLT_REFL(WeightMetadataSnapshot, schema_version, metadata, leases, operations,
          next_lease_id, next_operation_id);
 
-class WeightCatalog {
+class WeightMetadataStore {
    public:
     template <typename T>
-    using Result = tl::expected<T, WeightCatalogError>;
+    using Result = tl::expected<T, WeightManagementError>;
 
-    Result<WeightCatalogMutation> PrepareBeginImport(
+    Result<WeightMetadataMutation> PrepareBeginImport(
         const BeginWeightImportRequest& request, uint64_t now_ms) const;
-    Result<WeightCatalogMutation> PrepareCommitImport(
+    Result<WeightMetadataMutation> PrepareCommitImport(
         const CommitWeightImportRequest& request, uint64_t now_ms) const;
-    Result<WeightCatalogMutation> PrepareAbortImport(
+    Result<WeightMetadataMutation> PrepareAbortImport(
         const AbortWeightImportRequest& request, uint64_t now_ms) const;
     Result<WeightRevisionMetadata> Publish(
-        const WeightCatalogMutation& mutation);
+        const WeightMetadataMutation& mutation);
 
     Result<WeightRevisionView> Get(const WeightRevisionIdentity& identity,
                                    uint64_t now_ms) const;
@@ -98,12 +98,12 @@ class WeightCatalog {
     Result<WeightResidencyOperation> QueryOperation(
         uint64_t operation_id) const;
 
-    Result<WeightCatalogMutation> PrepareDelete(
+    Result<WeightMetadataMutation> PrepareDelete(
         const DeleteWeightRevisionRequest& request, uint64_t now_ms) const;
-    Result<WeightCatalogMutation> PrepareFinishDelete(
+    Result<WeightMetadataMutation> PrepareFinishDelete(
         const WeightRevisionIdentity& identity,
         uint64_t expected_metadata_generation, uint64_t now_ms) const;
-    Result<WeightCatalogMutation> PrepareReconcile(
+    Result<WeightMetadataMutation> PrepareReconcile(
         const WeightRevisionIdentity& identity,
         uint64_t expected_metadata_generation,
         WeightAvailabilityState availability,
@@ -111,8 +111,8 @@ class WeightCatalog {
 
     bool IsManagedGroup(const std::string& payload_group_id) const;
     bool AllowsGroupMemberMutation(const std::string& payload_group_id) const;
-    WeightCatalogSnapshot ExportSnapshot() const;
-    Result<void> RestoreSnapshot(const WeightCatalogSnapshot& snapshot);
+    WeightMetadataSnapshot ExportSnapshot() const;
+    Result<void> RestoreSnapshot(const WeightMetadataSnapshot& snapshot);
     void Clear();
 
    private:

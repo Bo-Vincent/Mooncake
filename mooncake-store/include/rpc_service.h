@@ -259,41 +259,41 @@ class WrappedMasterService {
     tl::expected<SegmentStatus, ErrorCode> QuerySegmentStatusById(
         const UUID& segment_id);
 
-    WeightCatalog::Result<WeightRevisionMetadata> BeginWeightImport(
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionMetadata> CommitWeightImport(
+    WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
         const CommitWeightImportRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionMetadata> AbortWeightImport(
+    WeightMetadataStore::Result<WeightRevisionMetadata> AbortWeightImport(
         const AbortWeightImportRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionView> GetWeightRevision(
+    WeightMetadataStore::Result<WeightRevisionView> GetWeightRevision(
         const GetWeightRevisionRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<ListWeightRevisionsResponse> ListWeightRevisions(
+    WeightMetadataStore::Result<ListWeightRevisionsResponse> ListWeightRevisions(
         const ListWeightRevisionsRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionLease> AcquireWeightRevisionLease(
+    WeightMetadataStore::Result<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionLease> RenewWeightRevisionLease(
+    WeightMetadataStore::Result<WeightRevisionLease> RenewWeightRevisionLease(
         const RenewWeightRevisionLeaseRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<void> ReleaseWeightRevisionLease(
+    WeightMetadataStore::Result<void> ReleaseWeightRevisionLease(
         const ReleaseWeightRevisionLeaseRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightResidencyOperation>
+    WeightMetadataStore::Result<WeightResidencyOperation>
     StartWeightResidencyOperation(
         const StartWeightResidencyOperationRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightResidencyOperation> QueryWeightOperation(
+    WeightMetadataStore::Result<WeightResidencyOperation> QueryWeightOperation(
         const QueryWeightOperationRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionMetadata> ReconcileWeightRevision(
+    WeightMetadataStore::Result<WeightRevisionMetadata> ReconcileWeightRevision(
         const ReconcileWeightRevisionRequest& request,
         const std::string& tenant_id = "default");
-    WeightCatalog::Result<WeightRevisionMetadata> DeleteWeightRevision(
+    WeightMetadataStore::Result<WeightRevisionMetadata> DeleteWeightRevision(
         const DeleteWeightRevisionRequest& request,
         const std::string& tenant_id = "default");
 
@@ -303,7 +303,7 @@ class WrappedMasterService {
         const std::vector<StandbyObjectEntry>& objects,
         uint64_t initial_oplog_sequence_id,
         const std::vector<StandbySegmentInfo>& segments,
-        const WeightCatalogSnapshot& weight_catalog = {});
+        const WeightMetadataSnapshot& weight_metadata = {});
     tl::expected<void, ErrorCode> RestoreFromBatchOpLogPromotion(
         BatchOpLogPromotionHandoff handoff,
         size_t chunk_object_count = kDefaultBatchOpLogPromotionChunkObjects);

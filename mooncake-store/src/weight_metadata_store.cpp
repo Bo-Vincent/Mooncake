@@ -1,4 +1,4 @@
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 
 #include <algorithm>
 #include <charconv>
@@ -112,30 +112,30 @@ std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity) {
     return digest.empty() ? std::string() : "weight:" + digest;
 }
 
-std::string MakeWeightRevisionCatalogKey(
+std::string MakeWeightRevisionMetadataKey(
     const WeightRevisionIdentity& identity) {
     const auto digest = ComputeWeightIdentitySha256(identity);
     return digest.empty() ? std::string() : "weight-revision:" + digest;
 }
 
-std::string MakeWeightLeaseCatalogKey(uint64_t lease_id) {
+std::string MakeWeightLeaseMetadataKey(uint64_t lease_id) {
     return lease_id == 0 ? std::string()
                          : "weight-lease:" + std::to_string(lease_id);
 }
 
-WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareBeginImport(
+WeightMetadataStore::Result<WeightMetadataMutation> WeightMetadataStore::PrepareBeginImport(
     const BeginWeightImportRequest& request, uint64_t now_ms) const {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         !IsValidWeightComponent(request.payload_group_id) ||
         request.expected_payload_count == 0 ||
         request.expected_logical_bytes == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::lock_guard lock(mutex_);
     const auto group = group_index_.find(request.payload_group_id);
     if (group != group_index_.end() && group->second != request.identity) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
 
     const auto current = revisions_.find(request.identity);
@@ -144,14 +144,14 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareBeginImport(
                  WeightAvailabilityState::IMPORTING ||
              current->second.availability == WeightAvailabilityState::READY) &&
             SameImport(current->second, request)) {
-            return WeightCatalogMutation{
+            return WeightMetadataMutation{
                 .identity = request.identity,
                 .previous = current->second,
                 .next = current->second,
                 .no_op = true,
             };
         }
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
 
     WeightRevisionMetadata metadata{
@@ -172,8 +172,8 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareBeginImport(
         .created_at_ms = now_ms,
         .updated_at_ms = now_ms,
     };
-    return WeightCatalogMutation{
-        .kind = WeightCatalogMutationKind::UPSERT,
+    return WeightMetadataMutation{
+        .kind = WeightMetadataMutationKind::UPSERT,
         .identity = request.identity,
         .previous = std::nullopt,
         .next = std::move(metadata),
@@ -181,29 +181,29 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareBeginImport(
     };
 }
 
-WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareCommitImport(
+WeightMetadataStore::Result<WeightMetadataMutation> WeightMetadataStore::PrepareCommitImport(
     const CommitWeightImportRequest& request, uint64_t now_ms) const {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         !ValidateWeightManifestReference(request.manifest).ok() ||
         request.expected_metadata_generation == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(request.identity);
     if (current == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (current->second.availability == WeightAvailabilityState::READY) {
         if (!SameManifest(current->second, request.manifest)) {
-            return tl::make_unexpected(WeightCatalogError::CONFLICT);
+            return tl::make_unexpected(WeightManagementError::CONFLICT);
         }
         if (!MatchesIdempotentRetryGeneration(
                 current->second.metadata_generation,
                 request.expected_metadata_generation)) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
-        return WeightCatalogMutation{
+        return WeightMetadataMutation{
             .identity = request.identity,
             .previous = current->second,
             .next = current->second,
@@ -212,10 +212,10 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareCommitImport(
     }
     if (current->second.metadata_generation !=
         request.expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (current->second.availability != WeightAvailabilityState::IMPORTING) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     if (current->second.manifest.payload_group_id !=
             request.manifest.payload_group_id ||
@@ -223,11 +223,11 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareCommitImport(
             request.manifest.payload_count ||
         current->second.manifest.logical_bytes !=
             request.manifest.logical_bytes) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     if (!CanAdvanceWeightMetadataGeneration(
             current->second.metadata_generation)) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
 
     auto next = current->second;
@@ -236,32 +236,32 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareCommitImport(
     next.residency = WeightResidencyState::HOT;
     ++next.metadata_generation;
     next.updated_at_ms = now_ms;
-    return WeightCatalogMutation{
+    return WeightMetadataMutation{
         .identity = request.identity,
         .previous = current->second,
         .next = std::move(next),
     };
 }
 
-WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareAbortImport(
+WeightMetadataStore::Result<WeightMetadataMutation> WeightMetadataStore::PrepareAbortImport(
     const AbortWeightImportRequest& request, uint64_t now_ms) const {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         request.expected_metadata_generation == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(request.identity);
     if (current == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (current->second.availability == WeightAvailabilityState::DELETING) {
         if (!MatchesIdempotentRetryGeneration(
                 current->second.metadata_generation,
                 request.expected_metadata_generation)) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
-        return WeightCatalogMutation{
+        return WeightMetadataMutation{
             .identity = request.identity,
             .previous = current->second,
             .next = current->second,
@@ -270,47 +270,47 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareAbortImport(
     }
     if (current->second.metadata_generation !=
         request.expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (current->second.availability != WeightAvailabilityState::IMPORTING) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     if (!CanAdvanceWeightMetadataGeneration(
             current->second.metadata_generation)) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
 
     auto next = current->second;
     next.availability = WeightAvailabilityState::DELETING;
     ++next.metadata_generation;
     next.updated_at_ms = now_ms;
-    return WeightCatalogMutation{
+    return WeightMetadataMutation{
         .identity = request.identity,
         .previous = current->second,
         .next = std::move(next),
     };
 }
 
-WeightCatalog::Result<WeightRevisionMetadata> WeightCatalog::Publish(
-    const WeightCatalogMutation& mutation) {
+WeightMetadataStore::Result<WeightRevisionMetadata> WeightMetadataStore::Publish(
+    const WeightMetadataMutation& mutation) {
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(mutation.identity);
     if (mutation.previous.has_value()) {
         if (current == revisions_.end() ||
             current->second != *mutation.previous) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
     } else if (current != revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
 
     if (mutation.no_op) {
         return current->second;
     }
-    if (mutation.kind == WeightCatalogMutationKind::ERASE ||
+    if (mutation.kind == WeightMetadataMutationKind::ERASE ||
         !mutation.next.has_value()) {
         if (current == revisions_.end()) {
-            return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+            return tl::make_unexpected(WeightManagementError::NOT_FOUND);
         }
         auto removed = current->second;
         group_index_.erase(removed.manifest.payload_group_id);
@@ -320,26 +320,26 @@ WeightCatalog::Result<WeightRevisionMetadata> WeightCatalog::Publish(
 
     const auto& next = *mutation.next;
     if (!ValidateWeightRevisionMetadata(next).ok()) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     const auto group = group_index_.find(next.manifest.payload_group_id);
     if (group != group_index_.end() && group->second != next.identity) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     revisions_[next.identity] = next;
     group_index_[next.manifest.payload_group_id] = next.identity;
     return next;
 }
 
-WeightCatalog::Result<WeightRevisionView> WeightCatalog::Get(
+WeightMetadataStore::Result<WeightRevisionView> WeightMetadataStore::Get(
     const WeightRevisionIdentity& identity, uint64_t now_ms) const {
     if (!ValidateWeightRevisionIdentity(identity).ok()) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(identity);
     if (current == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     std::optional<uint64_t> nearest;
     const auto count =
@@ -351,13 +351,13 @@ WeightCatalog::Result<WeightRevisionView> WeightCatalog::Get(
     };
 }
 
-WeightCatalog::Result<ListWeightRevisionsResponse> WeightCatalog::List(
+WeightMetadataStore::Result<ListWeightRevisionsResponse> WeightMetadataStore::List(
     const ListWeightRevisionsRequest& request, uint64_t now_ms) const {
     if (request.tenant_id.empty() || !TenantId(request.tenant_id).IsValid() ||
         !IsValidWeightComponent(request.name_space) ||
         !IsValidWeightComponent(request.resource_id) || request.limit == 0 ||
         request.limit > kMaxListLimit) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::optional<std::pair<std::string, uint64_t>> cursor;
@@ -398,29 +398,29 @@ WeightCatalog::Result<ListWeightRevisionsResponse> WeightCatalog::List(
     return response;
 }
 
-WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareAcquireLease(
+WeightMetadataStore::Result<WeightLeaseMutation> WeightMetadataStore::PrepareAcquireLease(
     const AcquireWeightRevisionLeaseRequest& request, uint64_t now_ms) {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         request.expected_metadata_generation == 0 ||
         !IsValidWeightComponent(request.holder) || request.ttl_ms == 0 ||
         request.ttl_ms > kMaxLeaseTtlMs) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(request.identity);
     if (current == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (current->second.metadata_generation !=
         request.expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (current->second.availability != WeightAvailabilityState::READY) {
-        return tl::make_unexpected(WeightCatalogError::NOT_READY);
+        return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
     if (current->second.operation != WeightOperationState::NONE) {
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     for (const auto& [lease_id, lease] : leases_) {
         (void)lease_id;
@@ -438,11 +438,11 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareAcquireLease(
     }
     if (next_lease_id_ == 0 ||
         next_lease_id_ == std::numeric_limits<uint64_t>::max()) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
     const uint64_t lease_id = next_lease_id_++;
     return WeightLeaseMutation{
-        .kind = WeightCatalogMutationKind::UPSERT,
+        .kind = WeightMetadataMutationKind::UPSERT,
         .lease_id = lease_id,
         .previous = std::nullopt,
         .next =
@@ -458,24 +458,24 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareAcquireLease(
     };
 }
 
-WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareRenewLease(
+WeightMetadataStore::Result<WeightLeaseMutation> WeightMetadataStore::PrepareRenewLease(
     const RenewWeightRevisionLeaseRequest& request, uint64_t now_ms) const {
     if (request.tenant_id.empty() ||
         !TenantId(request.tenant_id).IsValid() || request.lease_id == 0 ||
         request.ttl_ms == 0 ||
         request.ttl_ms > kMaxLeaseTtlMs) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto current = leases_.find(request.lease_id);
     if (current == leases_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (current->second.identity.tenant_id != request.tenant_id) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (current->second.expires_at_ms <= now_ms) {
-        return tl::make_unexpected(WeightCatalogError::LEASE_EXPIRED);
+        return tl::make_unexpected(WeightManagementError::LEASE_EXPIRED);
     }
     auto next = current->second;
     next.expires_at_ms = AddTtl(now_ms, request.ttl_ms);
@@ -486,17 +486,17 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareRenewLease(
     };
 }
 
-WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareReleaseLease(
+WeightMetadataStore::Result<WeightLeaseMutation> WeightMetadataStore::PrepareReleaseLease(
     const ReleaseWeightRevisionLeaseRequest& request) const {
     if (request.tenant_id.empty() ||
         !TenantId(request.tenant_id).IsValid() || request.lease_id == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto current = leases_.find(request.lease_id);
     if (current == leases_.end()) {
         return WeightLeaseMutation{
-            .kind = WeightCatalogMutationKind::ERASE,
+            .kind = WeightMetadataMutationKind::ERASE,
             .lease_id = request.lease_id,
             .previous = std::nullopt,
             .next = std::nullopt,
@@ -504,10 +504,10 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareReleaseLease(
         };
     }
     if (current->second.identity.tenant_id != request.tenant_id) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     return WeightLeaseMutation{
-        .kind = WeightCatalogMutationKind::ERASE,
+        .kind = WeightMetadataMutationKind::ERASE,
         .lease_id = request.lease_id,
         .previous = current->second,
         .next = std::nullopt,
@@ -515,14 +515,14 @@ WeightCatalog::Result<WeightLeaseMutation> WeightCatalog::PrepareReleaseLease(
     };
 }
 
-std::vector<WeightLeaseMutation> WeightCatalog::PrepareExpireLeases(
+std::vector<WeightLeaseMutation> WeightMetadataStore::PrepareExpireLeases(
     uint64_t now_ms) const {
     std::lock_guard lock(mutex_);
     std::vector<WeightLeaseMutation> expired;
     for (const auto& [lease_id, lease] : leases_) {
         if (lease.expires_at_ms <= now_ms) {
             expired.push_back(WeightLeaseMutation{
-                .kind = WeightCatalogMutationKind::ERASE,
+                .kind = WeightMetadataMutationKind::ERASE,
                 .lease_id = lease_id,
                 .previous = lease,
                 .next = std::nullopt,
@@ -537,7 +537,7 @@ std::vector<WeightLeaseMutation> WeightCatalog::PrepareExpireLeases(
     return expired;
 }
 
-WeightCatalog::Result<WeightRevisionLease> WeightCatalog::Publish(
+WeightMetadataStore::Result<WeightRevisionLease> WeightMetadataStore::Publish(
     const WeightLeaseMutation& mutation) {
     std::lock_guard lock(mutex_);
     const auto current = leases_.find(mutation.lease_id);
@@ -555,13 +555,13 @@ WeightCatalog::Result<WeightRevisionLease> WeightCatalog::Publish(
     }
     if (mutation.previous.has_value()) {
         if (current == leases_.end() || current->second != *mutation.previous) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
     } else if (current != leases_.end()) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
 
-    if (mutation.kind == WeightCatalogMutationKind::ERASE ||
+    if (mutation.kind == WeightMetadataMutationKind::ERASE ||
         !mutation.next.has_value()) {
         auto removed = current->second;
         leases_.erase(current);
@@ -571,23 +571,23 @@ WeightCatalog::Result<WeightRevisionLease> WeightCatalog::Publish(
     const auto& next = *mutation.next;
     const auto revision = revisions_.find(next.identity);
     if (revision == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (revision->second.metadata_generation <
         next.fenced_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (revision->second.availability != WeightAvailabilityState::READY) {
-        return tl::make_unexpected(WeightCatalogError::NOT_READY);
+        return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
     if (revision->second.operation != WeightOperationState::NONE) {
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     leases_[next.lease_id] = next;
     return next;
 }
 
-bool WeightCatalog::HasActiveLease(const WeightRevisionIdentity& identity,
+bool WeightMetadataStore::HasActiveLease(const WeightRevisionIdentity& identity,
                                    uint64_t metadata_generation,
                                    uint64_t now_ms) const {
     std::lock_guard lock(mutex_);
@@ -602,19 +602,19 @@ bool WeightCatalog::HasActiveLease(const WeightRevisionIdentity& identity,
     return false;
 }
 
-WeightCatalog::Result<WeightOperationMutation>
-WeightCatalog::PrepareStartOperation(
+WeightMetadataStore::Result<WeightOperationMutation>
+WeightMetadataStore::PrepareStartOperation(
     const StartWeightResidencyOperationRequest& request, uint64_t now_ms) {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         request.expected_metadata_generation == 0 ||
         (request.target_residency != WeightResidencyState::HOT &&
          request.target_residency != WeightResidencyState::COLD)) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(request.identity);
     if (current == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (current->second.operation != WeightOperationState::NONE) {
         const auto operation = operations_.find(current->second.operation_id);
@@ -624,11 +624,11 @@ WeightCatalog::PrepareStartOperation(
                     current->second.metadata_generation,
                     request.expected_metadata_generation)) {
                 return tl::make_unexpected(
-                    WeightCatalogError::STALE_GENERATION);
+                    WeightManagementError::STALE_GENERATION);
             }
             return WeightOperationMutation{
                 .metadata =
-                    WeightCatalogMutation{
+                    WeightMetadataMutation{
                         .identity = request.identity,
                         .previous = current->second,
                         .next = current->second,
@@ -639,25 +639,25 @@ WeightCatalog::PrepareStartOperation(
                 .no_op = true,
             };
         }
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if (current->second.metadata_generation !=
         request.expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (current->second.availability != WeightAvailabilityState::READY &&
         current->second.availability != WeightAvailabilityState::DEGRADED) {
-        return tl::make_unexpected(WeightCatalogError::NOT_READY);
+        return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
     std::optional<uint64_t> nearest;
     if (CountActiveLeasesLocked(current->second, now_ms, &nearest) != 0) {
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if (!CanAdvanceWeightMetadataGeneration(
             current->second.metadata_generation) ||
         next_operation_id_ == 0 ||
         next_operation_id_ == std::numeric_limits<uint64_t>::max()) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
 
     const uint64_t operation_id = next_operation_id_++;
@@ -681,7 +681,7 @@ WeightCatalog::PrepareStartOperation(
     };
     return WeightOperationMutation{
         .metadata =
-            WeightCatalogMutation{
+            WeightMetadataMutation{
                 .identity = request.identity,
                 .previous = current->second,
                 .next = std::move(next_metadata),
@@ -692,30 +692,30 @@ WeightCatalog::PrepareStartOperation(
     };
 }
 
-WeightCatalog::Result<WeightOperationMutation>
-WeightCatalog::PrepareFinishOperation(
+WeightMetadataStore::Result<WeightOperationMutation>
+WeightMetadataStore::PrepareFinishOperation(
     uint64_t operation_id, WeightResidencyState observed_residency,
     uint64_t now_ms) const {
     if (operation_id == 0 ||
         (observed_residency != WeightResidencyState::HOT &&
          observed_residency != WeightResidencyState::COLD)) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto operation = operations_.find(operation_id);
     if (operation == operations_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     const auto revision = revisions_.find(operation->second.identity);
     if (revision == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (revision->second.operation_id != operation_id ||
         revision->second.operation != operation->second.operation) {
         if (revision->second.operation == WeightOperationState::NONE &&
             revision->second.residency == observed_residency) {
             return WeightOperationMutation{
-                .metadata = WeightCatalogMutation{
+                .metadata = WeightMetadataMutation{
                     .identity = revision->first,
                     .previous = revision->second,
                     .next = revision->second,
@@ -726,14 +726,14 @@ WeightCatalog::PrepareFinishOperation(
                 .no_op = true,
             };
         }
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     if (operation->second.target_residency != observed_residency) {
-        return tl::make_unexpected(WeightCatalogError::NOT_READY);
+        return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
     if (!CanAdvanceWeightMetadataGeneration(
             revision->second.metadata_generation)) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
     auto next_metadata = revision->second;
     next_metadata.residency = observed_residency;
@@ -748,7 +748,7 @@ WeightCatalog::PrepareFinishOperation(
     next_operation.message = "completed";
     return WeightOperationMutation{
         .metadata =
-            WeightCatalogMutation{
+            WeightMetadataMutation{
                 .identity = revision->first,
                 .previous = revision->second,
                 .next = std::move(next_metadata),
@@ -758,28 +758,28 @@ WeightCatalog::PrepareFinishOperation(
     };
 }
 
-WeightCatalog::Result<WeightOperationMutation>
-WeightCatalog::PrepareUpdateOperationProgress(
+WeightMetadataStore::Result<WeightOperationMutation>
+WeightMetadataStore::PrepareUpdateOperationProgress(
     uint64_t operation_id, uint64_t processed_members, uint64_t total_members,
     std::string cursor, uint64_t now_ms) const {
     if (operation_id == 0 || total_members == 0 ||
         processed_members > total_members ||
         (!cursor.empty() && !IsValidWeightComponent(cursor))) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto operation = operations_.find(operation_id);
     if (operation == operations_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     const auto revision = revisions_.find(operation->second.identity);
     if (revision == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (revision->second.operation_id != operation_id ||
         revision->second.operation != operation->second.operation ||
         operation->second.message == "completed") {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     auto next_operation = operation->second;
     const bool unchanged =
@@ -789,7 +789,7 @@ WeightCatalog::PrepareUpdateOperationProgress(
     if (unchanged) {
         return WeightOperationMutation{
             .metadata =
-                WeightCatalogMutation{
+                WeightMetadataMutation{
                     .identity = revision->first,
                     .previous = revision->second,
                     .next = revision->second,
@@ -806,7 +806,7 @@ WeightCatalog::PrepareUpdateOperationProgress(
     next_operation.updated_at_ms = now_ms;
     return WeightOperationMutation{
         .metadata =
-            WeightCatalogMutation{
+            WeightMetadataMutation{
                 .identity = revision->first,
                 .previous = revision->second,
                 .next = revision->second,
@@ -818,64 +818,64 @@ WeightCatalog::PrepareUpdateOperationProgress(
     };
 }
 
-WeightCatalog::Result<WeightResidencyOperation> WeightCatalog::Publish(
+WeightMetadataStore::Result<WeightResidencyOperation> WeightMetadataStore::Publish(
     const WeightOperationMutation& mutation) {
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(mutation.metadata.identity);
     if (!mutation.metadata.previous.has_value() ||
         current == revisions_.end() ||
         current->second != *mutation.metadata.previous) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (mutation.no_op) {
         if (!mutation.next.has_value()) {
-            return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+            return tl::make_unexpected(WeightManagementError::NOT_FOUND);
         }
         return *mutation.next;
     }
     if (!mutation.metadata.next.has_value() || !mutation.next.has_value()) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     const auto operation = operations_.find(mutation.next->operation_id);
     if (mutation.previous.has_value()) {
         if (operation == operations_.end() ||
             operation->second != *mutation.previous) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
     } else if (operation != operations_.end()) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     revisions_[mutation.metadata.identity] = *mutation.metadata.next;
     operations_[mutation.next->operation_id] = *mutation.next;
     return *mutation.next;
 }
 
-WeightCatalog::Result<WeightResidencyOperation> WeightCatalog::QueryOperation(
+WeightMetadataStore::Result<WeightResidencyOperation> WeightMetadataStore::QueryOperation(
     uint64_t operation_id) const {
     if (operation_id == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto operation = operations_.find(operation_id);
     if (operation == operations_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     return operation->second;
 }
 
-WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareDelete(
+WeightMetadataStore::Result<WeightMetadataMutation> WeightMetadataStore::PrepareDelete(
     const DeleteWeightRevisionRequest& request, uint64_t now_ms) const {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         request.expected_metadata_generation == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     std::lock_guard lock(mutex_);
     const auto revision = revisions_.find(request.identity);
     if (revision == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (revision->second.availability == WeightAvailabilityState::DELETED) {
-        return WeightCatalogMutation{
+        return WeightMetadataMutation{
             .identity = request.identity,
             .previous = revision->second,
             .next = revision->second,
@@ -886,9 +886,9 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareDelete(
         if (!MatchesIdempotentRetryGeneration(
                 revision->second.metadata_generation,
                 request.expected_metadata_generation)) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
-        return WeightCatalogMutation{
+        return WeightMetadataMutation{
             .identity = request.identity,
             .previous = revision->second,
             .next = revision->second,
@@ -897,50 +897,50 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareDelete(
     }
     if (revision->second.metadata_generation !=
         request.expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     std::optional<uint64_t> nearest;
     if (CountActiveLeasesLocked(revision->second, now_ms, &nearest) != 0) {
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if (revision->second.operation != WeightOperationState::NONE) {
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if (revision->second.availability != WeightAvailabilityState::READY &&
         revision->second.availability != WeightAvailabilityState::DEGRADED) {
-        return tl::make_unexpected(WeightCatalogError::NOT_READY);
+        return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
     if (!CanAdvanceWeightMetadataGeneration(
             revision->second.metadata_generation)) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
     auto next = revision->second;
     next.availability = WeightAvailabilityState::DELETING;
     ++next.metadata_generation;
     next.updated_at_ms = now_ms;
-    return WeightCatalogMutation{
+    return WeightMetadataMutation{
         .identity = request.identity,
         .previous = revision->second,
         .next = std::move(next),
     };
 }
 
-WeightCatalog::Result<WeightCatalogMutation>
-WeightCatalog::PrepareFinishDelete(
+WeightMetadataStore::Result<WeightMetadataMutation>
+WeightMetadataStore::PrepareFinishDelete(
     const WeightRevisionIdentity& identity,
     uint64_t expected_metadata_generation, uint64_t now_ms) const {
     std::lock_guard lock(mutex_);
     const auto revision = revisions_.find(identity);
     if (revision == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (revision->second.availability == WeightAvailabilityState::DELETED) {
         if (!MatchesIdempotentRetryGeneration(
                 revision->second.metadata_generation,
                 expected_metadata_generation)) {
-            return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
         }
-        return WeightCatalogMutation{
+        return WeightMetadataMutation{
             .identity = identity,
             .previous = revision->second,
             .next = revision->second,
@@ -948,27 +948,27 @@ WeightCatalog::PrepareFinishDelete(
         };
     }
     if (revision->second.metadata_generation != expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (revision->second.availability != WeightAvailabilityState::DELETING) {
-        return tl::make_unexpected(WeightCatalogError::CONFLICT);
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     if (!CanAdvanceWeightMetadataGeneration(expected_metadata_generation)) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
     auto next = revision->second;
     next.availability = WeightAvailabilityState::DELETED;
     next.residency = WeightResidencyState::ABSENT;
     ++next.metadata_generation;
     next.updated_at_ms = now_ms;
-    return WeightCatalogMutation{
+    return WeightMetadataMutation{
         .identity = identity,
         .previous = revision->second,
         .next = std::move(next),
     };
 }
 
-WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareReconcile(
+WeightMetadataStore::Result<WeightMetadataMutation> WeightMetadataStore::PrepareReconcile(
     const WeightRevisionIdentity& identity,
     uint64_t expected_metadata_generation,
     WeightAvailabilityState availability, WeightResidencyState residency,
@@ -976,24 +976,24 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareReconcile(
     std::lock_guard lock(mutex_);
     const auto revision = revisions_.find(identity);
     if (revision == revisions_.end()) {
-        return tl::make_unexpected(WeightCatalogError::NOT_FOUND);
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (revision->second.metadata_generation != expected_metadata_generation) {
-        return tl::make_unexpected(WeightCatalogError::STALE_GENERATION);
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
     }
     if (revision->second.operation != WeightOperationState::NONE ||
         revision->second.availability == WeightAvailabilityState::DELETING ||
         revision->second.availability == WeightAvailabilityState::DELETED) {
-        return tl::make_unexpected(WeightCatalogError::BUSY);
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if ((availability != WeightAvailabilityState::READY &&
          availability != WeightAvailabilityState::DEGRADED) ||
         residency == WeightResidencyState::UNKNOWN) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     if (revision->second.availability == availability &&
         revision->second.residency == residency) {
-        return WeightCatalogMutation{
+        return WeightMetadataMutation{
             .identity = identity,
             .previous = revision->second,
             .next = revision->second,
@@ -1001,26 +1001,26 @@ WeightCatalog::Result<WeightCatalogMutation> WeightCatalog::PrepareReconcile(
         };
     }
     if (!CanAdvanceWeightMetadataGeneration(expected_metadata_generation)) {
-        return tl::make_unexpected(WeightCatalogError::GENERATION_EXHAUSTED);
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
     }
     auto next = revision->second;
     next.availability = availability;
     next.residency = residency;
     ++next.metadata_generation;
     next.updated_at_ms = now_ms;
-    return WeightCatalogMutation{
+    return WeightMetadataMutation{
         .identity = identity,
         .previous = revision->second,
         .next = std::move(next),
     };
 }
 
-bool WeightCatalog::IsManagedGroup(const std::string& payload_group_id) const {
+bool WeightMetadataStore::IsManagedGroup(const std::string& payload_group_id) const {
     std::lock_guard lock(mutex_);
     return group_index_.contains(payload_group_id);
 }
 
-bool WeightCatalog::AllowsGroupMemberMutation(
+bool WeightMetadataStore::AllowsGroupMemberMutation(
     const std::string& payload_group_id) const {
     std::lock_guard lock(mutex_);
     const auto group = group_index_.find(payload_group_id);
@@ -1033,9 +1033,9 @@ bool WeightCatalog::AllowsGroupMemberMutation(
                WeightAvailabilityState::IMPORTING;
 }
 
-WeightCatalogSnapshot WeightCatalog::ExportSnapshot() const {
+WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
     std::lock_guard lock(mutex_);
-    WeightCatalogSnapshot snapshot{
+    WeightMetadataSnapshot snapshot{
         .schema_version = 1,
         .metadata = {},
         .leases = {},
@@ -1069,11 +1069,11 @@ WeightCatalogSnapshot WeightCatalog::ExportSnapshot() const {
     return snapshot;
 }
 
-WeightCatalog::Result<void> WeightCatalog::RestoreSnapshot(
-    const WeightCatalogSnapshot& snapshot) {
+WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
+    const WeightMetadataSnapshot& snapshot) {
     if (snapshot.schema_version != 1 || snapshot.next_lease_id == 0 ||
         snapshot.next_operation_id == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::map<WeightRevisionIdentity, WeightRevisionMetadata> revisions;
@@ -1085,7 +1085,7 @@ WeightCatalog::Result<void> WeightCatalog::RestoreSnapshot(
             !group_index
                  .emplace(metadata.manifest.payload_group_id, metadata.identity)
                  .second) {
-            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
         }
     }
 
@@ -1101,12 +1101,12 @@ WeightCatalog::Result<void> WeightCatalog::RestoreSnapshot(
             lease.fenced_metadata_generation >
                 revision->second.metadata_generation ||
             !leases.emplace(lease.lease_id, lease).second) {
-            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
         }
         max_lease_id = std::max(max_lease_id, lease.lease_id);
     }
     if (snapshot.next_lease_id <= max_lease_id) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     uint64_t max_operation_id = 0;
@@ -1142,18 +1142,18 @@ WeightCatalog::Result<void> WeightCatalog::RestoreSnapshot(
                 revision->second.residency !=
                     operation.target_residency)))) ||
             !operations.emplace(operation.operation_id, operation).second) {
-            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
         }
         max_operation_id = std::max(max_operation_id, operation.operation_id);
     }
     if (snapshot.next_operation_id <= max_operation_id) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     for (const auto& [identity, metadata] : revisions) {
         static_cast<void>(identity);
         if (metadata.operation != WeightOperationState::NONE &&
             !operations.contains(metadata.operation_id)) {
-            return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
         }
     }
 
@@ -1167,7 +1167,7 @@ WeightCatalog::Result<void> WeightCatalog::RestoreSnapshot(
     return {};
 }
 
-void WeightCatalog::Clear() {
+void WeightMetadataStore::Clear() {
     std::lock_guard lock(mutex_);
     revisions_.clear();
     group_index_.clear();
@@ -1177,18 +1177,18 @@ void WeightCatalog::Clear() {
     next_operation_id_ = 1;
 }
 
-std::string WeightCatalog::MakePageToken(
+std::string WeightMetadataStore::MakePageToken(
     const WeightRevisionIdentity& identity) {
     return identity.revision + kPageTokenSeparator +
            std::to_string(identity.weight_generation);
 }
 
-WeightCatalog::Result<std::pair<std::string, uint64_t>>
-WeightCatalog::ParsePageToken(const std::string& page_token) {
+WeightMetadataStore::Result<std::pair<std::string, uint64_t>>
+WeightMetadataStore::ParsePageToken(const std::string& page_token) {
     const auto separator = page_token.rfind(kPageTokenSeparator);
     if (separator == std::string::npos || separator == 0 ||
         separator + 1 == page_token.size()) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     uint64_t generation = 0;
     const auto value = std::string_view(page_token).substr(separator + 1);
@@ -1196,26 +1196,26 @@ WeightCatalog::ParsePageToken(const std::string& page_token) {
         std::from_chars(value.data(), value.data() + value.size(), generation);
     if (error != std::errc() || end != value.data() + value.size() ||
         generation == 0) {
-        return tl::make_unexpected(WeightCatalogError::INVALID_ARGUMENT);
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     return std::make_pair(page_token.substr(0, separator), generation);
 }
 
-uint64_t WeightCatalog::AddTtl(uint64_t now_ms, uint64_t ttl_ms) {
+uint64_t WeightMetadataStore::AddTtl(uint64_t now_ms, uint64_t ttl_ms) {
     if (ttl_ms > std::numeric_limits<uint64_t>::max() - now_ms) {
         return std::numeric_limits<uint64_t>::max();
     }
     return now_ms + ttl_ms;
 }
 
-WeightOperationState WeightCatalog::OperationForTarget(
+WeightOperationState WeightMetadataStore::OperationForTarget(
     WeightResidencyState target) {
     return target == WeightResidencyState::COLD
                ? WeightOperationState::EVICTING
                : WeightOperationState::REHYDRATING;
 }
 
-uint64_t WeightCatalog::CountActiveLeasesLocked(
+uint64_t WeightMetadataStore::CountActiveLeasesLocked(
     const WeightRevisionMetadata& metadata, uint64_t now_ms,
     std::optional<uint64_t>* nearest) const {
     uint64_t count = 0;

@@ -15,13 +15,13 @@ Three records have distinct authority:
 
 | Authority | Location | Owns | Does not own |
 | --- | --- | --- | --- |
-| Weight Catalog | Store Master memory, HA OpLog, and Master snapshot | exact revision discovery, availability, residency summary, operation progress, revision leases, manifest reference | tensor geometry, payload contents, physical replica addresses |
+| Weight Metadata Store | Store Master memory, HA OpLog, and Master snapshot | exact revision discovery, availability, residency summary, operation progress, revision leases, manifest reference | tensor geometry, payload contents, physical replica addresses |
 | `StoredWeightManifest` | immutable Store `METADATA` object | tensor descriptors and tensor-fragment-to-object-range mapping | lifecycle state, leases, live runtime addresses |
 | Store object metadata | existing per-key Master metadata | replica placement and status in memory, local disk, DFS, or NoF | revision discovery, tensor meaning, serving activation |
 
 ```mermaid
 flowchart TD
-    C[Weight Catalog record] -->|manifest key and SHA-256| M[StoredWeightManifest]
+    C[Weight Metadata Store record] -->|manifest key and SHA-256| M[StoredWeightManifest]
     C -->|payload group ID| G[Store group]
     M -->|fragments: object key, offset, bytes| P[Weight payload objects]
     G --> M
@@ -30,14 +30,14 @@ flowchart TD
     M --> O
 ```
 
-The catalog record stays outside the payload group. It therefore remains
+The metadata record stays outside the payload group. It therefore remains
 discoverable while the group is cold, degraded, deleting, or physically
 absent. The manifest and every payload object share one `payload_group_id`.
 Generic eviction and removal paths recognize that group as managed and cannot
 independently reclaim one member.
 
 The group is a logical lifecycle boundary, not a distributed transaction.
-Physical work may be partial while an operation is running. The catalog keeps
+Physical work may be partial while an operation is running. The metadata store keeps
 the operation non-terminal until reconciliation observes the required state
 for every member.
 
@@ -90,7 +90,7 @@ same generation and immutable manifest reference is idempotent.
 
 The managed upload sequence is:
 
-1. `BeginWeightImport` creates or returns the `IMPORTING` catalog record and
+1. `BeginWeightImport` creates or returns the `IMPORTING` metadata record and
    Store-issued canonical payload group ID.
 2. `WeightStore` writes every payload object into that group.
 3. The immutable `StoredWeightManifest` is committed last into the same group.
@@ -103,7 +103,7 @@ the explicit abort/reconciliation policy.
 
 ## Load and Revision Leases
 
-`load_weight_revision` first resolves the exact catalog identity and acquires a
+`load_weight_revision` first resolves the exact metadata identity and acquires a
 revision lease against the returned metadata generation. It then reads and
 validates the manifest, plans ranges, and executes Store-to-runtime transfers.
 The client renews short leases in the background until all synchronous transfer
@@ -118,7 +118,7 @@ leases; those protect different ownership boundaries.
 ## Residency, Rehydration, and Deletion
 
 `StartWeightResidencyOperation` durably records the operation ID, target,
-fenced catalog generation, and progress. Reconciliation then uses existing
+fenced metadata generation, and progress. Reconciliation then uses existing
 per-object primitives:
 
 - `EVICTING` removes memory replicas only after a readable cold replica exists
@@ -136,11 +136,11 @@ residency or availability.
 ## Recovery and HA Rollout
 
 Catalog metadata, leases, and operation records use durable-before-visible
-OpLog publication. Standby replay stores them in a separate weight-catalog
+OpLog publication. Standby replay stores them in a separate weight-metadata
 namespace rather than encoding them as fake object metadata. Master snapshots
-carry an optional `weight_catalog` section; an older snapshot without the
+carry an optional `weight_metadata` section; an older snapshot without the
 section restores an empty catalog while preserving ordinary KV metadata.
-Derived group indexes are rebuilt from restored catalog records.
+Derived group indexes are rebuilt from restored metadata records.
 
 Clusters using HA plus the etcd batch OpLog fail closed for weight-management
 mutations unless the operator sets

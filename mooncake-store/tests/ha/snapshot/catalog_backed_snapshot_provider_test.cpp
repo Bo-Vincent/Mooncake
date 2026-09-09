@@ -16,7 +16,7 @@
 #include "ha/snapshot/catalog_backed_snapshot_provider.h"
 #include "ha/snapshot/object/backends/local/local_file_snapshot_object_store.h"
 #include "ha/snapshot/snapshot_test_utils.h"
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 
 namespace mooncake::test {
 
@@ -27,9 +27,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-std::vector<uint8_t> AddWeightCatalog(
+std::vector<uint8_t> AddWeightMetadata(
     const std::vector<uint8_t>& metadata,
-    const WeightCatalogSnapshot& weight_catalog) {
+    const WeightMetadataSnapshot& weight_metadata) {
     auto root = msgpack::unpack(reinterpret_cast<const char*>(metadata.data()),
                                 metadata.size());
     const auto& object = root.get();
@@ -41,8 +41,8 @@ std::vector<uint8_t> AddWeightCatalog(
         packer.pack(object.via.map.ptr[i].key);
         packer.pack(object.via.map.ptr[i].val);
     }
-    packer.pack("weight_catalog");
-    const auto encoded = struct_pack::serialize(weight_catalog);
+    packer.pack("weight_metadata");
+    const auto encoded = struct_pack::serialize(weight_metadata);
     packer.pack_bin(encoded.size());
     packer.pack_bin_body(encoded.data(), encoded.size());
     return std::vector<uint8_t>(
@@ -189,7 +189,7 @@ TEST_P(CatalogBackedSnapshotProviderTest, LoadLatestSnapshotRoundTrip) {
               kDefaultTestObjectSize);
 }
 
-TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightCatalogFromMetadata) {
+TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightMetadataFromSnapshot) {
     WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -197,7 +197,7 @@ TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightCatalogFromMetadata) {
         .revision = "step-100",
         .weight_generation = 7,
     };
-    WeightCatalogSnapshot weight_catalog{
+    WeightMetadataSnapshot weight_metadata{
         .metadata = {WeightRevisionMetadata{
             .identity = identity,
             .manifest =
@@ -222,10 +222,10 @@ TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightCatalogFromMetadata) {
         .next_lease_id = 1,
         .next_operation_id = 1,
     };
-    auto metadata = AddWeightCatalog(
+    auto metadata = AddWeightMetadata(
         BuildMetadataPayload(UUID{1, 2}, kDefaultTestObjectKey,
                              kDefaultTestDiskFilePath, kDefaultTestObjectSize),
-        weight_catalog);
+        weight_metadata);
     auto published = mooncake::test::PublishSnapshotPayloadBytes(
         *object_store_, *catalog_store_, descriptor_, std::move(metadata));
     ASSERT_TRUE(published.has_value()) << published.error();
@@ -236,7 +236,7 @@ TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightCatalogFromMetadata) {
     auto snapshot = provider.value()->LoadLatestSnapshot(cluster_id_);
     ASSERT_TRUE(snapshot.has_value()) << toString(snapshot.error());
     ASSERT_TRUE(snapshot->has_value());
-    EXPECT_EQ(weight_catalog, snapshot->value().weight_catalog);
+    EXPECT_EQ(weight_metadata, snapshot->value().weight_metadata);
 }
 
 // The master snapshot writer evolved its per-object metadata layout over time

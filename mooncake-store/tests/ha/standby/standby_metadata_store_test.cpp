@@ -78,7 +78,7 @@ TEST(StandbyMetadataStoreTest, RestoreInsertRejectsDuplicateWithoutOverwrite) {
     EXPECT_EQ(1u, restored->size);
 }
 
-TEST(StandbyMetadataStoreTest, WeightCatalogSnapshotRoundTripsCompleteState) {
+TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -86,7 +86,7 @@ TEST(StandbyMetadataStoreTest, WeightCatalogSnapshotRoundTripsCompleteState) {
         .revision = "step-100",
         .weight_generation = 7,
     };
-    const WeightCatalogSnapshot snapshot{
+    const WeightMetadataSnapshot snapshot{
         .metadata = {WeightRevisionMetadata{
             .identity = identity,
             .manifest =
@@ -132,19 +132,19 @@ TEST(StandbyMetadataStoreTest, WeightCatalogSnapshotRoundTripsCompleteState) {
     };
 
     StandbyMetadataStore store;
-    ASSERT_TRUE(store.RestoreWeightCatalog(snapshot));
-    EXPECT_EQ(snapshot, store.SnapshotWeightCatalog());
+    ASSERT_TRUE(store.RestoreWeightMetadata(snapshot));
+    EXPECT_EQ(snapshot, store.SnapshotWeightMetadata());
 }
 
-TEST(StandbyMetadataStoreTest, RejectsInvalidWeightCatalogWithoutMutation) {
+TEST(StandbyMetadataStoreTest, RejectsInvalidWeightMetadataWithoutMutation) {
     StandbyMetadataStore store;
-    const WeightCatalogSnapshot empty;
-    ASSERT_TRUE(store.RestoreWeightCatalog(empty));
+    const WeightMetadataSnapshot empty;
+    ASSERT_TRUE(store.RestoreWeightMetadata(empty));
 
-    WeightCatalogSnapshot invalid;
+    WeightMetadataSnapshot invalid;
     invalid.next_lease_id = 0;
-    EXPECT_FALSE(store.RestoreWeightCatalog(invalid));
-    EXPECT_EQ(empty, store.SnapshotWeightCatalog());
+    EXPECT_FALSE(store.RestoreWeightMetadata(invalid));
+    EXPECT_EQ(empty, store.SnapshotWeightMetadata());
 }
 
 }  // namespace mooncake::test

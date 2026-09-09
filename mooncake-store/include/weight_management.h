@@ -37,7 +37,7 @@ enum class WeightOperationState : uint8_t {
     REPAIRING = 3,
 };
 
-enum class WeightCatalogError : uint8_t {
+enum class WeightManagementError : uint8_t {
     INVALID_ARGUMENT = 1,
     NOT_FOUND = 2,
     CONFLICT = 3,
@@ -236,9 +236,9 @@ YLT_REFL(DeleteWeightRevisionRequest, identity, expected_metadata_generation);
 std::string ComputeWeightPayloadKeysSha256(
     const std::vector<std::string>& payload_keys);
 std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity);
-std::string MakeWeightRevisionCatalogKey(
+std::string MakeWeightRevisionMetadataKey(
     const WeightRevisionIdentity& identity);
-std::string MakeWeightLeaseCatalogKey(uint64_t lease_id);
+std::string MakeWeightLeaseMetadataKey(uint64_t lease_id);
 
 class WeightValidationResult {
    public:

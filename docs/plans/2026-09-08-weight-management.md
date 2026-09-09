@@ -4,7 +4,7 @@
 
 **Goal:** Promote one complete model-weight revision to a first-class Mooncake Store resource with durable discovery metadata, manifest-backed integrity, revision leases, and logically atomic group lifecycle operations.
 
-**Architecture:** Add a Store Master-owned `WeightCatalog` whose authoritative record is one `WeightRevisionMetadata` per `(tenant, namespace, resource_id, revision, weight_generation)`. The catalog record is persisted through the existing Master snapshot and OpLog HA paths, references one immutable `StoredWeightManifest` object, and never duplicates tensor or fragment contents. The manifest and all referenced weight payload objects remain in the same Store `group_id`; Store object metadata continues to own replica placement, while the Weight Catalog owns discovery, availability, leases, and completion of group-level operations.
+**Architecture:** Add a Store Master-owned `WeightMetadataStore` whose authoritative record is one `WeightRevisionMetadata` per `(tenant, namespace, resource_id, revision, weight_generation)`. The metadata record is persisted through the existing Master snapshot and OpLog HA paths, references one immutable `StoredWeightManifest` object, and never duplicates tensor or fragment contents. The manifest and all referenced weight payload objects remain in the same Store `group_id`; Store object metadata continues to own replica placement, while the Weight Metadata Store owns discovery, availability, leases, and completion of group-level operations.
 
 **Tech Stack:** C++20, Mooncake Store Master/RPC/HA, struct_pack and MessagePack serialization, pybind11, Python 3.10+, `mooncake.reshard.weight.WeightStore`, pytest, GoogleTest.
 
@@ -17,7 +17,7 @@
 One weight revision is the only managed aggregate. A tensor is a child described by the manifest and has no independent readiness, lease, eviction, or metadata record.
 
 ```text
-WeightRevisionMetadata          Store Master WeightCatalog
+WeightRevisionMetadata          Store Master WeightMetadataStore
   -> manifest_key + digest
   -> payload_group_id
   -> lifecycle / residency / operation / leases
@@ -34,14 +34,14 @@ Store ObjectMetadata            existing per-key replica authority
 
 ### 1.2 Metadata location
 
-`WeightRevisionMetadata` lives in an in-memory Store Master `WeightCatalog` and is durable through the same HA mechanisms as other Master authority:
+`WeightRevisionMetadata` lives in an in-memory Store Master `WeightMetadataStore` and is durable through the same HA mechanisms as other Master authority:
 
 - active Master: authoritative sharded/internally locked catalog;
-- OpLog mode: durable-before-visible catalog mutations replicated to standby;
-- snapshot mode: optional `weight_catalog` field in the Master metadata snapshot;
+- OpLog mode: durable-before-visible metadata mutations replicated to standby;
+- snapshot mode: optional `weight_metadata` field in the Master metadata snapshot;
 - no-HA/no-snapshot mode: the same restart durability boundary as current Master object metadata.
 
-Do not store the catalog record inside the weight payload group. The record must remain discoverable while that group is cold, degraded, being deleted, or already absent.
+Do not store the metadata record inside the weight payload group. The record must remain discoverable while that group is cold, degraded, being deleted, or already absent.
 
 ### 1.3 Manifest location
 
@@ -51,7 +51,7 @@ Keep the current manifest storage contract:
 weights/<namespace>/<resource_id>/<revision>/<weight_generation>/manifest
 ```
 
-It remains a hard-pinned `ObjectDataType::METADATA` Store object during import and shares `payload_group_id` with the committed `ObjectDataType::WEIGHT` fragments. The catalog stores only a validated reference and digest.
+It remains a hard-pinned `ObjectDataType::METADATA` Store object during import and shares `payload_group_id` with the committed `ObjectDataType::WEIGHT` fragments. The metadata store stores only a validated reference and digest.
 
 ### 1.4 State model
 
@@ -78,10 +78,10 @@ operation:    NONE | EVICTING | REHYDRATING | REPAIRING
 
 ### 1.6 Required safety invariants
 
-1. A catalog record may reference only one immutable manifest identity.
+1. A metadata record may reference only one immutable manifest identity.
 2. `READY` is published only after payload commit, manifest commit, and exact group membership validation.
 3. `manifest_key`, `manifest_digest`, `payload_group_id`, and payload-key digest become immutable after `READY`.
-4. All catalog mutations require `expected_metadata_generation`; stale writers fail closed.
+4. All metadata mutations require `expected_metadata_generation`; stale writers fail closed.
 5. An active revision lease blocks delete and any operation that would remove its last readable replica.
 6. Generic pressure eviction must not independently evict objects belonging to a managed weight group; it must skip them or delegate to the weight lifecycle path.
 7. A group operation may be physically partial while running, but it remains non-terminal and unavailable for conflicting operations until reconciliation completes.
@@ -116,7 +116,7 @@ struct WeightRevisionMetadata {
 };
 ```
 
-Lease records are stored separately inside the catalog and returned only as an aggregate count/deadline in read APIs. Persist lease IDs, holders, expiry, revision identity, and the metadata generation they fence; do not rely on a mutable count as authority.
+Lease records are stored separately inside the metadata store and returned only as an aggregate count/deadline in read APIs. Persist lease IDs, holders, expiry, revision identity, and the metadata generation they fence; do not rely on a mutable count as authority.
 
 ### 2.2 Store APIs
 
@@ -162,13 +162,13 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 7. Run `ctest --test-dir build -R weight_management_contract_test --output-on-failure` and confirm it passes.
 8. Commit as `feat(store): define weight management contracts` with `Signed-off-by: Vincent Gao <vincentbo@linux.alibaba.com>`.
 
-### Task 2: Add an authoritative in-memory `WeightCatalog`
+### Task 2: Add an authoritative in-memory `WeightMetadataStore`
 
 **Files:**
 
-- Create: `mooncake-store/include/weight_catalog.h`
-- Create: `mooncake-store/src/weight_catalog.cpp`
-- Create: `mooncake-store/tests/weight_catalog_test.cpp`
+- Create: `mooncake-store/include/weight_metadata_store.h`
+- Create: `mooncake-store/src/weight_metadata_store.cpp`
+- Create: `mooncake-store/tests/weight_metadata_store_test.cpp`
 - Modify: `mooncake-store/CMakeLists.txt`
 - Modify: `mooncake-store/tests/CMakeLists.txt`
 
@@ -176,11 +176,11 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 1. Write failing tests for begin/import idempotency, conflicting manifest identity, stale generation, exact-revision lookup, deterministic pagination, lease expiry, and operation exclusion.
 2. Implement a catalog keyed by tenant plus revision identity, with a separate `payload_group_id -> revision identity` reverse index.
-3. Use one documented lock order: catalog lock before no Store metadata-shard lock; never hold the catalog lock across Store I/O, OpLog durability waits, or callbacks.
+3. Use one documented lock order: metadata-store lock before no Store metadata-shard lock; never hold the metadata-store lock across Store I/O, OpLog durability waits, or callbacks.
 4. Make every mutation return a candidate new record without publishing it; the Master layer publishes only after HA durability succeeds.
 5. Make lease expiration idempotent and generation-fenced; a stale lease must not protect a recreated revision.
 6. Run the new tests under repeated create/expire/recreate and concurrent CAS attempts.
-7. Commit as `feat(store): add weight revision catalog`.
+7. Commit as `feat(store): add weight revision metadata store`.
 
 ### Task 3: Integrate import publication with Store group authority
 
@@ -195,14 +195,14 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 1. Add failing tests proving `CommitWeightImport` rejects a missing manifest, wrong object type, wrong group, incomplete payload group, extra orphan payload, mismatched count/bytes, and stale generation.
 2. Add a canonical digest over sorted committed payload keys. Persist only its SHA-256 and count in catalog metadata; do not copy the key list or manifest body.
-3. Implement `BeginWeightImport` so Store allocates/validates the canonical `payload_group_id` and returns the catalog generation consumed by the writer.
-4. Implement `CommitWeightImport` as: snapshot group membership, validate the manifest object and completed payload objects using read-only object metadata, recheck the catalog generation, durably publish `READY`, then return the final record.
+3. Implement `BeginWeightImport` so Store allocates/validates the canonical `payload_group_id` and returns the metadata generation consumed by the writer.
+4. Implement `CommitWeightImport` as: snapshot group membership, validate the manifest object and completed payload objects using read-only object metadata, recheck the metadata generation, durably publish `READY`, then return the final record.
 5. Treat the client-provided manifest SHA-256 as an immutable reference attestation; verify it again when Python reads the manifest. Do not make Master read or understand tensor JSON.
 6. Implement idempotent abort. Abort must not delete a manifest already attached to a `READY` record.
 7. Add a failure test for `manifest committed -> response lost -> CommitWeightImport retry`.
 8. Commit as `feat(store): publish manifest-backed weight revisions`.
 
-### Task 4: Persist catalog mutations through OpLog
+### Task 4: Persist metadata mutations through OpLog
 
 **Files:**
 
@@ -219,13 +219,13 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 **Steps:**
 
 1. Add `WEIGHT_METADATA_UPSERT`, `WEIGHT_METADATA_DELETE`, `WEIGHT_LEASE_UPSERT`, and `WEIGHT_LEASE_DELETE` OpLog types without renumbering existing values.
-2. Write RED tests for checksum/size validation, duplicate replay, future sequence rejection, stale catalog generation, lease replay, and delete tombstones.
-3. Extend standby metadata storage with a separate weight-catalog namespace; never encode catalog entries as fake object metadata.
+2. Write RED tests for checksum/size validation, duplicate replay, future sequence rejection, stale metadata generation, lease replay, and delete tombstones.
+3. Extend standby metadata storage with a separate weight-metadata namespace; never encode metadata entries as fake object metadata.
 4. Serialize the complete post-mutation record so replay is idempotent and does not depend on earlier in-memory state.
-5. Use durable-before-visible publication for every catalog state that authorizes discovery, load, or deletion.
+5. Use durable-before-visible publication for every metadata state that authorizes discovery, load, or deletion.
 6. Add a rollout capability gate: do not enable weight-management mutations until every standby can apply the new OpLog types. An old standby must fail closed, not silently skip entries.
 7. Run OpLog codec/applier tests and a duplicate/reorder replay loop.
-8. Commit as `feat(store): replicate weight catalog through oplog`.
+8. Commit as `feat(store): replicate weight metadata through oplog`.
 
 ### Task 5: Add backward-compatible Master snapshot persistence
 
@@ -239,13 +239,13 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 **Steps:**
 
-1. Add RED round-trip tests covering catalog records, leases, operation records, and group reverse indexes.
-2. Add an optional `weight_catalog` field to the existing Master metadata MessagePack map. Rebuild derived reverse indexes after restore.
-3. Keep old snapshots valid: missing `weight_catalog` means an empty catalog. Reject malformed present fields rather than dropping them.
-4. Ensure failed restore resets catalog state before the next snapshot candidate is attempted.
+1. Add RED round-trip tests covering metadata records, leases, operation records, and group reverse indexes.
+2. Add an optional `weight_metadata` field to the existing Master metadata MessagePack map. Rebuild derived reverse indexes after restore.
+3. Keep old snapshots valid: missing `weight_metadata` means an empty metadata store. Reject malformed present fields rather than dropping them.
+4. Ensure failed restore resets metadata state before the next snapshot candidate is attempted.
 5. Test `snapshot -> restore -> expire lease -> resume EVICTING reconciliation`.
 6. Test promotion from snapshot plus newer catalog OpLog entries.
-7. Commit as `feat(store): snapshot weight catalog state`.
+7. Commit as `feat(store): snapshot weight metadata state`.
 
 ### Task 6: Expose catalog operations through Master RPC and native clients
 
@@ -284,7 +284,7 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 1. Add failing Python tests for enum/record conversion, exact identity round-trip, list pagination, stale generation, and typed error mapping.
 2. Bind the native records and APIs without accepting arbitrary dictionaries or alternate field names.
-3. Release the GIL around RPCs and retain no borrowed Python buffers in native catalog records.
+3. Release the GIL around RPCs and retain no borrowed Python buffers in native metadata records.
 4. Expose immutable Python `WeightRevisionMetadata`, `WeightRevisionIdentity`, and `WeightRevisionLease` types.
 5. Keep tensor and fragment definitions exclusively in `StoredWeightManifest`; assert that management records contain no tensor fields.
 6. Run `pytest -q mooncake-reshard/tests/model_weight_store/test_management_contracts.py`.
@@ -304,11 +304,11 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 **Steps:**
 
-1. Add RED tests for the complete production path: `begin -> payload upload -> manifest commit -> catalog READY -> resolve -> manifest digest check -> plan_load`.
+1. Add RED tests for the complete production path: `begin -> payload upload -> manifest commit -> metadata READY -> resolve -> manifest digest check -> plan_load`.
 2. Change managed snapshot creation to call `BeginWeightImport` and use the Store-issued `payload_group_id` and metadata generation instead of deriving an independent management identity.
 3. Preserve current payload and manifest key layout inside that group.
 4. After current transaction commit returns a `StoredWeightManifest`, call `CommitWeightImport` with `manifest_key`, manifest SHA-256, payload-key digest/count, and logical bytes.
-5. Make commit retryable across both uncertainty windows: Store manifest put and catalog READY publication.
+5. Make commit retryable across both uncertainty windows: Store manifest put and metadata READY publication.
 6. Add `get_weight_revision`, `list_weight_revisions`, and `load_weight_revision` APIs. `load_weight_revision` must acquire a revision lease before reading the manifest and retain it until Store-to-runtime transfer reaches a terminal state.
 7. Verify manifest identity and digest against catalog metadata before planning any tensor range.
 8. Keep legacy direct `load_manifest(manifest_key)` available only as an explicitly unmanaged compatibility path; document that it has no lifecycle guarantee.
@@ -319,8 +319,8 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 **Files:**
 
-- Modify: `mooncake-store/include/weight_catalog.h`
-- Modify: `mooncake-store/src/weight_catalog.cpp`
+- Modify: `mooncake-store/include/weight_metadata_store.h`
+- Modify: `mooncake-store/src/weight_metadata_store.cpp`
 - Modify: `mooncake-store/include/master_service.h`
 - Modify: `mooncake-store/src/master_service.cpp`
 - Modify: `mooncake-reshard/python/mooncake/reshard/weight/_store/load.py`
@@ -348,9 +348,9 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 **Steps:**
 
-1. Add failing tests proving generic `BatchEvict`, tenant quota eviction, NoF eviction, explicit remove, and background cleanup cannot independently remove a member of a managed weight group while its catalog record is `READY`.
-2. Add a managed-group check through the catalog reverse index. Generic eviction skips managed groups; only a weight operation may change their residency.
-3. Implement `StartWeightResidencyOperation` as a durable operation record with target residency, operation ID, cursor/progress, and expected catalog generation.
+1. Add failing tests proving generic `BatchEvict`, tenant quota eviction, NoF eviction, explicit remove, and background cleanup cannot independently remove a member of a managed weight group while its metadata record is `READY`.
+2. Add a managed-group check through the metadata store reverse index. Generic eviction skips managed groups; only a weight operation may change their residency.
+3. Implement `StartWeightResidencyOperation` as a durable operation record with target residency, operation ID, cursor/progress, and expected metadata generation.
 4. Reuse existing group membership and per-object replica primitives, but run them under the weight operation state machine. Never claim physical atomicity.
 5. After each pass, verify every required member. Publish terminal residency only when all members satisfy the target.
 6. If a member is busy, pinned unexpectedly, missing, or fails persistence, retain the operation and report `IN_PROGRESS`/`DEGRADED`; retry from observed state.
@@ -388,8 +388,8 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 **Steps:**
 
 1. Run an exact-head native Store E2E covering import, READY discovery, lease-protected load, cold residency transition, rehydrate, and delete.
-2. Kill/promote the active Master after each durable boundary and verify the promoted node returns the same catalog generation and operation state.
-3. Verify an older snapshot without `weight_catalog` restores with an empty catalog and existing KV objects remain accessible.
+2. Kill/promote the active Master after each durable boundary and verify the promoted node returns the same metadata generation and operation state.
+3. Verify an older snapshot without `weight_metadata` restores with an empty metadata store and existing KV objects remain accessible.
 4. Verify an unsupported standby prevents feature enablement before any new OpLog type is emitted.
 5. Verify unmanaged ordinary Store objects retain their current eviction and removal behavior.
 6. Run:
@@ -420,10 +420,10 @@ Do not add `active_revision` or traffic-routing APIs to Store in this change.
 
 **Steps:**
 
-1. Document the three authorities: Weight Catalog, immutable manifest, and per-object Store metadata.
+1. Document the three authorities: Weight Metadata Store, immutable manifest, and per-object Store metadata.
 2. Document exact state meanings, lease behavior, group-operation visibility, recovery, and the boundary with SGLang/Slime activation.
 3. State explicitly that tensor-level management metadata is not introduced.
-4. Document the migration from unmanaged `load_manifest(manifest_key)` to catalog-based exact-revision lookup.
+4. Document the migration from unmanaged `load_manifest(manifest_key)` to metadata-based exact-revision lookup.
 5. Build documentation with `cd docs && make html` and inspect the generated Weight Management page and navigation.
 6. Commit as `docs(store): document weight management architecture`.
 
@@ -445,7 +445,7 @@ git var GIT_COMMITTER_IDENT
 Each semantic commit must build and pass its own focused tests without relying on a later commit. Before handoff, review the complete stack against the original base and record:
 
 - exact base and head SHA;
-- manifest/catalog/group ownership matrix;
+- manifest/metadata/group ownership matrix;
 - wrong-accept and wrong-reject tests for every state transition;
 - snapshot and OpLog compatibility results;
 - current diff comment-language scan;
@@ -456,11 +456,11 @@ Each semantic commit must build and pass its own focused tests without relying o
 The feature is complete only when all of the following are demonstrated:
 
 1. A caller can discover an exact READY weight revision without knowing `manifest_key`.
-2. The returned catalog record points to one immutable manifest with a verified identity and SHA-256.
-3. The manifest resolves every tensor range to Store object keys; no tensor-level metadata catalog exists.
+2. The returned metadata record points to one immutable manifest with a verified identity and SHA-256.
+3. The manifest resolves every tensor range to Store object keys; no tensor-level metadata store exists.
 4. A live revision lease prevents unsafe reclamation.
 5. No generic eviction path can independently evict a managed weight-group member.
 6. Partial residency/delete work is represented as an unfinished operation and never as a terminal state.
-7. Snapshot restore and OpLog promotion preserve catalog generations, leases, and resumable operations.
+7. Snapshot restore and OpLog promotion preserve metadata generations, leases, and resumable operations.
 8. Existing unmanaged KV objects and their eviction behavior do not regress.
 9. Current WeightStore upload/load tests, native Store tests, Pyright, pre-commit, and docs build pass.

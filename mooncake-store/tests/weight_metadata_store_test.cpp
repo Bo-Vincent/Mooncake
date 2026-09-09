@@ -4,7 +4,7 @@
 #include <thread>
 #include <vector>
 
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 
 namespace mooncake {
 namespace {
@@ -41,19 +41,19 @@ WeightManifestReference Manifest() {
     };
 }
 
-WeightRevisionMetadata PublishBegin(WeightCatalog& catalog,
+WeightRevisionMetadata PublishBegin(WeightMetadataStore& metadata_store,
                                     const BeginWeightImportRequest& request,
                                     uint64_t now_ms = 100) {
-    auto candidate = catalog.PrepareBeginImport(request, now_ms);
+    auto candidate = metadata_store.PrepareBeginImport(request, now_ms);
     EXPECT_TRUE(candidate.has_value());
-    auto published = catalog.Publish(*candidate);
+    auto published = metadata_store.Publish(*candidate);
     EXPECT_TRUE(published.has_value());
     return *published;
 }
 
-WeightRevisionMetadata PublishReady(WeightCatalog& catalog) {
-    auto importing = PublishBegin(catalog, BeginRequest());
-    auto candidate = catalog.PrepareCommitImport(
+WeightRevisionMetadata PublishReady(WeightMetadataStore& metadata_store) {
+    auto importing = PublishBegin(metadata_store, BeginRequest());
+    auto candidate = metadata_store.PrepareCommitImport(
         CommitWeightImportRequest{
             .identity = importing.identity,
             .expected_metadata_generation = importing.metadata_generation,
@@ -61,101 +61,101 @@ WeightRevisionMetadata PublishReady(WeightCatalog& catalog) {
         },
         200);
     EXPECT_TRUE(candidate.has_value());
-    auto published = catalog.Publish(*candidate);
+    auto published = metadata_store.Publish(*candidate);
     EXPECT_TRUE(published.has_value());
     return *published;
 }
 
-TEST(WeightCatalogTest, BeginIsIdempotentAndRejectsConflicts) {
-    WeightCatalog catalog;
-    auto first = PublishBegin(catalog, BeginRequest());
+TEST(WeightMetadataStoreTest, BeginIsIdempotentAndRejectsConflicts) {
+    WeightMetadataStore metadata_store;
+    auto first = PublishBegin(metadata_store, BeginRequest());
     EXPECT_EQ(WeightAvailabilityState::IMPORTING, first.availability);
     EXPECT_EQ(1, first.metadata_generation);
 
-    auto retry = catalog.PrepareBeginImport(BeginRequest(), 150);
+    auto retry = metadata_store.PrepareBeginImport(BeginRequest(), 150);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
-    auto retried = catalog.Publish(*retry);
+    auto retried = metadata_store.Publish(*retry);
     ASSERT_TRUE(retried.has_value());
     EXPECT_EQ(first, *retried);
 
     auto conflicting = BeginRequest();
     conflicting.payload_group_id = "different-group";
-    auto rejected = catalog.PrepareBeginImport(conflicting, 160);
+    auto rejected = metadata_store.PrepareBeginImport(conflicting, 160);
     ASSERT_FALSE(rejected.has_value());
-    EXPECT_EQ(WeightCatalogError::CONFLICT, rejected.error());
+    EXPECT_EQ(WeightManagementError::CONFLICT, rejected.error());
 }
 
-TEST(WeightCatalogTest, CommitUsesCasAndIsRetryableAfterResponseLoss) {
-    WeightCatalog catalog;
-    auto importing = PublishBegin(catalog, BeginRequest());
+TEST(WeightMetadataStoreTest, CommitUsesCasAndIsRetryableAfterResponseLoss) {
+    WeightMetadataStore metadata_store;
+    auto importing = PublishBegin(metadata_store, BeginRequest());
     auto request = CommitWeightImportRequest{
         .identity = importing.identity,
         .expected_metadata_generation = importing.metadata_generation,
         .manifest = Manifest(),
     };
-    auto candidate = catalog.PrepareCommitImport(request, 200);
+    auto candidate = metadata_store.PrepareCommitImport(request, 200);
     ASSERT_TRUE(candidate.has_value());
 
     auto stale = request;
     stale.expected_metadata_generation = importing.metadata_generation + 1;
-    auto rejected = catalog.PrepareCommitImport(stale, 200);
+    auto rejected = metadata_store.PrepareCommitImport(stale, 200);
     ASSERT_FALSE(rejected.has_value());
-    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, rejected.error());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, rejected.error());
 
-    auto published = catalog.Publish(*candidate);
+    auto published = metadata_store.Publish(*candidate);
     ASSERT_TRUE(published.has_value());
     EXPECT_EQ(WeightAvailabilityState::READY, published->availability);
     EXPECT_EQ(2, published->metadata_generation);
 
-    auto response_lost_retry = catalog.PrepareCommitImport(request, 300);
+    auto response_lost_retry = metadata_store.PrepareCommitImport(request, 300);
     ASSERT_TRUE(response_lost_retry.has_value());
     EXPECT_TRUE(response_lost_retry->no_op);
-    auto retry_result = catalog.Publish(*response_lost_retry);
+    auto retry_result = metadata_store.Publish(*response_lost_retry);
     ASSERT_TRUE(retry_result.has_value());
     EXPECT_EQ(*published, *retry_result);
 
     auto unrelated_generation = request;
     unrelated_generation.expected_metadata_generation = 99;
     auto wrong_retry =
-        catalog.PrepareCommitImport(unrelated_generation, 301);
+        metadata_store.PrepareCommitImport(unrelated_generation, 301);
     ASSERT_FALSE(wrong_retry.has_value());
-    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, wrong_retry.error());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, wrong_retry.error());
 }
 
-TEST(WeightCatalogTest, AbortRetryRequiresAdjacentGeneration) {
-    WeightCatalog catalog;
-    auto importing = PublishBegin(catalog, BeginRequest());
+TEST(WeightMetadataStoreTest, AbortRetryRequiresAdjacentGeneration) {
+    WeightMetadataStore metadata_store;
+    auto importing = PublishBegin(metadata_store, BeginRequest());
     const AbortWeightImportRequest request{
         .identity = importing.identity,
         .expected_metadata_generation = importing.metadata_generation,
     };
-    auto candidate = catalog.PrepareAbortImport(request, 200);
+    auto candidate = metadata_store.PrepareAbortImport(request, 200);
     ASSERT_TRUE(candidate.has_value());
-    ASSERT_TRUE(catalog.Publish(*candidate).has_value());
+    ASSERT_TRUE(metadata_store.Publish(*candidate).has_value());
 
-    auto retry = catalog.PrepareAbortImport(request, 201);
+    auto retry = metadata_store.PrepareAbortImport(request, 201);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
 
     auto unrelated_generation = request;
     unrelated_generation.expected_metadata_generation = 99;
-    auto rejected = catalog.PrepareAbortImport(unrelated_generation, 202);
+    auto rejected = metadata_store.PrepareAbortImport(unrelated_generation, 202);
     ASSERT_FALSE(rejected.has_value());
-    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, rejected.error());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, rejected.error());
 }
 
-TEST(WeightCatalogTest, LookupAndPaginationAreExactAndDeterministic) {
-    WeightCatalog catalog;
+TEST(WeightMetadataStoreTest, LookupAndPaginationAreExactAndDeterministic) {
+    WeightMetadataStore metadata_store;
     for (const auto& [revision, generation] :
          std::vector<std::pair<std::string, uint64_t>>{
              {"step-20", 2}, {"step-10", 3}, {"step-10", 1}}) {
         auto request = BeginRequest(Identity(revision, generation));
         request.payload_group_id = revision + "-" + std::to_string(generation);
-        PublishBegin(catalog, request);
+        PublishBegin(metadata_store, request);
     }
 
-    auto exact = catalog.Get(Identity("step-10", 3), 200);
+    auto exact = metadata_store.Get(Identity("step-10", 3), 200);
     ASSERT_TRUE(exact.has_value());
     EXPECT_EQ(3, exact->metadata.identity.weight_generation);
 
@@ -166,7 +166,7 @@ TEST(WeightCatalogTest, LookupAndPaginationAreExactAndDeterministic) {
         .page_token = {},
         .limit = 2,
     };
-    auto first = catalog.List(request, 200);
+    auto first = metadata_store.List(request, 200);
     ASSERT_TRUE(first.has_value());
     ASSERT_EQ(2, first->revisions.size());
     EXPECT_EQ("step-10", first->revisions[0].metadata.identity.revision);
@@ -176,17 +176,17 @@ TEST(WeightCatalogTest, LookupAndPaginationAreExactAndDeterministic) {
     ASSERT_FALSE(first->next_page_token.empty());
 
     request.page_token = first->next_page_token;
-    auto second = catalog.List(request, 200);
+    auto second = metadata_store.List(request, 200);
     ASSERT_TRUE(second.has_value());
     ASSERT_EQ(1, second->revisions.size());
     EXPECT_EQ("step-20", second->revisions[0].metadata.identity.revision);
     EXPECT_TRUE(second->next_page_token.empty());
 }
 
-TEST(WeightCatalogTest, LeaseExpiryIsGenerationFencedAndIdempotent) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog);
-    auto candidate = catalog.PrepareAcquireLease(
+TEST(WeightMetadataStoreTest, LeaseExpiryIsGenerationFencedAndIdempotent) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto candidate = metadata_store.PrepareAcquireLease(
         AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -195,25 +195,25 @@ TEST(WeightCatalogTest, LeaseExpiryIsGenerationFencedAndIdempotent) {
         },
         300);
     ASSERT_TRUE(candidate.has_value());
-    auto lease = catalog.Publish(*candidate);
+    auto lease = metadata_store.Publish(*candidate);
     ASSERT_TRUE(lease.has_value());
     EXPECT_TRUE(
-        catalog.HasActiveLease(ready.identity, ready.metadata_generation, 349));
-    EXPECT_TRUE(catalog.HasActiveLease(ready.identity,
+        metadata_store.HasActiveLease(ready.identity, ready.metadata_generation, 349));
+    EXPECT_TRUE(metadata_store.HasActiveLease(ready.identity,
                                        ready.metadata_generation + 1, 349));
 
-    auto expired = catalog.PrepareExpireLeases(350);
+    auto expired = metadata_store.PrepareExpireLeases(350);
     ASSERT_EQ(1, expired.size());
-    ASSERT_TRUE(catalog.Publish(expired.front()).has_value());
+    ASSERT_TRUE(metadata_store.Publish(expired.front()).has_value());
     EXPECT_FALSE(
-        catalog.HasActiveLease(ready.identity, ready.metadata_generation, 350));
-    EXPECT_TRUE(catalog.PrepareExpireLeases(350).empty());
+        metadata_store.HasActiveLease(ready.identity, ready.metadata_generation, 350));
+    EXPECT_TRUE(metadata_store.PrepareExpireLeases(350).empty());
 }
 
-TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog);
-    auto first = catalog.PrepareStartOperation(
+TEST(WeightMetadataStoreTest, ExcludesConcurrentResidencyOperations) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto first = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -221,11 +221,11 @@ TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
         },
         300);
     ASSERT_TRUE(first.has_value());
-    auto operation = catalog.Publish(*first);
+    auto operation = metadata_store.Publish(*first);
     ASSERT_TRUE(operation.has_value());
     EXPECT_EQ(WeightOperationState::EVICTING, operation->operation);
 
-    auto unrelated_generation = catalog.PrepareStartOperation(
+    auto unrelated_generation = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = ready.identity,
             .expected_metadata_generation = 99,
@@ -233,10 +233,10 @@ TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
         },
         301);
     ASSERT_FALSE(unrelated_generation.has_value());
-    EXPECT_EQ(WeightCatalogError::STALE_GENERATION,
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION,
               unrelated_generation.error());
 
-    auto conflicting = catalog.PrepareStartOperation(
+    auto conflicting = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation + 1,
@@ -244,13 +244,13 @@ TEST(WeightCatalogTest, ExcludesConcurrentResidencyOperations) {
         },
         301);
     ASSERT_FALSE(conflicting.has_value());
-    EXPECT_EQ(WeightCatalogError::BUSY, conflicting.error());
+    EXPECT_EQ(WeightManagementError::BUSY, conflicting.error());
 }
 
-TEST(WeightCatalogTest, UnchangedOperationProgressIsIdempotent) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog);
-    auto started = catalog.PrepareStartOperation(
+TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto started = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -258,30 +258,30 @@ TEST(WeightCatalogTest, UnchangedOperationProgressIsIdempotent) {
         },
         300);
     ASSERT_TRUE(started.has_value());
-    auto operation = catalog.Publish(*started);
+    auto operation = metadata_store.Publish(*started);
     ASSERT_TRUE(operation.has_value());
 
-    auto progress = catalog.PrepareUpdateOperationProgress(
+    auto progress = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 0, 4, {}, 400);
     ASSERT_TRUE(progress.has_value());
     EXPECT_FALSE(progress->no_op);
-    auto published = catalog.Publish(*progress);
+    auto published = metadata_store.Publish(*progress);
     ASSERT_TRUE(published.has_value());
     EXPECT_EQ(400, published->updated_at_ms);
 
-    auto retry = catalog.PrepareUpdateOperationProgress(
+    auto retry = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 0, 4, {}, 500);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
-    auto retried = catalog.Publish(*retry);
+    auto retried = metadata_store.Publish(*retry);
     ASSERT_TRUE(retried.has_value());
     EXPECT_EQ(400, retried->updated_at_ms);
 }
 
-TEST(WeightCatalogTest, ActiveLeaseBlocksResidencyAndDelete) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog);
-    auto lease_mutation = catalog.PrepareAcquireLease(
+TEST(WeightMetadataStoreTest, ActiveLeaseBlocksResidencyAndDelete) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto lease_mutation = metadata_store.PrepareAcquireLease(
         AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -290,9 +290,9 @@ TEST(WeightCatalogTest, ActiveLeaseBlocksResidencyAndDelete) {
         },
         300);
     ASSERT_TRUE(lease_mutation.has_value());
-    ASSERT_TRUE(catalog.Publish(*lease_mutation).has_value());
+    ASSERT_TRUE(metadata_store.Publish(*lease_mutation).has_value());
 
-    auto operation = catalog.PrepareStartOperation(
+    auto operation = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -300,22 +300,22 @@ TEST(WeightCatalogTest, ActiveLeaseBlocksResidencyAndDelete) {
         },
         301);
     ASSERT_FALSE(operation.has_value());
-    EXPECT_EQ(WeightCatalogError::BUSY, operation.error());
+    EXPECT_EQ(WeightManagementError::BUSY, operation.error());
 
-    auto deletion = catalog.PrepareDelete(
+    auto deletion = metadata_store.PrepareDelete(
         DeleteWeightRevisionRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
         },
         301);
     ASSERT_FALSE(deletion.has_value());
-    EXPECT_EQ(WeightCatalogError::BUSY, deletion.error());
+    EXPECT_EQ(WeightManagementError::BUSY, deletion.error());
 }
 
-TEST(WeightCatalogTest, CompletesResidencyOperationAndRetainsRecord) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog);
-    auto start = catalog.PrepareStartOperation(
+TEST(WeightMetadataStoreTest, CompletesResidencyOperationAndRetainsRecord) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto start = metadata_store.PrepareStartOperation(
         StartWeightResidencyOperationRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -323,17 +323,17 @@ TEST(WeightCatalogTest, CompletesResidencyOperationAndRetainsRecord) {
         },
         300);
     ASSERT_TRUE(start.has_value());
-    auto operation = catalog.Publish(*start);
+    auto operation = metadata_store.Publish(*start);
     ASSERT_TRUE(operation.has_value());
 
-    auto finish = catalog.PrepareFinishOperation(
+    auto finish = metadata_store.PrepareFinishOperation(
         operation->operation_id, WeightResidencyState::COLD, 400);
     ASSERT_TRUE(finish.has_value());
-    auto completed = catalog.Publish(*finish);
+    auto completed = metadata_store.Publish(*finish);
     ASSERT_TRUE(completed.has_value());
     EXPECT_EQ("completed", completed->message);
 
-    auto view = catalog.Get(ready.identity, 400);
+    auto view = metadata_store.Get(ready.identity, 400);
     ASSERT_TRUE(view.has_value());
     EXPECT_EQ(WeightOperationState::NONE, view->metadata.operation);
     EXPECT_EQ(0, view->metadata.operation_id);
@@ -341,15 +341,15 @@ TEST(WeightCatalogTest, CompletesResidencyOperationAndRetainsRecord) {
     EXPECT_EQ(ready.metadata_generation + 2,
               view->metadata.metadata_generation);
     EXPECT_EQ(*completed,
-              *catalog.QueryOperation(completed->operation_id));
+              *metadata_store.QueryOperation(completed->operation_id));
 }
 
-TEST(WeightCatalogTest, RestoresMultipleCompletedOperations) {
-    WeightCatalog catalog;
-    auto metadata = PublishReady(catalog);
+TEST(WeightMetadataStoreTest, RestoresMultipleCompletedOperations) {
+    WeightMetadataStore metadata_store;
+    auto metadata = PublishReady(metadata_store);
     for (const auto target :
          {WeightResidencyState::COLD, WeightResidencyState::HOT}) {
-        auto start = catalog.PrepareStartOperation(
+        auto start = metadata_store.PrepareStartOperation(
             StartWeightResidencyOperationRequest{
                 .identity = metadata.identity,
                 .expected_metadata_generation =
@@ -358,71 +358,71 @@ TEST(WeightCatalogTest, RestoresMultipleCompletedOperations) {
             },
             300 + metadata.metadata_generation);
         ASSERT_TRUE(start.has_value());
-        auto operation = catalog.Publish(*start);
+        auto operation = metadata_store.Publish(*start);
         ASSERT_TRUE(operation.has_value());
-        auto finish = catalog.PrepareFinishOperation(
+        auto finish = metadata_store.PrepareFinishOperation(
             operation->operation_id, target,
             400 + metadata.metadata_generation);
         ASSERT_TRUE(finish.has_value());
-        ASSERT_TRUE(catalog.Publish(*finish).has_value());
-        auto view = catalog.Get(metadata.identity, 500);
+        ASSERT_TRUE(metadata_store.Publish(*finish).has_value());
+        auto view = metadata_store.Get(metadata.identity, 500);
         ASSERT_TRUE(view.has_value());
         metadata = view->metadata;
     }
 
-    WeightCatalog restored;
-    ASSERT_TRUE(restored.RestoreSnapshot(catalog.ExportSnapshot()).has_value());
+    WeightMetadataStore restored;
+    ASSERT_TRUE(restored.RestoreSnapshot(metadata_store.ExportSnapshot()).has_value());
     EXPECT_EQ(metadata, restored.Get(metadata.identity, 500)->metadata);
     EXPECT_EQ("completed", restored.QueryOperation(1)->message);
     EXPECT_EQ("completed", restored.QueryOperation(2)->message);
 }
 
-TEST(WeightCatalogTest, DeleteRetainsAbsentTombstone) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog);
-    auto start = catalog.PrepareDelete(
+TEST(WeightMetadataStoreTest, DeleteRetainsAbsentTombstone) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto start = metadata_store.PrepareDelete(
         DeleteWeightRevisionRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
         },
         300);
     ASSERT_TRUE(start.has_value());
-    auto deleting = catalog.Publish(*start);
+    auto deleting = metadata_store.Publish(*start);
     ASSERT_TRUE(deleting.has_value());
     EXPECT_EQ(WeightAvailabilityState::DELETING, deleting->availability);
 
-    auto finish = catalog.PrepareFinishDelete(
+    auto finish = metadata_store.PrepareFinishDelete(
         ready.identity, deleting->metadata_generation, 400);
     ASSERT_TRUE(finish.has_value());
-    auto deleted = catalog.Publish(*finish);
+    auto deleted = metadata_store.Publish(*finish);
     ASSERT_TRUE(deleted.has_value());
     EXPECT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
     EXPECT_EQ(WeightResidencyState::ABSENT, deleted->residency);
-    EXPECT_TRUE(catalog.IsManagedGroup(deleted->manifest.payload_group_id));
+    EXPECT_TRUE(metadata_store.IsManagedGroup(deleted->manifest.payload_group_id));
 }
 
-TEST(WeightCatalogTest, OnlyOneConcurrentCasCandidatePublishes) {
-    WeightCatalog catalog;
-    auto importing = PublishBegin(catalog, BeginRequest());
+TEST(WeightMetadataStoreTest, OnlyOneConcurrentCasCandidatePublishes) {
+    WeightMetadataStore metadata_store;
+    auto importing = PublishBegin(metadata_store, BeginRequest());
     auto request = CommitWeightImportRequest{
         .identity = importing.identity,
         .expected_metadata_generation = importing.metadata_generation,
         .manifest = Manifest(),
     };
-    auto first = catalog.PrepareCommitImport(request, 200);
-    auto second = catalog.PrepareCommitImport(request, 201);
+    auto first = metadata_store.PrepareCommitImport(request, 200);
+    auto second = metadata_store.PrepareCommitImport(request, 201);
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
 
     std::atomic<int> successes{0};
     std::vector<std::thread> threads;
     threads.emplace_back([&] {
-        if (catalog.Publish(*first).has_value()) {
+        if (metadata_store.Publish(*first).has_value()) {
             ++successes;
         }
     });
     threads.emplace_back([&] {
-        if (catalog.Publish(*second).has_value()) {
+        if (metadata_store.Publish(*second).has_value()) {
             ++successes;
         }
     });

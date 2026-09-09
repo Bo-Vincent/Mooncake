@@ -26,7 +26,7 @@ bool SameImmutableWeightReference(const WeightRevisionMetadata& lhs,
 bool MatchesWeightTenantAndKey(const OpLogEntry& entry,
                                const WeightRevisionIdentity& identity) {
     return NormalizeTenantId(entry.tenant_id) == identity.tenant_id &&
-           entry.object_key == MakeWeightRevisionCatalogKey(identity);
+           entry.object_key == MakeWeightRevisionMetadataKey(identity);
 }
 
 }  // namespace
@@ -357,7 +357,7 @@ bool OpLogApplier::ApplyWeightLeaseUpsert(const OpLogEntry& entry) {
         !IsValidWeightComponent(next.holder) || next.expires_at_ms == 0 ||
         next.fenced_metadata_generation == 0 ||
         NormalizeTenantId(entry.tenant_id) != next.identity.tenant_id ||
-        entry.object_key != MakeWeightLeaseCatalogKey(next.lease_id)) {
+        entry.object_key != MakeWeightLeaseMetadataKey(next.lease_id)) {
         LOG(ERROR) << "OpLogApplier: invalid weight lease upsert, key="
                    << entry.object_key << ", sequence_id=" << entry.sequence_id;
         return false;
@@ -409,7 +409,7 @@ bool OpLogApplier::ApplyWeightLeaseDelete(const OpLogEntry& entry) {
         !ValidateWeightRevisionIdentity(deletion.identity).ok() ||
         deletion.fenced_metadata_generation == 0 ||
         NormalizeTenantId(entry.tenant_id) != deletion.identity.tenant_id ||
-        entry.object_key != MakeWeightLeaseCatalogKey(deletion.lease_id)) {
+        entry.object_key != MakeWeightLeaseMetadataKey(deletion.lease_id)) {
         LOG(ERROR) << "OpLogApplier: invalid weight lease delete, key="
                    << entry.object_key << ", sequence_id=" << entry.sequence_id;
         return false;

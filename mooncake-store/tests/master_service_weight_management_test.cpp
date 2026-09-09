@@ -129,7 +129,7 @@ TEST_F(MasterServiceWeightManagementTest, RejectsWrongManifestType) {
     auto result = service.CommitWeightImport(
         CommitRequest(importing, {"payload-a"}, 1024));
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(WeightCatalogError::CONFLICT, result.error());
+    EXPECT_EQ(WeightManagementError::CONFLICT, result.error());
 }
 
 TEST_F(MasterServiceWeightManagementTest, RejectsManifestInWrongGroup) {
@@ -223,7 +223,7 @@ TEST_F(MasterServiceWeightManagementTest, RejectsStaleGeneration) {
     ++request.expected_metadata_generation;
     auto result = service.CommitWeightImport(request);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, result.error());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, result.error());
 }
 
 TEST_F(MasterServiceWeightManagementTest,

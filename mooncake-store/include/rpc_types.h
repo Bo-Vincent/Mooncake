@@ -13,7 +13,7 @@ namespace mooncake {
 
 template <typename T>
 using WeightRpcResult =
-    tl::expected<tl::expected<T, WeightCatalogError>, ErrorCode>;
+    tl::expected<tl::expected<T, WeightManagementError>, ErrorCode>;
 
 struct ObjectMeta {
     std::string key;

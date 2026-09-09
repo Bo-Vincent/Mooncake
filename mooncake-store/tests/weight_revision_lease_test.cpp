@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "weight_catalog.h"
+#include "weight_metadata_store.h"
 
 namespace mooncake::test {
 namespace {
@@ -17,10 +17,10 @@ WeightRevisionIdentity Identity() {
     };
 }
 
-WeightRevisionMetadata PublishReady(WeightCatalog& catalog, uint64_t now_ms) {
+WeightRevisionMetadata PublishReady(WeightMetadataStore& metadata_store, uint64_t now_ms) {
     const auto identity = Identity();
     const auto group_id = MakeWeightPayloadGroupId(identity);
-    auto begin = catalog.PrepareBeginImport(
+    auto begin = metadata_store.PrepareBeginImport(
         BeginWeightImportRequest{
             .identity = identity,
             .payload_group_id = group_id,
@@ -29,8 +29,8 @@ WeightRevisionMetadata PublishReady(WeightCatalog& catalog, uint64_t now_ms) {
         },
         now_ms);
     EXPECT_TRUE(begin.has_value());
-    EXPECT_TRUE(catalog.Publish(*begin).has_value());
-    auto commit = catalog.PrepareCommitImport(
+    EXPECT_TRUE(metadata_store.Publish(*begin).has_value());
+    auto commit = metadata_store.PrepareCommitImport(
         CommitWeightImportRequest{
             .identity = identity,
             .expected_metadata_generation = 1,
@@ -47,14 +47,14 @@ WeightRevisionMetadata PublishReady(WeightCatalog& catalog, uint64_t now_ms) {
         },
         now_ms + 1);
     EXPECT_TRUE(commit.has_value());
-    auto ready = catalog.Publish(*commit);
+    auto ready = metadata_store.Publish(*commit);
     EXPECT_TRUE(ready.has_value());
     return ready.value();
 }
 
 TEST(WeightRevisionLeaseTest, AcquireRetryRenewAndReleaseAreIdempotent) {
-    WeightCatalog catalog;
-    const auto ready = PublishReady(catalog, 100);
+    WeightMetadataStore metadata_store;
+    const auto ready = PublishReady(metadata_store, 100);
     const AcquireWeightRevisionLeaseRequest request{
         .identity = ready.identity,
         .expected_metadata_generation = ready.metadata_generation,
@@ -62,44 +62,44 @@ TEST(WeightRevisionLeaseTest, AcquireRetryRenewAndReleaseAreIdempotent) {
         .ttl_ms = 1000,
     };
 
-    auto acquire = catalog.PrepareAcquireLease(request, 200);
+    auto acquire = metadata_store.PrepareAcquireLease(request, 200);
     ASSERT_TRUE(acquire.has_value());
-    auto lease = catalog.Publish(*acquire);
+    auto lease = metadata_store.Publish(*acquire);
     ASSERT_TRUE(lease.has_value());
 
-    auto retry = catalog.PrepareAcquireLease(request, 201);
+    auto retry = metadata_store.PrepareAcquireLease(request, 201);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
-    auto retried_lease = catalog.Publish(*retry);
+    auto retried_lease = metadata_store.Publish(*retry);
     ASSERT_TRUE(retried_lease.has_value());
     EXPECT_EQ(*lease, *retried_lease);
 
-    auto renew = catalog.PrepareRenewLease(
+    auto renew = metadata_store.PrepareRenewLease(
         RenewWeightRevisionLeaseRequest{
             .lease_id = lease->lease_id,
             .ttl_ms = 2000,
         },
         300);
     ASSERT_TRUE(renew.has_value());
-    auto renewed = catalog.Publish(*renew);
+    auto renewed = metadata_store.Publish(*renew);
     ASSERT_TRUE(renewed.has_value());
     EXPECT_EQ(2300u, renewed->expires_at_ms);
 
-    auto release = catalog.PrepareReleaseLease(
+    auto release = metadata_store.PrepareReleaseLease(
         ReleaseWeightRevisionLeaseRequest{.lease_id = lease->lease_id});
     ASSERT_TRUE(release.has_value());
-    ASSERT_TRUE(catalog.Publish(*release).has_value());
-    auto release_retry = catalog.PrepareReleaseLease(
+    ASSERT_TRUE(metadata_store.Publish(*release).has_value());
+    auto release_retry = metadata_store.PrepareReleaseLease(
         ReleaseWeightRevisionLeaseRequest{.lease_id = lease->lease_id});
     ASSERT_TRUE(release_retry.has_value());
     EXPECT_TRUE(release_retry->no_op);
-    EXPECT_TRUE(catalog.Publish(*release_retry).has_value());
+    EXPECT_TRUE(metadata_store.Publish(*release_retry).has_value());
 }
 
 TEST(WeightRevisionLeaseTest, RejectsStaleGenerationAndExpiredRenewal) {
-    WeightCatalog catalog;
-    const auto ready = PublishReady(catalog, 100);
-    auto stale = catalog.PrepareAcquireLease(
+    WeightMetadataStore metadata_store;
+    const auto ready = PublishReady(metadata_store, 100);
+    auto stale = metadata_store.PrepareAcquireLease(
         AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
             .expected_metadata_generation =
@@ -109,9 +109,9 @@ TEST(WeightRevisionLeaseTest, RejectsStaleGenerationAndExpiredRenewal) {
         },
         200);
     ASSERT_FALSE(stale.has_value());
-    EXPECT_EQ(WeightCatalogError::STALE_GENERATION, stale.error());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, stale.error());
 
-    auto acquire = catalog.PrepareAcquireLease(
+    auto acquire = metadata_store.PrepareAcquireLease(
         AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
@@ -120,22 +120,22 @@ TEST(WeightRevisionLeaseTest, RejectsStaleGenerationAndExpiredRenewal) {
         },
         200);
     ASSERT_TRUE(acquire.has_value());
-    auto lease = catalog.Publish(*acquire);
+    auto lease = metadata_store.Publish(*acquire);
     ASSERT_TRUE(lease.has_value());
-    auto expired = catalog.PrepareRenewLease(
+    auto expired = metadata_store.PrepareRenewLease(
         RenewWeightRevisionLeaseRequest{
             .lease_id = lease->lease_id,
             .ttl_ms = 100,
         },
         300);
     ASSERT_FALSE(expired.has_value());
-    EXPECT_EQ(WeightCatalogError::LEASE_EXPIRED, expired.error());
+    EXPECT_EQ(WeightManagementError::LEASE_EXPIRED, expired.error());
 }
 
 TEST(WeightRevisionLeaseTest, OlderFenceProtectsAdvancedMetadataGeneration) {
-    WeightCatalog catalog;
-    auto ready = PublishReady(catalog, 100);
-    auto snapshot = catalog.ExportSnapshot();
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store, 100);
+    auto snapshot = metadata_store.ExportSnapshot();
     snapshot.metadata.front().metadata_generation = 3;
     snapshot.metadata.front().updated_at_ms = 300;
     snapshot.leases.push_back(WeightRevisionLease{
@@ -146,12 +146,12 @@ TEST(WeightRevisionLeaseTest, OlderFenceProtectsAdvancedMetadataGeneration) {
         .fenced_metadata_generation = 2,
     });
     snapshot.next_lease_id = 2;
-    ASSERT_TRUE(catalog.RestoreSnapshot(snapshot).has_value());
+    ASSERT_TRUE(metadata_store.RestoreSnapshot(snapshot).has_value());
 
-    auto view = catalog.Get(ready.identity, 500);
+    auto view = metadata_store.Get(ready.identity, 500);
     ASSERT_TRUE(view.has_value());
     EXPECT_EQ(1u, view->active_lease_count);
-    EXPECT_TRUE(catalog.HasActiveLease(ready.identity, 3, 500));
+    EXPECT_TRUE(metadata_store.HasActiveLease(ready.identity, 3, 500));
 }
 
 }  // namespace
