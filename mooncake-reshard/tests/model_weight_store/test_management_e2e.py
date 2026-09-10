@@ -4,8 +4,11 @@ import pytest
 
 from mooncake.reshard.weight.management import (
     WeightAvailabilityState,
+    WeightMigrationMode,
     WeightOperationKind,
+    WeightResidencyState,
     WeightRevisionIdentity,
+    WeightStoragePolicy,
 )
 from mooncake.reshard.weight.store import WeightSnapshotDescriptor
 
@@ -28,6 +31,10 @@ def test_managed_writer_abort_before_first_tensor_cleans_import() -> None:
             ),
             _SnapshotAdapter(sources),
             tenant_id="tenant-a",
+            policy=WeightStoragePolicy(
+                preferred_residency=WeightResidencyState.HOT,
+                migration_mode=WeightMigrationMode.MANUAL,
+            ),
         ):
             raise RuntimeError("cancel upload")
 
@@ -52,6 +59,10 @@ def test_managed_revision_public_workflow_end_to_end() -> None:
         ),
         _SnapshotAdapter(sources),
         tenant_id="tenant-a",
+        policy=WeightStoragePolicy(
+            preferred_residency=WeightResidencyState.COLD,
+            migration_mode=WeightMigrationMode.MANUAL,
+        ),
     )
     identity = WeightRevisionIdentity(
         tenant_id="tenant-a",
