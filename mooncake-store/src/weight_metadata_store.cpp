@@ -137,6 +137,12 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
         !ValidateWeightAffinitySummary(request.affinity_summary).ok()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
+    if (request.policy.value_or(WeightStoragePolicy{})
+                .preferred_residency == WeightResidencyState::MIXED &&
+        request.affinity_summary.affinity_count < 2) {
+        return tl::make_unexpected(
+            WeightManagementError::POLICY_UNSATISFIABLE);
+    }
 
     std::lock_guard lock(mutex_);
     const auto group = group_index_.find(request.payload_group_id);
