@@ -147,6 +147,21 @@ TEST_F(MasterServiceWeightManagementTest,
 }
 
 TEST_F(MasterServiceWeightManagementTest,
+       RejectsUnsatisfiableSingleAffinityMixedImport) {
+    MasterService service;
+    auto request = BeginRequest(std::nullopt);
+    request.expected_payload_count = 1;
+    request.expected_logical_bytes = 1024;
+    request.affinity_summary.affinity_count = 1;
+
+    auto importing = service.BeginWeightImport(request);
+
+    ASSERT_FALSE(importing.has_value());
+    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE,
+              importing.error());
+}
+
+TEST_F(MasterServiceWeightManagementTest,
        RejectsZeroMigrationBatchLimits) {
     MasterServiceConfig config;
     config.weight_migration_max_members_per_round = 0;

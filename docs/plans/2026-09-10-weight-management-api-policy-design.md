@@ -455,6 +455,8 @@ snapshot field weight_catalog -> weight_metadata
 
 - policy 的 cluster default、`WeightStore` default、单次 `weight_put` override
   优先级正确，最终值持久化到 revision metadata；
+- preferred 为 MIXED 但 revision 少于两个完整 affinity unit 时，begin 在写入任何
+  payload 前返回 `POLICY_UNSATISFIABLE`，不能创建永远无法完成的 migration；
 - cluster default 只影响之后新建的 revision；修改默认值后，已有 revision 的已
   持久化 policy、generation 和目标 residency 不发生变化；
 - cluster default 的 YAML/CLI 配置等价；非法枚举、非法 MIXED ratio、high/low
