@@ -4,7 +4,7 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
 from threading import Event, Lock, Thread
-from typing import Any, Callable, Literal, Optional
+from typing import Callable, Literal, Optional
 from uuid import uuid4
 
 from ..manifest import (
@@ -339,7 +339,11 @@ class WeightStore:
         plan: WeightUploadPlan,
         source_placement: WeightPlacementManifest,
         source_binding: WeightRuntimeBindingManifest,
-        **kwargs: Any,
+        *,
+        source_worker_id: Optional[str] = None,
+        source_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        registration_lease: Optional[StoreRegistrationLease] = None,
+        transfer_id: Optional[str] = None,
     ) -> tuple[UploadReceipt, ...]:
         """Upload unmanaged payloads using the pre-management API."""
 
@@ -347,7 +351,10 @@ class WeightStore:
             plan,
             source_placement,
             source_binding,
-            **kwargs,
+            source_worker_id=source_worker_id,
+            source_allocation_guards=source_allocation_guards,
+            registration_lease=registration_lease,
+            transfer_id=transfer_id,
         )
 
     def weight_put_abort(
@@ -608,11 +615,23 @@ class WeightStore:
         plan: WeightLoadPlan,
         target_placement: WeightPlacementManifest,
         target_binding: WeightRuntimeBindingManifest,
-        **kwargs: Any,
+        *,
+        target_worker_id: Optional[str] = None,
+        target_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+        registration_lease: Optional[StoreRegistrationLease] = None,
+        transfer_id: Optional[str] = None,
     ) -> None:
         """Load unmanaged payloads using the pre-management API."""
 
-        self.weight_get_payload(plan, target_placement, target_binding, **kwargs)
+        self.weight_get_payload(
+            plan,
+            target_placement,
+            target_binding,
+            target_worker_id=target_worker_id,
+            target_allocation_guards=target_allocation_guards,
+            registration_lease=registration_lease,
+            transfer_id=transfer_id,
+        )
 
     def register_weight_buffers(
         self,

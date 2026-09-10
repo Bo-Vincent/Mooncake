@@ -432,6 +432,10 @@ snapshot field weight_catalog -> weight_metadata
 
 ## 10. 验收标准
 
+- 新增 `weight_*` managed API 不得弱化既有 unmanaged 兼容入口的公开契约；
+  `upload`、`load` 等既有 API 必须保留显式 keyword-only 参数、类型标注和可 introspect
+  的签名，完整 reshard contract suite 必须通过；
+
 以下标准必须在同一个 exact implementation head 上逐项验证。所有“最终收敛”类
 断言使用有 deadline 的状态轮询，不以固定 `sleep` 代替；无法在当前环境执行的
 项目必须明确记录为未验证边界，不能计为通过。
