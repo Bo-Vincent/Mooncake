@@ -3058,7 +3058,21 @@ bool MasterService::QueueManagedWeightMemberOffload(
     }
 
     auto& tenant_state = accessor.GetTenantState();
-    if (tenant_state.offloading_tasks.contains(member_key)) {
+    auto existing_task = tenant_state.offloading_tasks.find(member_key);
+    if (existing_task != tenant_state.offloading_tasks.end()) {
+        if (existing_task->second.weight_operation_id.has_value() &&
+            existing_task->second.weight_operation_id !=
+                revision.operation_id) {
+            return false;
+        }
+        if (!existing_task->second.weight_operation_id.has_value() &&
+            revision.operation_id.has_value()) {
+            auto task = existing_task->second;
+            tenant_state.offloading_tasks.erase(existing_task);
+            task.weight_operation_id = revision.operation_id;
+            tenant_state.offloading_tasks.emplace(member_key,
+                                                   std::move(task));
+        }
         return true;
     }
     std::optional<ReplicaID> source_id;
