@@ -1652,6 +1652,14 @@ bool MasterService::QueueManagedWeightMemberOffload(
     }
     auto& offloading_task = accessor.GetState().offloading_task;
     if (offloading_task) {
+        if (offloading_task->weight_operation_id.has_value() &&
+            offloading_task->weight_operation_id != revision.operation_id) {
+            return false;
+        }
+        if (!offloading_task->weight_operation_id.has_value() &&
+            revision.operation_id.has_value()) {
+            offloading_task->weight_operation_id = revision.operation_id;
+        }
         return true;
     }
     std::optional<ReplicaID> source_id;
