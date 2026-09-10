@@ -443,6 +443,9 @@ snapshot field weight_catalog -> weight_metadata
   `False/True/False/False/False`，其中 `READY + MIGRATING` 仍返回 `True`；
 - `weight_get_size` 返回 manifest reference 中经过提交校验的 logical bytes；
 - `weight_list` 的过滤、稳定分页和 page token 校验通过；
+- 异步接口返回值语义明确：`weight_migrate` 返回已持久化 operation；
+  `weight_remove` 对大组允许先返回 `DELETING`。调用方必须使用有 deadline 的
+  metadata/operation 轮询确认物理完成，不能把首次 RPC 成功等同于终态；
 - `WeightStore` 组件内从 facade 到 backend adapter 的方法，在 Store 存在同语义
   API 时使用对应 `weight_<Store method>` 词根；
 - pybind、native RPC、`MasterService` 等边界外代码不因该规则机械改名；
@@ -527,6 +530,8 @@ snapshot field weight_catalog -> weight_metadata
   继续，manifest 仍最后删除，不重新删除已完成 member；
 - remove 响应丢失后的相同请求幂等完成，tombstone 保持可查询且
   `weight_is_exist=False`；
+- payload 超过单批删除上限时，首次 `weight_remove` 返回 `DELETING`，后台或相同
+  请求重试从剩余 member 继续，最终在 deadline 内到达 `DELETED + ABSENT`；
 - 普通 eviction、quota eviction、单 key remove 和 cleanup 不能部分删除 managed
   weight group；
 - metadata 能定位并校验 manifest identity/digest，manifest 能定位全部 payload
@@ -538,6 +543,10 @@ snapshot field weight_catalog -> weight_metadata
   中的 active operation ID 必须指向同 revision 的唯一非终态 operation，终态
   operation 可按原 ID 查询但不再挂在 metadata 上；
 - active/standby schema capability 未确认时，新 Weight mutation fail closed；
+- 旧 snapshot/OpLog 不含 weight metadata 时按兼容约定恢复为空；新 weight schema
+  未被 standby 明确支持时 fail closed，不得静默丢失 revision、lease 或 operation；
+- revision 到达终态后不残留 active lease、active operation、offload/promotion task
+  或额外 group member；保留的 terminal operation 与 tombstone 仅承担查询和幂等；
 - 普通 Store、unmanaged WeightStore 和 KVCache 的 put/get/eviction/remove 行为无
   回归。
 
