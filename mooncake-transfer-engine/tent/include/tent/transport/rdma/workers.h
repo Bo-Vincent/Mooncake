@@ -55,15 +55,15 @@ static_assert(kIbvEventDeviceSpeedChange == IBV_EVENT_DEVICE_SPEED_CHANGE,
 #endif
 
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
-adaptive_congestion_control::Decision acquireTentCongestionControlAttempt(RdmaSlice& slice,
-                                           TentRdmaCongestionControlRoute* route,
-                                           const adaptive_congestion_control::PathHandle& path,
-                                           uint64_t bytes,
-                                           uint32_t endpoint_generation);
-bool completeTentCongestionControlAttempt(RdmaSlice& slice, adaptive_congestion_control::OutcomeClass outcome,
-                           adaptive_congestion_control::FailureScope scope);
-void tickTentCongestionControlRoute(TentRdmaCongestionControlRoute& route, uint64_t now_ns,
-                     uint64_t elapsed_ns);
+adaptive_congestion_control::Decision acquireTentCongestionControlAttempt(
+    RdmaSlice& slice, TentRdmaCongestionControlRoute* route,
+    const adaptive_congestion_control::PathHandle& path, uint64_t bytes,
+    uint32_t endpoint_generation);
+bool completeTentCongestionControlAttempt(
+    RdmaSlice& slice, adaptive_congestion_control::OutcomeClass outcome,
+    adaptive_congestion_control::FailureScope scope);
+void tickTentCongestionControlRoute(TentRdmaCongestionControlRoute& route,
+                                    uint64_t now_ns, uint64_t elapsed_ns);
 #endif
 
 class Workers {
@@ -204,9 +204,9 @@ class Workers {
     adaptive_congestion_control::Decision acquireCongestionPermit(
         RdmaSlice* slice, const PostPath& path,
         const std::shared_ptr<RdmaEndPoint>& endpoint);
-    void completeCongestionPermit(RdmaSlice* slice,
-                                  adaptive_congestion_control::OutcomeClass outcome,
-                                  adaptive_congestion_control::FailureScope scope);
+    void completeCongestionPermit(
+        RdmaSlice* slice, adaptive_congestion_control::OutcomeClass outcome,
+        adaptive_congestion_control::FailureScope scope);
     void updateCongestionSignals(uint64_t now_ns);
 #endif
 
@@ -428,9 +428,11 @@ class Workers {
         // by an endpoint through delayed teardown.
         std::unordered_map<std::string, std::shared_ptr<RailMonitor>> rails;
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
-        // Raw pointers alias congestion_control_routes_, which owns every route until Workers
-        // teardown.
-        std::unordered_map<PostPath, TentRdmaCongestionControlRoute*, PostPathHash> congestion_control_routes;
+        // Raw pointers alias congestion_control_routes_, which owns every route
+        // until Workers teardown.
+        std::unordered_map<PostPath, TentRdmaCongestionControlRoute*,
+                           PostPathHash>
+            congestion_control_routes;
         uint64_t congestion_control_last_poll_ns = 0;
         bool congestion_control_poller_stalled = false;
 #endif
@@ -470,9 +472,11 @@ class Workers {
     bool deadline_bw_arbitration_ = false;
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
     adaptive_congestion_control::Config congestion_control_config_;
-    std::vector<std::unique_ptr<adaptive_congestion_control::DomainState>> congestion_control_devices_;
+    std::vector<std::unique_ptr<adaptive_congestion_control::DomainState>>
+        congestion_control_devices_;
     std::mutex congestion_control_routes_mutex_;
-    std::unordered_map<PostPath, std::shared_ptr<TentRdmaCongestionControlRoute>, PostPathHash>
+    std::unordered_map<
+        PostPath, std::shared_ptr<TentRdmaCongestionControlRoute>, PostPathHash>
         congestion_control_routes_;
     uint64_t congestion_control_last_tick_ns_ = 0;
 #endif
