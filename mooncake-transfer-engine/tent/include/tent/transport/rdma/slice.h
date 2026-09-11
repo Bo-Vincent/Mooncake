@@ -212,6 +212,10 @@ struct RdmaSlice {
     // WorkerContext::rails stores values via unique_ptr, so rehashes do
     // not invalidate the pointee.
     RailMonitor* rail_monitor = nullptr;
+    // Non-zero only for the one slice admitted to probe a paused rail after
+    // a newer remote metadata snapshot. It remains valid across endpoint
+    // connection retries but cannot be reused by another slice.
+    uint64_t rail_probe_token = 0;
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
     TentRdmaCcRoute* cc_route = nullptr;
     adaptive_cc::Permit cc_permit;
