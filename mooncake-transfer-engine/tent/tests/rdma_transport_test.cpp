@@ -39,6 +39,7 @@
 
 #include "tent/common/config.h"
 #include "tent/common/types.h"
+#include "tent/common/utils/string_builder.h"
 #include "tent/transfer_engine.h"
 #include "tent/runtime/platform.h"
 #include "tent/runtime/topology.h"
@@ -54,6 +55,8 @@
 
 namespace mooncake {
 namespace tent {
+
+extern thread_local int tl_wid;
 
 // Friend accessor for driving initializeContexts() without a full install().
 class RdmaTransportTestPeer {
@@ -102,6 +105,48 @@ class RdmaTransportTestPeer {
     }
 
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+    // Keep the public submit path, but let the test advance one worker tick
+    // at a time without starting a monitor or polling fake completion queues.
+    static void attachManualWorkers(RdmaTransport& transport,
+                                    std::unique_ptr<Workers>& workers,
+                                    uint64_t block_size) {
+        transport.params_->workers.num_workers = 1;
+        transport.params_->workers.block_size = block_size;
+        transport.params_->workers.max_retry_count = 8;
+        transport.conf_->set(RailMonitor::kCfgErrorThreshold, 3);
+        transport.conf_->set(RailMonitor::kCfgCooldownSecs, 30);
+        workers->running_.store(true);
+        transport.workers_ = std::move(workers);
+    }
+
+    static std::unique_ptr<Workers> detachManualWorkers(
+        RdmaTransport& transport) {
+        transport.workers_->running_.store(false);
+        return std::move(transport.workers_);
+    }
+
+    static void postTick(Workers& workers) {
+        const int previous = tl_wid;
+        tl_wid = 0;
+        workers.asyncPostSend();
+        tl_wid = previous;
+    }
+
+    static TentRdmaCcRoute* prepareCongestionRoute(Workers& workers, int dev,
+                                                   SegmentID target) {
+        workers.cc_config_ = adaptive_cc::Config{};
+        enableCongestionControl(workers, dev);
+        const int previous = tl_wid;
+        tl_wid = 0;
+        auto* route = workers.getCongestionRoute({dev, target, dev});
+        tl_wid = previous;
+        return route;
+    }
+
+    static const Topology& topology(const RdmaTransport& transport) {
+        return *transport.local_topology_;
+    }
+
     static adaptive_cc::DomainState& enableCongestionControl(Workers& workers,
                                                              int dev_id) {
         workers.cc_config_.mode = adaptive_cc::Mode::kEnforce;
@@ -2231,6 +2276,163 @@ class RdmaWorkersSharedQpTest : public ::testing::Test {
 RdmaWorkersSharedQpTest::FakeState RdmaWorkersSharedQpTest::fake;
 std::mutex RdmaWorkersSharedQpTest::post_mutex;
 std::vector<RdmaSlice*> RdmaWorkersSharedQpTest::post_order;
+
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
+class RdmaWorkersAvoidTest : public RdmaWorkersSharedQpTest {
+   protected:
+    void SetUp() override {
+        ASSERT_NO_FATAL_FAILURE(RdmaWorkersSharedQpTest::SetUp());
+        RdmaTransportTestPeer::destroyWorkerContexts(*workers_);
+        RdmaTransportTestPeer::makeWorkerContexts(*workers_, 1);
+        source_.resize(3 * kLen);
+        metadata_ = std::make_shared<ControlService>("p2p", "", nullptr);
+        RdmaTransportTestPeer::bindMetadata(transport_, metadata_);
+        ASSERT_TRUE(metadata_->segmentManager()
+                        .updateLocal([&](SegmentDesc& local) {
+                            local.name = "avoid-local";
+                            local.machine_id = "avoid-local-machine";
+                            local.type = SegmentType::Memory;
+                            auto& memory =
+                                std::get<MemorySegmentDesc>(local.detail);
+                            memory.topology =
+                                RdmaTransportTestPeer::topology(transport_);
+                            BufferDesc buffer{};
+                            buffer.addr =
+                                reinterpret_cast<uint64_t>(source_.data());
+                            buffer.length = source_.size();
+                            buffer.location = "cpu:0";
+                            buffer.lkey = {0, 1};
+                            buffer.rkey = {0, 2};
+                            memory.buffers = {buffer};
+                            return Status::OK();
+                        })
+                        .ok());
+
+        // Metadata uses a real RPC round trip; only verbs are stand-ins.
+        remote_ = *metadata_->segmentManager().getLocal();
+        remote_.machine_id = "avoid-remote-machine";
+        std::get<MemorySegmentDesc>(remote_.detail).buffers[0].addr = kTarget;
+        ASSERT_TRUE(server_
+                        .registerFunction(
+                            GetSegmentDesc,
+                            [this](const std::string_view&, std::string& r) {
+                                r = json(remote_).dump();
+                            })
+                        .ok());
+        uint16_t port = 0;
+        ASSERT_TRUE(server_.start(port).ok());
+        remote_.name = "127.0.0.1:" + std::to_string(port);
+        remote_.rpc_server_addr = remote_.name;
+        ASSERT_TRUE(
+            metadata_->segmentManager().openRemote(target_, remote_.name).ok());
+        endpoint_ = context_->endpointStore()->getOrInsert(
+            MakeNicPath(remote_.name, context_->name()));
+        ASSERT_NE(endpoint_, nullptr);
+        RdmaEndPointTestPeer::markReady(endpoint_);
+
+        route_ = RdmaTransportTestPeer::prepareCongestionRoute(*workers_, kDev,
+                                                               target_);
+        active_ = workers_.get();
+        RdmaTransportTestPeer::attachManualWorkers(transport_, workers_, kLen);
+        ASSERT_TRUE(transport_.allocateSubBatch(batch_, 1).ok());
+    }
+
+    void drainCompletions() {
+        // Exercise completion accounting, not real DMA or a hardware CQ.
+        while (completed_ < post_order.size()) {
+            auto* slice = post_order[completed_++];
+            ibv_wc wc{};
+            wc.wr_id = reinterpret_cast<uint64_t>(slice);
+            wc.status = IBV_WC_SUCCESS;
+            RdmaTransportTestPeer::handleCompletion(
+                *active_, RdmaTransportTestPeer::workerContext(*active_, 0),
+                *context_, wc, getCurrentTimeInNano());
+        }
+    }
+
+    void TearDown() override {
+        if (active_) {
+            if (batch_ && batch_->size() != 0) {
+                (void)transport_.cancelTransferTask(batch_, 0);
+                drainCompletions();
+                RdmaTransportTestPeer::postTick(*active_);
+            }
+        }
+        if (context_ && context_->endpointStore()) {
+            (void)context_->endpointStore()->clear();
+        }
+        if (active_) {
+            if (batch_) (void)transport_.freeSubBatch(batch_);
+            workers_ = RdmaTransportTestPeer::detachManualWorkers(transport_);
+        }
+        RdmaWorkersSharedQpTest::TearDown();
+    }
+
+    static constexpr uint64_t kTarget = 0x10000000;
+    std::vector<char> source_;
+    std::shared_ptr<ControlService> metadata_;
+    CoroRpcAgent server_;
+    SegmentDesc remote_;
+    SegmentID target_ = 0;
+    Transport::SubBatchRef batch_ = nullptr;
+    Workers* active_ = nullptr;
+    TentRdmaCcRoute* route_ = nullptr;
+    size_t completed_ = 0;
+};
+
+TEST_F(RdmaWorkersAvoidTest, UnpostedAvoidDoesNotPauseRailAndProbeRecovers) {
+    adaptive_cc::Signals failure;
+    failure.fatal_failures = 1;
+    adaptive_cc::recordSignals(
+        route_->domain, adaptive_cc::generation(route_->domain), failure);
+    adaptive_cc::controlTick(route_->domain, 1);
+    ASSERT_EQ(adaptive_cc::snapshot(route_->domain).state,
+              adaptive_cc::PathState::kQuarantined);
+
+    Request request{};
+    request.opcode = Request::WRITE;
+    request.source = source_.data();
+    request.target_id = target_;
+    request.target_offset = kTarget;
+    request.length = source_.size();
+    ASSERT_TRUE(transport_.submitTransferTasks(batch_, {request}).ok());
+    auto* batch = static_cast<RdmaSubBatch*>(batch_);
+    ASSERT_EQ(batch->task_list[0]->num_slices, 3u);
+    RdmaTransportTestPeer::postTick(*active_);
+
+    EXPECT_TRUE(post_order.empty()) << "quarantine must not post any WR";
+    auto* slice = batch->slice_chain[0];
+    for (int i = 0; i < 3; ++i, slice = slice->next) {
+        ASSERT_NE(slice, nullptr);
+        EXPECT_EQ(slice->word, PENDING);
+        EXPECT_EQ(slice->retry_count, 1);
+        EXPECT_EQ(slice->posted_dev.load(), -1);
+        EXPECT_TRUE(slice->ep_weak_ptr.expired());
+        ASSERT_NE(slice->rail_monitor, nullptr);
+        EXPECT_TRUE(slice->rail_monitor->available(kDev, kDev))
+            << "avoiding unposted slices must not count new rail failures";
+    }
+
+    // Advance only the CC cooldown. Rail recovery must not be forced or
+    // awaited: a healthy rail should remain selectable for the probe.
+    const auto probe_ts = adaptive_cc::Config{}.cooldown_ns + 1;
+    adaptive_cc::controlTick(route_->domain, probe_ts);
+    ASSERT_EQ(adaptive_cc::snapshot(route_->domain).state,
+              adaptive_cc::PathState::kProbing);
+    for (int tick = 0; tick < 3; ++tick) {
+        RdmaTransportTestPeer::postTick(*active_);
+        drainCompletions();
+        tickTentCcRoute(*route_, probe_ts + 1 + tick, 1);
+    }
+    TransferStatus status;
+    ASSERT_TRUE(transport_.getTransferStatus(batch_, 0, status).ok());
+    EXPECT_EQ(status.s, COMPLETED);
+    EXPECT_EQ(status.transferred_bytes, source_.size());
+    EXPECT_EQ(post_order.size(), 3u);
+    EXPECT_EQ(adaptive_cc::snapshot(route_->domain).state,
+              adaptive_cc::PathState::kHealthy);
+}
+#endif
 
 TEST_F(RdmaWorkersSharedQpTest, EndpointPinsConstructionAddressGeneration) {
     const auto endpoint_address =

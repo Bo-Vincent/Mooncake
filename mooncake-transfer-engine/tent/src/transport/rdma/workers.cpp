@@ -959,7 +959,8 @@ void Workers::asyncPostSend() {
                 slices.erase(slices.begin());
                 releaseSliceQuota(avoided, getCurrentTimeInNano());
                 ++avoided->retry_count;
-                disableEndpoint(avoided);
+                // Admission avoidance is not a new transport failure. No WR
+                // was posted, so do not penalize the rail or reset its QP.
                 if (avoided->retry_count >=
                     transport_->params_->workers.max_retry_count) {
                     updateSliceStatus(avoided, FAILED);
