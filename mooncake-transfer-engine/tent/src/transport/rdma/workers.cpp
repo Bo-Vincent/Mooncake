@@ -855,7 +855,9 @@ std::shared_ptr<RdmaEndPoint> Workers::getEndpoint(Workers::PostPath path) {
 
 void Workers::disableEndpoint(RdmaSlice* slice) {
     if (auto* rail = slice->rail_monitor) {
-        rail->markFailed(slice->source_dev_id, slice->target_dev_id);
+        rail->markFailed(slice->source_dev_id, slice->target_dev_id,
+                         slice->rail_probe_token);
+        slice->rail_probe_token = 0;
     }
     if (auto ep = slice->ep_weak_ptr.lock()) {
         ep->acknowledge(slice, FAILED);
@@ -1906,8 +1908,14 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
                                        slice->target_dev_id, src_gpu, dst_gpu);
     }
 
-    if (gdr_excluded ||
-        !rail.available(slice->source_dev_id, slice->target_dev_id)) {
+    bool rail_available =
+        rail.available(slice->source_dev_id, slice->target_dev_id);
+    if (!gdr_excluded && !rail_available) {
+        rail_available = rail.tryRecoveryProbe(
+            slice->source_dev_id, slice->target_dev_id,
+            slice->rail_probe_token);
+    }
+    if (gdr_excluded || !rail_available) {
         LOG(INFO) << "Optimal device pair not available: source_dev_id "
                   << slice->source_dev_id << ", target_dev_id "
                   << slice->target_dev_id;
@@ -1993,6 +2001,12 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
         same_machine
             ? nullptr
             : &getOrCreateRail(worker.rails, target.segment->machine_id);
+    if (rail_mon && (!rail_mon->ready() || target.topo != rail_mon->remote())) {
+        rail_mon->load(
+            std::shared_ptr<const Topology>(source.pin, source.topo),
+            std::shared_ptr<const Topology>(target.pin, target.topo),
+            rail_topo_json_, transport_->conf_.get());
+    }
     size_t start =
         static_cast<size_t>(slice->last_fallback_idx + 1) % total_combos;
     const uint64_t device_mask = slice->task->device_mask;
@@ -2007,13 +2021,17 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
         if (strictLocalNuma() &&
             source.topo->isCrossNuma(*source.topo_entry, sdev))
             continue;
+        // Skip NICs that cannot GPUDirect-DMA to the source/target GPU.
+        if (gdr_learned &&
+            gdrPairExcluded(source, target, sdev, tdev, src_gpu, dst_gpu))
+            continue;
+
         bool reachable = same_machine ? (sdev == tdev)  // loopback is safe
                                       : rail_mon->available(sdev, tdev);
-
-        // Skip NICs that cannot GPUDirect-DMA to the source/target GPU.
-        if (reachable && gdr_learned &&
-            gdrPairExcluded(source, target, sdev, tdev, src_gpu, dst_gpu))
-            reachable = false;
+        if (!same_machine && !reachable) {
+            reachable = rail_mon->tryRecoveryProbe(
+                sdev, tdev, slice->rail_probe_token);
+        }
 
         if (reachable) {
             // A retry gets here after the failure path returned the slice's
