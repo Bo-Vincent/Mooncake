@@ -2166,8 +2166,15 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
     }
 
     uint64_t probe_token = 0;
-    if (gdr_excluded ||
-        !rail.admit(slice->source_dev_id, slice->target_dev_id, probe_token)) {
+    bool rail_available =
+        !gdr_excluded &&
+        rail.admit(slice->source_dev_id, slice->target_dev_id, probe_token);
+    if (!gdr_excluded && !rail_available) {
+        rail_available = rail.tryRecoveryProbe(
+            slice->source_dev_id, slice->target_dev_id,
+            probe_token);
+    }
+    if (gdr_excluded || !rail_available) {
         VLOG(1) << "Optimal device pair not available: source_dev_id "
                 << slice->source_dev_id << ", target_dev_id "
                 << slice->target_dev_id;
@@ -2294,6 +2301,10 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
         bool reachable = same_machine
                              ? (sdev == tdev)  // loopback is safe
                              : rail_mon->admit(sdev, tdev, probe_token);
+        if (!same_machine && !reachable) {
+            reachable = rail_mon->tryRecoveryProbe(
+                sdev, tdev, probe_token);
+        }
 
         if (reachable) {
             // A retry gets here after the failure path returned the slice's
