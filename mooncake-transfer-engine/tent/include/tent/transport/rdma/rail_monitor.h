@@ -45,6 +45,8 @@ class RailMonitor {
         "transports/rdma/rail_cooldown_secs";
     static constexpr const char *kCfgProbeIntervalSecs =
         "transports/rdma/rail_probe_interval_secs";
+    static constexpr const char *kCfgRecoveryProbeEnabled =
+        "transports/rdma/rail_recovery_probe_enabled";
 
    public:
     RailMonitor() = default;
@@ -98,6 +100,11 @@ class RailMonitor {
     // Pass the token returned by admit() for a probe/trial completion; pass 0
     // for an ordinary transfer completion.
     void markFailed(int local_nic, int remote_nic, uint64_t probe_token);
+    // A paused rail may admit one slice after a newer remote metadata
+    // snapshot arrives. A zero token requests ownership; a non-zero token
+    // lets the owning slice retain that ownership across endpoint retries.
+    bool tryRecoveryProbe(int local_nic, int remote_nic, uint64_t &token);
+
 
     // Uses the same token contract as markFailed().
     void markRecovered(int local_nic, int remote_nic, uint64_t probe_token);
@@ -148,6 +155,7 @@ class RailMonitor {
         std::chrono::steady_clock::time_point last_probe_time{};
         bool half_open = false;
         bool probe_in_flight = false;
+        uint64_t last_probe_generation = 0;
         uint64_t active_probe_token = 0;
 
         bool paused() const {
@@ -161,6 +169,9 @@ class RailMonitor {
     uint64_t next_probe_token_{1};
     std::unordered_map<int, int> direct_rails_;  // keep static after loaded
     std::unordered_map<int, int> best_mapping_[kMaxNuma];
+
+    uint64_t metadata_generation_ = 0;
+    bool recovery_probe_enabled_ = true;
 
     int error_threshold_ = 3;
     std::chrono::seconds error_window_{10};

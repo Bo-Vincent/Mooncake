@@ -66,9 +66,26 @@ Status RailMonitor::load(std::shared_ptr<const Topology> local,
                          const Config* conf) {
     std::lock_guard<std::mutex> guard(mutex_);
     const bool first_load = !ready_;
+    const bool remote_snapshot_changed =
+        ready_ && remote_.get() != remote.get();
     const bool same_layout = ready_ &&
                              sameRailLayout(local_.get(), local.get()) &&
                              sameRailLayout(remote_.get(), remote.get());
+
+    if (first_load) {
+        metadata_generation_ = 1;
+    } else if (remote_snapshot_changed) {
+        ++metadata_generation_;
+        // A snapshot seen while a rail is healthy predates any later pause
+        // and therefore cannot serve as recovery evidence for that pause.
+        for (auto& entry : rail_states_) {
+            auto& state = entry.second;
+            if (!state.paused()) {
+                state.last_probe_generation = metadata_generation_;
+                state.active_probe_token = 0;
+            }
+        }
+    }
 
     local_ = std::move(local);
     remote_ = std::move(remote);
@@ -80,13 +97,17 @@ Status RailMonitor::load(std::shared_ptr<const Topology> local,
             conf->get(kCfgCooldownSecs, (int)cooldown_.count()));
         probe_interval_ = std::chrono::seconds(
             conf->get(kCfgProbeIntervalSecs, (int)probe_interval_.count()));
+        recovery_probe_enabled_ =
+            conf->get(kCfgRecoveryProbeEnabled, recovery_probe_enabled_);
         // Config is identical on every COW snapshot refresh. Log once per
         // monitor so PD/e2e does not reprint the banner per slice/worker.
         if (first_load) {
             LOG(INFO) << "RailMonitor: error_threshold=" << error_threshold_
                       << " error_window=" << error_window_.count() << "s"
                       << " cooldown=" << cooldown_.count() << "s"
-                      << " probe_interval=" << probe_interval_.count() << "s";
+                      << " probe_interval=" << probe_interval_.count() << "s"
+                      << " recovery_probe_enabled="
+                      << recovery_probe_enabled_;
         }
     }
     if (same_layout) return Status::OK();
@@ -159,7 +180,7 @@ bool RailMonitor::admit(int local_nic, int remote_nic, uint64_t& probe_token) {
     // traffic until it resolves (markRecovered closes, markFailed re-arms,
     // cancelProbe reverts). resume_time stays armed so paused() remains true
     // and the rail is not mistaken for Closed.
-    if (st.half_open) return false;
+    if (st.half_open || st.active_probe_token != 0) return false;
     auto now = std::chrono::steady_clock::now();
     // Open: the cooldown timer is still running. Admit ONE exploratory probe
     // every probe_interval_ so a successful probe closes the rail early
@@ -217,6 +238,29 @@ uint64_t RailMonitor::allocateProbeToken() {
     uint64_t token = next_probe_token_++;
     if (token == 0) token = next_probe_token_++;
     return token;
+}
+
+bool RailMonitor::tryRecoveryProbe(int local_nic, int remote_nic,
+                                   uint64_t& token) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!recovery_probe_enabled_) return false;
+    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (it == rail_states_.end()) return false;
+    auto& st = it->second;
+    if (!st.paused()) return false;
+
+    if (token != 0) return token == st.active_probe_token;
+    if (st.probe_in_flight) return false;
+    if (st.last_probe_generation == metadata_generation_) return false;
+
+    st.last_probe_generation = metadata_generation_;
+    st.probe_in_flight = true;
+    st.active_probe_token = allocateProbeToken();
+    token = st.active_probe_token;
+    LOG(INFO) << "Rail recovery probe admitted: local_nic=" << local_nic
+              << " remote_nic=" << remote_nic
+              << " metadata_generation=" << metadata_generation_;
+    return true;
 }
 
 void RailMonitor::markFailed(int local_nic, int remote_nic,
@@ -350,6 +394,8 @@ void RailMonitor::markRecovered(int local_nic, int remote_nic,
     st.resume_time = {};
     st.cooldown = std::chrono::seconds(0);
     st.last_probe_time = {};
+    st.last_probe_generation = metadata_generation_;
+    st.active_probe_token = 0;
     if (was_paused) {
         LOG(INFO) << "Rail recovered: local_nic=" << local_nic
                   << " remote_nic=" << remote_nic
@@ -409,7 +455,8 @@ Status RailMonitor::loadFromJson(const std::string& rail_topo_json) {
                 int remote_nic_id = remote_->getNicId(remote_nic_name);
 
                 if (local_nic_id >= 0 && remote_nic_id >= 0) {
-                    rail_states_[{local_nic_id, remote_nic_id}] = RailState{};
+                    auto& state = rail_states_[{local_nic_id, remote_nic_id}];
+                    state.last_probe_generation = metadata_generation_;
                 } else {
                     LOG(WARNING) << "Ignore invalid path " << local_nic_name
                                  << " -> " << remote_nic_name;
@@ -472,7 +519,8 @@ Status RailMonitor::loadDefault() {
     std::vector<int> remote_load(remote_nic_count, 0);
     for (int local_nic = 0; local_nic < local_nic_count; ++local_nic) {
         for (int remote_nic = 0; remote_nic < remote_nic_count; ++remote_nic) {
-            rail_states_[{local_nic, remote_nic}] = RailState{};
+            auto& state = rail_states_[{local_nic, remote_nic}];
+            state.last_probe_generation = metadata_generation_;
         }
     }
     for (int local_nic = 0; local_nic < local_nic_count; ++local_nic) {
