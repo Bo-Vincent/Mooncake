@@ -1836,7 +1836,8 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
     if (!rail.ready() || target.topo != rail.remote())
         rail.load(std::shared_ptr<const Topology>(source.pin, source.topo),
                   std::shared_ptr<const Topology>(target.pin, target.topo),
-                  rail_topo_json_, transport_->conf_.get());
+                  rail_topo_json_, transport_->conf_.get(),
+                  static_cast<uint64_t>(slice->task->request.target_id));
     if (slice->target_dev_id < 0) {
         int mapped_dev_id = rail.findBestRemoteDevice(
             slice->source_dev_id, target.topo_entry->numa_node);
@@ -2005,7 +2006,8 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
         rail_mon->load(
             std::shared_ptr<const Topology>(source.pin, source.topo),
             std::shared_ptr<const Topology>(target.pin, target.topo),
-            rail_topo_json_, transport_->conf_.get());
+            rail_topo_json_, transport_->conf_.get(),
+            static_cast<uint64_t>(slice->task->request.target_id));
     }
     size_t start =
         static_cast<size_t>(slice->last_fallback_idx + 1) % total_combos;
