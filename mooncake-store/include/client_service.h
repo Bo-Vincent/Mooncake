@@ -424,6 +424,14 @@ class Client {
 
     WeightRpcResult<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
+    WeightRpcResult<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request);
+    WeightRpcResult<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request);
+    WeightRpcResult<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request);
+    WeightRpcResult<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request);
     WeightRpcResult<WeightRevisionMetadata> CommitWeightImport(
         const CommitWeightImportRequest& request);
     WeightRpcResult<WeightRevisionMetadata> AbortWeightImport(

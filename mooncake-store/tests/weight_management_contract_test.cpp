@@ -99,6 +99,21 @@ TEST(WeightManagementContractTest, RejectsInvalidStoragePolicyEnums) {
     EXPECT_FALSE(ValidateWeightStoragePolicy(policy).ok());
 }
 
+TEST(WeightManagementContractTest, DefinesGenerationAwareUpsertContract) {
+    EXPECT_EQ(0, static_cast<int>(WeightUpsertMode::PUT_FIRST));
+    EXPECT_EQ(1, static_cast<int>(WeightUpsertMode::DELETE_FIRST));
+
+    const WeightLineageIdentity lineage{
+        .tenant_id = "tenant-a",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+    };
+    EXPECT_TRUE(ValidateWeightLineageIdentity(lineage).ok());
+    EXPECT_EQ(lineage, ToWeightLineageIdentity(ValidIdentity()));
+    EXPECT_FALSE(MakeWeightLineageMetadataKey(lineage).empty());
+}
+
 TEST(WeightManagementContractTest, ParsesWeightPolicyConfigStrictly) {
     EXPECT_EQ(WeightResidencyState::HOT,
               ParseWeightResidencyTarget("hot"));

@@ -267,6 +267,18 @@ class WrappedMasterService {
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request,
         const std::string& tenant_id = "default");
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request,
+        const std::string& tenant_id = "default");
+    WeightMetadataStore::Result<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request,
+        const std::string& tenant_id = "default");
+    WeightMetadataStore::Result<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request,
+        const std::string& tenant_id = "default");
+    WeightMetadataStore::Result<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request,
+        const std::string& tenant_id = "default");
     WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
         const CommitWeightImportRequest& request,
         const std::string& tenant_id = "default");
