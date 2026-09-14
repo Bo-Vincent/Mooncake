@@ -254,8 +254,8 @@ TEST_F(MasterServiceWeightManagementTest,
     ASSERT_TRUE(retry.has_value());
     EXPECT_EQ(*acquired, *retry);
 
-    auto renewed = service.RenewWeightRevisionLease(
-        RenewWeightRevisionLeaseRequest{
+    auto renewed =
+        service.RenewWeightRevisionLease(RenewWeightRevisionLeaseRequest{
             .lease_id = acquired->lease_id,
             .ttl_ms = 120'000,
         });

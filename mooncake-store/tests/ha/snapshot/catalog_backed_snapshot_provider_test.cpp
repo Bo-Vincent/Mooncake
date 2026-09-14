@@ -189,7 +189,8 @@ TEST_P(CatalogBackedSnapshotProviderTest, LoadLatestSnapshotRoundTrip) {
               kDefaultTestObjectSize);
 }
 
-TEST_P(CatalogBackedSnapshotProviderTest, LoadsWeightMetadataStoreFromMetadata) {
+TEST_P(CatalogBackedSnapshotProviderTest,
+       LoadsWeightMetadataStoreFromMetadata) {
     WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
