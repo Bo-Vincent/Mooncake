@@ -288,7 +288,7 @@ class MasterServiceHATest : public ::testing::Test {
         MasterServiceTestPeer::EnableDfs(service) = true;
     }
 
-    static WeightMetadataSnapshot ExportWeightMetadataStore(
+    static WeightMetadataSnapshot ExportWeightMetadata(
         const MasterService& service) {
         return MasterServiceTestPeer::WeightMetadata(service).ExportSnapshot();
     }
@@ -2612,7 +2612,8 @@ TEST_F(MasterServiceHATest,
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
     EXPECT_FALSE(
-        service.GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
+        service
+            .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
             .has_value());
 
     OpLogBatchStorage storage(cluster_id, *backend);
@@ -2788,8 +2789,7 @@ TEST_F(MasterServiceHATest, WeightLeaseBecomesVisibleOnlyAfterDurableCallback) {
     EXPECT_EQ(1u, after->active_lease_count);
 }
 
-TEST_F(MasterServiceHATest,
-       StandbyPromotionRestoresCompleteWeightMetadataStore) {
+TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightMetadata) {
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -2844,10 +2844,10 @@ TEST_F(MasterServiceHATest,
 
     MasterService service;
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}, snapshot));
-    EXPECT_EQ(snapshot, ExportWeightMetadataStore(service));
+    EXPECT_EQ(snapshot, ExportWeightMetadata(service));
 }
 
-TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadataStore) {
+TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadata) {
     MasterService service;
     const WeightRevisionIdentity identity{
         .tenant_id = "default",

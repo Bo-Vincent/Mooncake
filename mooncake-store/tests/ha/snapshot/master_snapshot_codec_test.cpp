@@ -87,7 +87,7 @@ class MasterSnapshotCodecTest : public ::testing::Test {
         return ready.value();
     }
 
-    static std::vector<uint8_t> RewriteWeightMetadataStoreField(
+    static std::vector<uint8_t> RewriteWeightMetadataField(
         const std::vector<uint8_t>& metadata, bool keep_field,
         bool corrupt_field = false) {
         auto root = msgpack::unpack(
@@ -151,7 +151,7 @@ TEST_F(MasterSnapshotCodecTest, EncodeDecodeRoundTrip) {
 }
 
 TEST_F(MasterSnapshotCodecTest,
-       WeightMetadataStoreRoundTripPreservesLeasesOperationsAndDerivedIndex) {
+       WeightMetadataRoundTripPreservesLeasesOperationsAndDerivedIndex) {
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -219,8 +219,7 @@ TEST_F(MasterSnapshotCodecTest,
               operating_view->metadata.operation);
 }
 
-TEST_F(MasterSnapshotCodecTest,
-       OldSnapshotWithoutWeightMetadataStoreRestoresEmpty) {
+TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightMetadataRestoresEmpty) {
     PublishReady(*master_service_,
                  WeightRevisionIdentity{
                      .tenant_id = "default",
@@ -234,20 +233,20 @@ TEST_F(MasterSnapshotCodecTest,
     auto state_view = MakeStateView(*master_service_);
     auto encoded = codec.Encode(state_view);
     ASSERT_TRUE(encoded.has_value());
-    encoded->metadata = RewriteWeightMetadataStoreField(encoded->metadata,
-                                                        /*keep_field=*/false);
+    encoded->metadata =
+        RewriteWeightMetadataField(encoded->metadata, /*keep_field=*/false);
 
     auto target = MakeMasterService();
     ASSERT_TRUE(codec.Decode(target.get(), *encoded).has_value());
     EXPECT_TRUE(WeightMetadata(*target).ExportSnapshot().metadata.empty());
 }
 
-TEST_F(MasterSnapshotCodecTest, MalformedWeightMetadataStoreFailsClosed) {
+TEST_F(MasterSnapshotCodecTest, MalformedWeightMetadataFailsClosed) {
     MasterSnapshotCodec codec;
     auto state_view = MakeStateView(*master_service_);
     auto encoded = codec.Encode(state_view);
     ASSERT_TRUE(encoded.has_value());
-    encoded->metadata = RewriteWeightMetadataStoreField(
+    encoded->metadata = RewriteWeightMetadataField(
         encoded->metadata, /*keep_field=*/true, /*corrupt_field=*/true);
 
     auto target = MakeMasterService();

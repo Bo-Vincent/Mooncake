@@ -122,6 +122,8 @@ TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
             .fenced_metadata_generation = 4,
             .started_at_ms = 150,
             .updated_at_ms = 200,
+            .processed_members = 0,
+            .total_members = 2,
             .cursor = {},
             .message = {},
         }},
@@ -134,8 +136,7 @@ TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
     EXPECT_EQ(snapshot, store.SnapshotWeightMetadata());
 }
 
-TEST(StandbyMetadataStoreTest,
-     RejectsInvalidWeightMetadataStoreWithoutMutation) {
+TEST(StandbyMetadataStoreTest, RejectsInvalidWeightMetadataWithoutMutation) {
     StandbyMetadataStore store;
     const WeightMetadataSnapshot empty;
     ASSERT_TRUE(store.RestoreWeightMetadata(empty));

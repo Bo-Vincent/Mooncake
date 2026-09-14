@@ -191,7 +191,7 @@ StandbyMetadataStore::GetWeightOperation(uint64_t operation_id) const {
                : std::optional<WeightResidencyOperation>(it->second);
 }
 
-bool StandbyMetadataStore::RestoreWeightMetadataStore(
+bool StandbyMetadataStore::RestoreWeightMetadata(
     const WeightMetadataSnapshot& snapshot) {
     WeightMetadataStore validator;
     if (!validator.RestoreSnapshot(snapshot)) {
@@ -223,7 +223,7 @@ bool StandbyMetadataStore::RestoreWeightMetadataStore(
     return true;
 }
 
-WeightMetadataSnapshot StandbyMetadataStore::SnapshotWeightMetadataStore() const {
+WeightMetadataSnapshot StandbyMetadataStore::SnapshotWeightMetadata() const {
     std::lock_guard<std::mutex> lock(mutex_);
     WeightMetadataSnapshot snapshot{
         .schema_version = 1,
