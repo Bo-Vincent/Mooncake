@@ -28,7 +28,7 @@ def test_upload_deduplicates_dp_and_commits_manifest_last() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests()
 
-    plan = weight_store.plan_upload(
+    plan = weight_store._weight_put_plan(
         sources.placement, sources.bindings, namespace="default"
     )
     receipts = upload_all(weight_store, plan, sources)
@@ -38,7 +38,7 @@ def test_upload_deduplicates_dp_and_commits_manifest_last() -> None:
     assert plan.manifest.manifest_key not in store.objects
     assert len(store.objects) == 2
 
-    manifest = weight_store.commit_upload(plan, receipts)
+    manifest = weight_store._weight_put_commit(plan, receipts)
 
     assert (
         StoredWeightManifest.from_json(store.objects[manifest.manifest_key]) == manifest
@@ -59,9 +59,9 @@ def test_upload_deduplicates_dp_and_commits_manifest_last() -> None:
 def test_store_manifest_json_round_trip_persists_weight_generation() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2, weight_generation=17)
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
-    persisted = weight_store.commit_upload(
+    persisted = weight_store._weight_put_commit(
         plan,
         upload_all(weight_store, plan, sources),
     )
@@ -76,9 +76,9 @@ def test_store_manifest_json_round_trip_persists_weight_generation() -> None:
 def test_stored_weight_manifest_implements_stored_resource_contract() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=1)
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
-    stored: StoredResourceManifest = weight_store.commit_upload(
+    stored: StoredResourceManifest = weight_store._weight_put_commit(
         plan,
         upload_all(weight_store, plan, sources),
     )
@@ -103,7 +103,7 @@ def test_stored_resource_manifest_requires_a_concrete_resource_kind() -> None:
 def test_stored_weight_manifest_pickle_restores_validated_snapshot() -> None:
     _store, weight_store = make_weight_store()
     source = source_manifests(dp=1, tp=1)
-    plan = weight_store.plan_upload(source.placement, source.bindings)
+    plan = weight_store._weight_put_plan(source.placement, source.bindings)
 
     restored = pickle.loads(pickle.dumps(plan.manifest))
 
@@ -119,7 +119,7 @@ def test_plan_upload_does_not_require_binding_for_empty_participant() -> None:
         rank=ParallelRank(pp=1),
     )
 
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
     assert len(plan.operations) == 1
 
@@ -142,7 +142,7 @@ def test_plan_upload_keeps_owner_free_runtime_evidence() -> None:
     )
     _store, weight_store = make_weight_store()
 
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
     assert not hasattr(plan.operations[0].source_snapshot, "owner")
     del owner
@@ -167,7 +167,7 @@ def test_plan_upload_explicitly_rejects_dp_owned_source_tensors() -> None:
     _store, weight_store = make_weight_store()
 
     with pytest.raises(ValueError, match="requires replicated DP source tensors"):
-        weight_store.plan_upload(sources.placement, sources.bindings)
+        weight_store._weight_put_plan(sources.placement, sources.bindings)
 
 
 def test_plan_upload_rejects_missing_nonempty_participant_binding() -> None:
@@ -207,7 +207,7 @@ def test_plan_upload_rejects_missing_nonempty_participant_binding() -> None:
     with pytest.raises(
         ValueError, match="no complete generation-consistent DP replica"
     ):
-        weight_store.plan_upload(
+        weight_store._weight_put_plan(
             sources.placement,
             (sources.bindings[0],),
         )
@@ -218,11 +218,11 @@ def test_same_revision_different_generations_have_disjoint_store_identity() -> N
     generation_17 = source_manifests(dp=1, tp=2, weight_generation=17)
     generation_18 = source_manifests(dp=1, tp=2, weight_generation=18)
 
-    plan_17 = weight_store.plan_upload(
+    plan_17 = weight_store._weight_put_plan(
         generation_17.placement,
         generation_17.bindings,
     )
-    plan_18 = weight_store.plan_upload(
+    plan_18 = weight_store._weight_put_plan(
         generation_18.placement,
         generation_18.bindings,
     )
@@ -246,17 +246,17 @@ def test_same_revision_different_generations_have_disjoint_store_identity() -> N
         for operation in plan_18.operations
     )
 
-    manifest_17 = weight_store.commit_upload(
+    manifest_17 = weight_store._weight_put_commit(
         plan_17,
         upload_all(weight_store, plan_17, generation_17),
     )
-    manifest_18 = weight_store.commit_upload(
+    manifest_18 = weight_store._weight_put_commit(
         plan_18,
         upload_all(weight_store, plan_18, generation_18),
     )
 
-    assert weight_store.load_manifest(manifest_17.manifest_key) == manifest_17
-    assert weight_store.load_manifest(manifest_18.manifest_key) == manifest_18
+    assert weight_store._weight_get_manifest(manifest_17.manifest_key) == manifest_17
+    assert weight_store._weight_get_manifest(manifest_18.manifest_key) == manifest_18
     assert manifest_17 != manifest_18
 
 
@@ -282,7 +282,7 @@ def test_plan_upload_selects_one_complete_generation_consistent_dp_replica() -> 
     )
 
     _, weight_store = make_weight_store()
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
     assert {operation.source_placement.rank.dp for operation in plan.operations} == {0}
     assert {operation.source_generation for operation in plan.operations} == {2}
@@ -306,7 +306,7 @@ def test_plan_upload_rejects_complete_dp_replicas_at_different_generations() -> 
     _, weight_store = make_weight_store()
 
     with pytest.raises(ValueError, match="inconsistent lease generations"):
-        weight_store.plan_upload(sources.placement, sources.bindings)
+        weight_store._weight_put_plan(sources.placement, sources.bindings)
 
 
 def test_plan_upload_rejects_mixed_generations_within_one_dp_replica() -> None:
@@ -318,7 +318,7 @@ def test_plan_upload_rejects_mixed_generations_within_one_dp_replica() -> None:
     _, weight_store = make_weight_store()
 
     with pytest.raises(ValueError, match="generation-consistent DP replica"):
-        weight_store.plan_upload(sources.placement, sources.bindings)
+        weight_store._weight_put_plan(sources.placement, sources.bindings)
 
 
 def test_plan_upload_matches_te_planner_dp_replica_selection() -> None:
@@ -327,7 +327,7 @@ def test_plan_upload_matches_te_planner_dp_replica_selection() -> None:
     _, weight_store = make_weight_store()
 
     te_plan = plan_transfer(sources, targets)
-    store_plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    store_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
     assert {operation.source.rank.dp for operation in te_plan.operations} == {0}
     assert {

@@ -362,7 +362,7 @@ def test_managed_revision_publish_resolve_load_and_release_lease() -> None:
     sources = source_manifests(dp=1, tp=2)
     targets = target_manifests(dp=1, tp=2)
 
-    plan = weight_store._weight_put_managed_plan(
+    plan = weight_store._begin_weight_put(
         sources.placement,
         sources.bindings,
         namespace="production",
@@ -373,8 +373,10 @@ def test_managed_revision_publish_resolve_load_and_release_lease() -> None:
 
     receipts = []
     for binding in sources.bindings:
-        receipts.extend(weight_store.upload(plan, sources.placement, binding))
-    manifest = weight_store.commit_upload(plan, receipts)
+        receipts.extend(
+            weight_store._weight_put_payload(plan, sources.placement, binding)
+        )
+    manifest = weight_store._weight_put_commit(plan, receipts)
     view = weight_store.weight_get_metadata(plan.management_identity)
 
     assert view.metadata.availability is WeightAvailabilityState.READY
@@ -405,15 +407,17 @@ def test_managed_load_releases_lease_after_digest_rejection() -> None:
     _, weight_store = make_weight_store(raw)
     sources = source_manifests(dp=1, tp=1)
     targets = target_manifests(dp=1, tp=1)
-    plan = weight_store._weight_put_managed_plan(
+    plan = weight_store._begin_weight_put(
         sources.placement,
         sources.bindings,
         tenant_id="tenant-a",
     )
     receipts = []
     for binding in sources.bindings:
-        receipts.extend(weight_store.upload(plan, sources.placement, binding))
-    weight_store.commit_upload(plan, receipts)
+        receipts.extend(
+            weight_store._weight_put_payload(plan, sources.placement, binding)
+        )
+    weight_store._weight_put_commit(plan, receipts)
     assert plan.management_identity is not None
     raw.catalog[plan.management_identity] = replace(
         raw.catalog[plan.management_identity],
@@ -439,21 +443,23 @@ def test_managed_load_renews_short_lease_until_transfer_finishes(
     _, weight_store = make_weight_store(raw)
     sources = source_manifests(dp=1, tp=1)
     targets = target_manifests(dp=1, tp=1)
-    plan = weight_store._weight_put_managed_plan(
+    plan = weight_store._begin_weight_put(
         sources.placement,
         sources.bindings,
         tenant_id="tenant-a",
     )
     receipts = []
     for binding in sources.bindings:
-        receipts.extend(weight_store.upload(plan, sources.placement, binding))
-    weight_store.commit_upload(plan, receipts)
+        receipts.extend(
+            weight_store._weight_put_payload(plan, sources.placement, binding)
+        )
+    weight_store._weight_put_commit(plan, receipts)
     assert plan.management_identity is not None
 
     def wait_for_renewal(*args, **kwargs) -> None:
         assert raw.renewed.wait(timeout=1)
 
-    monkeypatch.setattr(weight_store, "weight_get_payload", wait_for_renewal)
+    monkeypatch.setattr(weight_store, "_weight_get_payload", wait_for_renewal)
     weight_store.weight_get(
         plan.management_identity,
         targets.placement,
@@ -470,13 +476,15 @@ def test_weight_management_crud_and_operation_facade() -> None:
     raw = ManagedInMemoryStore()
     _, weight_store = make_weight_store(raw)
     sources = source_manifests(dp=1, tp=1)
-    plan = weight_store._weight_put_managed_plan(
+    plan = weight_store._begin_weight_put(
         sources.placement,
         sources.bindings,
         tenant_id="tenant-a",
     )
-    receipts = weight_store.weight_put_payload(plan, sources.placement, sources.binding)
-    manifest = weight_store.weight_put_commit(plan, receipts)
+    receipts = weight_store._weight_put_payload(
+        plan, sources.placement, sources.binding
+    )
+    manifest = weight_store._weight_put_commit(plan, receipts)
     assert plan.management_identity is not None
     identity = plan.management_identity
 
@@ -498,7 +506,7 @@ def test_weight_management_crud_and_operation_facade() -> None:
         preferred_residency=WeightResidencyState.COLD,
         migration_mode=WeightMigrationMode.MANUAL,
     )
-    updated = weight_store.weight_update(
+    updated = weight_store.weight_update_policy(
         identity,
         policy=policy,
         expected_metadata_generation=ready.metadata_generation,
@@ -540,7 +548,7 @@ def test_weight_put_policy_precedence_is_call_then_instance_then_cluster() -> No
     raw = ManagedInMemoryStore()
     _, store = make_weight_store(raw)
     store.default_policy = instance_policy
-    store._weight_put_managed_plan(
+    store._begin_weight_put(
         sources.placement,
         sources.bindings,
         policy=call_policy,
@@ -550,10 +558,10 @@ def test_weight_put_policy_precedence_is_call_then_instance_then_cluster() -> No
     raw = ManagedInMemoryStore()
     _, store = make_weight_store(raw)
     store.default_policy = instance_policy
-    store._weight_put_managed_plan(sources.placement, sources.bindings)
+    store._begin_weight_put(sources.placement, sources.bindings)
     assert raw.received_policy_overrides == [instance_policy]
 
     raw = ManagedInMemoryStore()
     _, store = make_weight_store(raw)
-    store._weight_put_managed_plan(sources.placement, sources.bindings)
+    store._begin_weight_put(sources.placement, sources.bindings)
     assert raw.received_policy_overrides == [None]
