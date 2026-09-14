@@ -787,6 +787,10 @@ WeightMetadataStore::PrepareAbortUpsert(const AbortWeightUpsertRequest& request,
         claim.phase == WeightUpsertPhase::RETIRING_BASE) {
         return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
+    if (!CanAdvanceWeightMetadataGeneration(
+            current->second.lineage_metadata_generation)) {
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
+    }
     const auto target = revisions_.find(claim.target_identity);
     if (target != revisions_.end() &&
         target->second.availability == WeightAvailabilityState::READY) {
