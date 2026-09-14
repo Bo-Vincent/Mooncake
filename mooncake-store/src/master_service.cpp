@@ -1646,6 +1646,16 @@ MasterService::ObjectOperationLock MasterService::AcquireObjectOperationLock(
     return {std::unique_lock<std::mutex>(object_operation_locks_[stripe_idx])};
 }
 
+MasterService::ObjectOperationLock
+MasterService::AcquireWeightGroupOperationLock(
+    const TenantId& tenant_id, const std::string& group_id) {
+    const auto scoped_group = tenant_id.MakeScopedKey(group_id);
+    const auto stripe_idx =
+        std::hash<std::string>{}(scoped_group) % kObjectOperationLockStripes;
+    return {std::unique_lock<std::mutex>(
+        weight_group_operation_locks_[stripe_idx])};
+}
+
 std::shared_ptr<Lease> MasterService::RegisterGroupMember(
     const TenantId& tenant_id, const std::string& key,
     const std::string& group_id) {
@@ -1672,6 +1682,8 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightIm
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     normalized.payload_group_id = canonical_group;
+    [[maybe_unused]] auto operation_lock = AcquireWeightGroupOperationLock(
+        TenantId(request.identity.tenant_id), canonical_group);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -1680,7 +1692,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightIm
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    return weight_metadata_.Publish(*mutation);
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightImport(
@@ -1690,6 +1702,8 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightI
         request.manifest.payload_group_id != canonical_group) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
+    [[maybe_unused]] auto operation_lock = AcquireWeightGroupOperationLock(
+        TenantId(request.identity.tenant_id), canonical_group);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -1700,7 +1714,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightI
         return tl::make_unexpected(mutation.error());
     }
     if (mutation->no_op) {
-        return weight_metadata_.Publish(*mutation);
+        return PersistAndPublishWeightMutation(*mutation);
     }
     auto validation = ValidateWeightGroupForCommit(request);
     if (!validation) {
@@ -1711,11 +1725,17 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightI
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    return weight_metadata_.Publish(*mutation);
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::AbortWeightImport(
     const AbortWeightImportRequest& request) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    [[maybe_unused]] auto operation_lock = AcquireWeightGroupOperationLock(
+        TenantId(request.identity.tenant_id), canonical_group);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -1724,7 +1744,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::AbortWeightIm
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    return weight_metadata_.Publish(*mutation);
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionView> MasterService::GetWeightRevision(
@@ -1831,6 +1851,76 @@ WeightMetadataStore::Result<void> MasterService::ValidateWeightGroupForCommit(
         return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     return {};
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::PersistAndPublishWeightMutation(
+    const WeightMetadataMutation& mutation) {
+    if (mutation.no_op || !enable_oplog_) {
+        return weight_metadata_.Publish(mutation);
+    }
+
+    OpType type;
+    std::string payload;
+    if (mutation.kind == WeightMetadataMutationKind::UPSERT &&
+        mutation.next.has_value()) {
+        type = OpType::WEIGHT_METADATA_UPSERT;
+        const auto encoded = struct_pack::serialize(*mutation.next);
+        payload.assign(encoded.begin(), encoded.end());
+    } else if (mutation.previous.has_value()) {
+        type = OpType::WEIGHT_METADATA_DELETE;
+        WeightMetadataDeleteOp deletion{
+            .identity = mutation.identity,
+            .metadata_generation = mutation.previous->metadata_generation,
+        };
+        const auto encoded = struct_pack::serialize(deletion);
+        payload.assign(encoded.begin(), encoded.end());
+    } else {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+
+    struct Completion {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::optional<WeightMetadataStore::Result<WeightRevisionMetadata>> result;
+    };
+    auto completion = std::make_shared<Completion>();
+    auto persisted = AppendOpLogWithDurableFinalize(
+        type, mutation.identity.tenant_id,
+        MakeWeightRevisionMetadataKey(mutation.identity), payload,
+        [this, mutation, completion](const OpLogEntry& durable_entry) {
+            auto published = weight_metadata_.Publish(mutation);
+            if (!published) {
+                LOG(ERROR) << "Failed to publish durable weight metadata "
+                              "mutation, sequence_id="
+                           << durable_entry.sequence_id
+                           << ", key=" << durable_entry.object_key
+                           << ", error=" << static_cast<int>(published.error());
+            }
+            {
+                std::lock_guard lock(completion->mutex);
+                completion->result = std::move(published);
+            }
+            completion->cv.notify_all();
+        });
+    if (!persisted) {
+        LOG(ERROR) << "Failed to persist weight metadata mutation, key="
+                   << MakeWeightRevisionMetadataKey(mutation.identity)
+                   << ", error=" << static_cast<int>(persisted.error());
+        return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
+    }
+
+    constexpr auto kPublishTimeout = std::chrono::seconds(30);
+    std::unique_lock lock(completion->mutex);
+    if (!completion->cv.wait_for(lock, kPublishTimeout, [&] {
+            return completion->result.has_value();
+        })) {
+        LOG(ERROR) << "Timed out waiting for durable weight metadata publish, "
+                   << "sequence_id=" << persisted->sequence_id
+                   << ", key=" << persisted->object_key;
+        return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
+    }
+    return std::move(*completion->result);
 }
 
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,

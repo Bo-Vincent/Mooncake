@@ -1102,6 +1102,8 @@ class MasterService {
                         const std::string& payload_group_id) const;
     WeightMetadataStore::Result<void> ValidateWeightGroupForCommit(
         const CommitWeightImportRequest& request) const;
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
 
     class SoftPinDeadlineIndex {
         friend class test::MasterServiceTestPeer;
@@ -1174,8 +1176,12 @@ class MasterService {
 
     ObjectOperationLock AcquireObjectOperationLock(const TenantId& tenant_id,
                                                    const std::string& key);
+    ObjectOperationLock AcquireWeightGroupOperationLock(
+        const TenantId& tenant_id, const std::string& group_id);
 
     std::array<std::mutex, kObjectOperationLockStripes> object_operation_locks_;
+    std::array<std::mutex, kObjectOperationLockStripes>
+        weight_group_operation_locks_;
 
     // For accessing a metadata shard with read-write permission
     class MetadataShardAccessorRW {
