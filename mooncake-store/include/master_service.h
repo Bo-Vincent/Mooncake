@@ -1816,6 +1816,8 @@ class MasterService {
                         const std::string& payload_group_id) const;
     WeightMetadataStore::Result<void> ValidateWeightGroupForCommit(
         const CommitWeightImportRequest& request) const;
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
 
     class SoftPinDeadlineIndex {
        public:

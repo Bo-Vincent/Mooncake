@@ -1769,7 +1769,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightIm
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    return weight_metadata_.Publish(*mutation);
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightImport(
@@ -1789,7 +1789,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightI
         return tl::make_unexpected(mutation.error());
     }
     if (mutation->no_op) {
-        return weight_metadata_.Publish(*mutation);
+        return PersistAndPublishWeightMutation(*mutation);
     }
     auto validation = ValidateWeightGroupForCommit(request);
     if (!validation) {
@@ -1800,7 +1800,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightI
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    return weight_metadata_.Publish(*mutation);
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::AbortWeightImport(
@@ -1813,7 +1813,7 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::AbortWeightIm
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    return weight_metadata_.Publish(*mutation);
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionView> MasterService::GetWeightRevision(
@@ -1920,6 +1920,76 @@ WeightMetadataStore::Result<void> MasterService::ValidateWeightGroupForCommit(
         return tl::make_unexpected(WeightManagementError::CONFLICT);
     }
     return {};
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::PersistAndPublishWeightMutation(
+    const WeightMetadataMutation& mutation) {
+    if (mutation.no_op || !enable_oplog_) {
+        return weight_metadata_.Publish(mutation);
+    }
+
+    OpType type;
+    std::string payload;
+    if (mutation.kind == WeightMetadataMutationKind::UPSERT &&
+        mutation.next.has_value()) {
+        type = OpType::WEIGHT_METADATA_UPSERT;
+        const auto encoded = struct_pack::serialize(*mutation.next);
+        payload.assign(encoded.begin(), encoded.end());
+    } else if (mutation.previous.has_value()) {
+        type = OpType::WEIGHT_METADATA_DELETE;
+        WeightMetadataDeleteOp deletion{
+            .identity = mutation.identity,
+            .metadata_generation = mutation.previous->metadata_generation,
+        };
+        const auto encoded = struct_pack::serialize(deletion);
+        payload.assign(encoded.begin(), encoded.end());
+    } else {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+
+    struct Completion {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::optional<WeightMetadataStore::Result<WeightRevisionMetadata>> result;
+    };
+    auto completion = std::make_shared<Completion>();
+    auto persisted = AppendOpLogWithDurableFinalize(
+        type, mutation.identity.tenant_id,
+        MakeWeightRevisionMetadataKey(mutation.identity), payload,
+        [this, mutation, completion](const OpLogEntry& durable_entry) {
+            auto published = weight_metadata_.Publish(mutation);
+            if (!published) {
+                LOG(ERROR) << "Failed to publish durable weight catalog "
+                              "mutation, sequence_id="
+                           << durable_entry.sequence_id
+                           << ", key=" << durable_entry.object_key
+                           << ", error=" << static_cast<int>(published.error());
+            }
+            {
+                std::lock_guard lock(completion->mutex);
+                completion->result = std::move(published);
+            }
+            completion->cv.notify_all();
+        });
+    if (!persisted) {
+        LOG(ERROR) << "Failed to persist weight catalog mutation, key="
+                   << MakeWeightRevisionMetadataKey(mutation.identity)
+                   << ", error=" << static_cast<int>(persisted.error());
+        return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
+    }
+
+    constexpr auto kPublishTimeout = std::chrono::seconds(30);
+    std::unique_lock lock(completion->mutex);
+    if (!completion->cv.wait_for(lock, kPublishTimeout, [&] {
+            return completion->result.has_value();
+        })) {
+        LOG(ERROR) << "Timed out waiting for durable weight catalog publish, "
+                   << "sequence_id=" << persisted->sequence_id
+                   << ", key=" << persisted->object_key;
+        return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
+    }
+    return std::move(*completion->result);
 }
 
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,
