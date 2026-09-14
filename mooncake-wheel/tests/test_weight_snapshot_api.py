@@ -1,12 +1,12 @@
-"""Installed-wheel API checks for model-weight snapshot entry points."""
+"""Installed-wheel API checks for model-weight revision entry points."""
 
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
 
 import mooncake.store as native_store
-from mooncake.reshard.weight.store import WeightStoreWriter
+from mooncake.reshard.weight import WeightUpsertMode
+from mooncake.reshard.weight.store import WeightStore, WeightStoreWriter
 
 
 class TestWeightSnapshotApi(unittest.TestCase):
@@ -15,28 +15,21 @@ class TestWeightSnapshotApi(unittest.TestCase):
             hasattr(native_store.WeightRevisionMetadata, "last_accessed_at_ms")
         )
 
-    def test_native_store_forwards_snapshot_factory(self) -> None:
+    def test_native_store_has_no_weight_writer_shortcut(self) -> None:
         store = native_store.MooncakeDistributedStore()
-        snapshot = object()
-        adapter = object()
-        expected = object()
 
-        with patch(
-            "mooncake.reshard.weight.store.begin_weight_snapshot",
-            return_value=expected,
-        ) as factory:
-            result = store.begin_weight_snapshot(snapshot, adapter)
-
-        self.assertIs(result, expected)
-        self.assertEqual(factory.call_args.args[1:], (snapshot, adapter))
-        self.assertIsInstance(
-            factory.call_args.args[0], native_store.MooncakeDistributedStore
-        )
+        self.assertFalse(hasattr(store, "begin_weight_snapshot"))
+        self.assertFalse(hasattr(store, "begin_managed_weight_snapshot"))
 
     def test_weight_store_writer_replaces_parallelism_api(self) -> None:
         store = native_store.MooncakeDistributedStore()
 
-        self.assertTrue(callable(store.begin_weight_snapshot))
+        self.assertTrue(callable(WeightStore.weight_put))
+        self.assertTrue(callable(WeightStore.weight_upsert))
+        self.assertTrue(callable(WeightStore.weight_update_policy))
+        self.assertFalse(hasattr(WeightStore, "weight_update"))
+        self.assertEqual(int(WeightUpsertMode.PUT_FIRST), 0)
+        self.assertEqual(int(WeightUpsertMode.DELETE_FIRST), 1)
         self.assertTrue(issubclass(WeightStoreWriter, object))
 
         for name in (

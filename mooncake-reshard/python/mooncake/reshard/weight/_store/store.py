@@ -26,6 +26,7 @@ from ..management import (
     WeightRevisionPage,
     WeightRevisionView,
     WeightStoragePolicy,
+    WeightUpsertMode,
 )
 from ...lifetime import TerminalTransferState
 from ..lifetime import (
@@ -51,6 +52,7 @@ from .writer import (
     WeightStoreWriter,
 )
 from .upload import WeightUploadService
+from .upsert import WeightUpsertContext, prepare_weight_upsert_context
 
 
 def _require_upload_plan(plan: WeightUploadPlan) -> None:
@@ -202,7 +204,7 @@ class WeightStore:
         self._upload = WeightUploadService(self, self._payloads, self._transaction)
         self._load = WeightLoadService(self)
 
-    def weight_put_plan(
+    def _weight_put_plan(
         self,
         source_placement: WeightPlacementManifest,
         source_bindings: Sequence[WeightRuntimeBindingManifest],
@@ -215,22 +217,7 @@ class WeightStore:
             namespace=namespace,
         )
 
-    def plan_upload(
-        self,
-        source_placement: WeightPlacementManifest,
-        source_bindings: Sequence[WeightRuntimeBindingManifest],
-        *,
-        namespace: str = "default",
-    ) -> WeightUploadPlan:
-        """Plan an unmanaged upload using the pre-management API."""
-
-        return self.weight_put_plan(
-            source_placement,
-            source_bindings,
-            namespace=namespace,
-        )
-
-    def _weight_put_managed_plan(
+    def _begin_weight_put(
         self,
         source_placement: WeightPlacementManifest,
         source_bindings: Sequence[WeightRuntimeBindingManifest],
@@ -239,18 +226,18 @@ class WeightStore:
         tenant_id: str = "default",
         policy: Optional[WeightStoragePolicy] = None,
     ) -> WeightUploadPlan:
-        """Begin and plan one Store-managed immutable weight revision."""
+        """Begin and plan one immutable weight revision."""
 
         if self.key_prefix != "weights":
             raise WeightStoreError(
-                "managed weight revisions require the canonical weights key prefix"
+                "weight revisions require the canonical weights key prefix"
             )
         effective_policy = policy or self.default_policy
         if effective_policy is not None and not isinstance(
             effective_policy, WeightStoragePolicy
         ):
             raise WeightStoreError("policy must be a WeightStoragePolicy")
-        draft = self.weight_put_plan(
+        draft = self._weight_put_plan(
             source_placement,
             source_bindings,
             namespace=namespace,
@@ -284,15 +271,6 @@ class WeightStore:
             management_generation=importing.metadata_generation,
         )
 
-    def begin_weight_snapshot(
-        self,
-        snapshot: WeightSnapshotDescriptor,
-        adapter: WeightSnapshotAdapter,
-    ) -> WeightStoreWriter:
-        """Create a manifest-backed writer for one immutable model snapshot."""
-
-        return WeightStoreWriter(self, snapshot, adapter)
-
     def weight_put(
         self,
         snapshot: WeightSnapshotDescriptor,
@@ -301,18 +279,100 @@ class WeightStore:
         tenant_id: str = "default",
         policy: Optional[WeightStoragePolicy] = None,
     ) -> WeightStoreWriter:
-        """Create a writer for one Store-managed immutable weight revision."""
+        """Create a writer for one immutable weight revision."""
 
         return WeightStoreWriter(
             self,
             snapshot,
             adapter,
-            managed=True,
             tenant_id=tenant_id,
             policy=policy,
         )
 
-    def weight_put_payload(
+    def weight_upsert(
+        self,
+        snapshot: WeightSnapshotDescriptor,
+        adapter: WeightSnapshotAdapter,
+        *,
+        replacing: WeightRevisionIdentity,
+        expected_metadata_generation: int,
+        mode: WeightUpsertMode = WeightUpsertMode.PUT_FIRST,
+        tenant_id: str = "default",
+        policy: Optional[WeightStoragePolicy] = None,
+        request_id: Optional[str] = None,
+    ) -> WeightStoreWriter:
+        """Replace one immutable revision with a higher generation."""
+
+        context = prepare_weight_upsert_context(
+            snapshot,
+            replacing=replacing,
+            expected_metadata_generation=expected_metadata_generation,
+            mode=mode,
+            tenant_id=tenant_id,
+            request_id=request_id,
+        )
+        return WeightStoreWriter._for_upsert(
+            self,
+            snapshot,
+            adapter,
+            tenant_id=tenant_id,
+            policy=policy,
+            upsert=context,
+        )
+
+    def _begin_weight_upsert(
+        self,
+        source_placement: WeightPlacementManifest,
+        source_bindings: Sequence[WeightRuntimeBindingManifest],
+        *,
+        namespace: str,
+        policy: Optional[WeightStoragePolicy],
+        context: WeightUpsertContext,
+    ) -> WeightUploadPlan:
+        effective_policy = policy or self.default_policy
+        if effective_policy is not None and not isinstance(
+            effective_policy, WeightStoragePolicy
+        ):
+            raise WeightStoreError("policy must be a WeightStoragePolicy")
+        draft = self._weight_put_plan(
+            source_placement,
+            source_bindings,
+            namespace=namespace,
+        )
+        if (
+            draft.manifest.resource_id != context.target.resource_id
+            or draft.manifest.revision != context.target.revision
+            or draft.manifest.weight_generation != context.target.weight_generation
+        ):
+            raise WeightStoreError("upsert target differs from source placement")
+        payload_keys, logical_bytes = _payload_summary(draft.manifest)
+        affinity_count, affinity_digest = _affinity_summary(draft.manifest)
+        importing = self.store.weight_upsert_begin(
+            context.request_id,
+            context.mode,
+            context.replacing,
+            expected_metadata_generation=context.expected_metadata_generation,
+            target=context.target,
+            payload_group_id="",
+            expected_payload_count=len(payload_keys),
+            expected_logical_bytes=logical_bytes,
+            policy=effective_policy,
+            affinity_count=affinity_count,
+            affinity_digest=affinity_digest,
+        )
+        if importing.identity != context.target:
+            raise WeightStoreError("upsert begin returned a different target identity")
+        return replace(
+            draft,
+            manifest=replace(
+                draft.manifest,
+                group_id=importing.manifest.payload_group_id,
+            ),
+            management_identity=importing.identity,
+            management_generation=importing.metadata_generation,
+        )
+
+    def _weight_put_payload(
         self,
         plan: WeightUploadPlan,
         source_placement: WeightPlacementManifest,
@@ -334,85 +394,39 @@ class WeightStore:
             transfer_id=transfer_id,
         )
 
-    def upload(
-        self,
-        plan: WeightUploadPlan,
-        source_placement: WeightPlacementManifest,
-        source_binding: WeightRuntimeBindingManifest,
-        *,
-        source_worker_id: Optional[str] = None,
-        source_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
-        registration_lease: Optional[StoreRegistrationLease] = None,
-        transfer_id: Optional[str] = None,
-    ) -> tuple[UploadReceipt, ...]:
-        """Upload unmanaged payloads using the pre-management API."""
-
-        return self.weight_put_payload(
-            plan,
-            source_placement,
-            source_binding,
-            source_worker_id=source_worker_id,
-            source_allocation_guards=source_allocation_guards,
-            registration_lease=registration_lease,
-            transfer_id=transfer_id,
-        )
-
-    def weight_put_abort(
+    def _weight_put_abort(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
     ) -> None:
         _require_upload_plan(plan)
         if plan.management_identity is not None:
-            metadata = self.store.weight_put_abort_import(
-                plan.management_identity,
-                plan.management_generation or 0,
-            )
-            self.store.weight_reconcile(metadata.identity)
+            metadata = self.store.weight_get_metadata(plan.management_identity).metadata
+            if metadata.availability is WeightAvailabilityState.IMPORTING:
+                metadata = self.store.weight_put_abort_import(
+                    metadata.identity,
+                    metadata.metadata_generation,
+                )
+            if metadata.availability is WeightAvailabilityState.DELETING:
+                metadata = self.store.weight_reconcile(metadata.identity)
+            if metadata.availability is not WeightAvailabilityState.DELETED:
+                raise WeightStoreError(
+                    "cannot abort weight revision in availability state "
+                    f"{metadata.availability.name}"
+                )
             return
         self._transaction.weight_put_abort(plan, receipts)
 
-    def abort_upload(
-        self, plan: WeightUploadPlan, receipts: Sequence[UploadReceipt]
-    ) -> None:
-        """Abort an unmanaged upload using the pre-management API."""
-
-        self.weight_put_abort(plan, receipts)
-
-    def weight_put_finalize(self, plan: WeightUploadPlan) -> None:
+    def _weight_put_finalize(self, plan: WeightUploadPlan) -> None:
         _require_upload_plan(plan)
         self._transaction.weight_put_finalize(plan)
 
-    def finalize_upload_transaction(self, plan: WeightUploadPlan) -> None:
-        """Finalize an unmanaged upload using the pre-management API."""
-
-        self.weight_put_finalize(plan)
-
-    def weight_put_commit(
-        self,
-        plan: WeightUploadPlan,
-        receipts: Sequence[UploadReceipt],
-    ) -> StoredWeightManifest:
-        _require_upload_plan(plan)
-        manifest = self._transaction.weight_put_commit(plan, receipts)
-        self._publish_managed_revision(plan, manifest)
-        return manifest
-
-    def commit_upload(
-        self,
-        plan: WeightUploadPlan,
-        receipts: Sequence[UploadReceipt],
-    ) -> StoredWeightManifest:
-        """Commit an unmanaged upload using the pre-management API."""
-
-        return self.weight_put_commit(plan, receipts)
-
-    def _weight_put_commit_from_writer(
+    def _weight_put_commit(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
         *,
-        on_commit_decision_may_exist: Callable[[], None],
+        on_commit_decision_may_exist: Optional[Callable[[], None]] = None,
     ) -> StoredWeightManifest:
         _require_upload_plan(plan)
         manifest = self._transaction.weight_put_commit(
@@ -420,12 +434,43 @@ class WeightStore:
             receipts,
             on_commit_decision_may_exist=on_commit_decision_may_exist,
         )
-        self._publish_managed_revision(plan, manifest)
+        self._publish_weight_revision(plan, manifest)
         return manifest
 
-    def load_manifest(self, manifest_key: str) -> StoredWeightManifest:
-        """Load an unmanaged manifest by key without lifecycle guarantees."""
+    def _weight_upsert_commit(
+        self,
+        plan: WeightUploadPlan,
+        receipts: Sequence[UploadReceipt],
+        context: WeightUpsertContext,
+        *,
+        on_commit_decision_may_exist: Callable[[], None],
+    ) -> StoredWeightManifest:
+        manifest = self._weight_put_commit(
+            plan,
+            receipts,
+            on_commit_decision_may_exist=on_commit_decision_may_exist,
+        )
+        self.store.weight_upsert_commit(
+            context.request_id,
+            context.replacing,
+            context.target,
+        )
+        return manifest
 
+    def _weight_upsert_abort(
+        self,
+        plan: WeightUploadPlan,
+        receipts: Sequence[UploadReceipt],
+        context: WeightUpsertContext,
+    ) -> None:
+        self._weight_put_abort(plan, receipts)
+        self.store.weight_upsert_abort(
+            context.request_id,
+            context.replacing,
+            context.target,
+        )
+
+    def _weight_get_manifest(self, manifest_key: str) -> StoredWeightManifest:
         return self._load.weight_get_manifest(manifest_key)
 
     def weight_get_metadata(
@@ -465,14 +510,14 @@ class WeightStore:
             limit=limit,
         )
 
-    def weight_update(
+    def weight_update_policy(
         self,
         identity: WeightRevisionIdentity,
         *,
         policy: WeightStoragePolicy,
         expected_metadata_generation: int,
     ) -> WeightRevisionMetadata:
-        return self.store.weight_update(
+        return self.store.weight_update_policy(
             identity,
             expected_metadata_generation=expected_metadata_generation,
             policy=policy,
@@ -551,17 +596,15 @@ class WeightStore:
             ttl_ms=lease_ttl_ms,
         )
         with _RevisionLeaseGuard(self.store, lease, lease_ttl_ms) as lease_guard:
-            manifest = self._load.weight_get_manifest(
-                view.metadata.manifest.manifest_key
-            )
-            self._verify_managed_manifest(view.metadata, manifest)
-            plan = self.weight_get_plan(manifest, target_placement, target_bindings)
+            manifest = self._weight_get_manifest(view.metadata.manifest.manifest_key)
+            self._verify_weight_manifest(view.metadata, manifest)
+            plan = self._weight_get_plan(manifest, target_placement, target_bindings)
             for binding in target_bindings:
                 lease_guard.raise_if_failed()
                 if target_allocation_guards is None:
-                    self.weight_get_payload(plan, target_placement, binding)
+                    self._weight_get_payload(plan, target_placement, binding)
                 else:
-                    self.weight_get_payload(
+                    self._weight_get_payload(
                         plan,
                         target_placement,
                         binding,
@@ -570,7 +613,7 @@ class WeightStore:
                 lease_guard.raise_if_failed()
             return manifest
 
-    def weight_get_plan(
+    def _weight_get_plan(
         self,
         manifest: StoredWeightManifest,
         target_placement: WeightPlacementManifest,
@@ -578,17 +621,7 @@ class WeightStore:
     ) -> WeightLoadPlan:
         return self._load.weight_get_plan(manifest, target_placement, target_bindings)
 
-    def plan_load(
-        self,
-        manifest: StoredWeightManifest,
-        target_placement: WeightPlacementManifest,
-        target_bindings: Sequence[WeightRuntimeBindingManifest],
-    ) -> WeightLoadPlan:
-        """Plan an unmanaged load using the pre-management API."""
-
-        return self.weight_get_plan(manifest, target_placement, target_bindings)
-
-    def weight_get_payload(
+    def _weight_get_payload(
         self,
         plan: WeightLoadPlan,
         target_placement: WeightPlacementManifest,
@@ -610,30 +643,7 @@ class WeightStore:
             transfer_id=transfer_id,
         )
 
-    def load(
-        self,
-        plan: WeightLoadPlan,
-        target_placement: WeightPlacementManifest,
-        target_binding: WeightRuntimeBindingManifest,
-        *,
-        target_worker_id: Optional[str] = None,
-        target_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
-        registration_lease: Optional[StoreRegistrationLease] = None,
-        transfer_id: Optional[str] = None,
-    ) -> None:
-        """Load unmanaged payloads using the pre-management API."""
-
-        self.weight_get_payload(
-            plan,
-            target_placement,
-            target_binding,
-            target_worker_id=target_worker_id,
-            target_allocation_guards=target_allocation_guards,
-            registration_lease=registration_lease,
-            transfer_id=transfer_id,
-        )
-
-    def register_weight_buffers(
+    def _register_weight_buffers(
         self,
         binding: WeightRuntimeBindingManifest,
         *,
@@ -673,13 +683,13 @@ class WeightStore:
             ) from error
         return self.registration.acquire_lease(fresh_binding, fragments, tokens)
 
-    def pending_registration_ids(self) -> tuple[str, ...]:
+    def _pending_registration_ids(self) -> tuple[str, ...]:
         return self.registration.pending_registration_ids()
 
-    def drain_pending_registration(self, pending_registration_id: str) -> None:
+    def _drain_pending_registration(self, pending_registration_id: str) -> None:
         self.registration.drain_pending_registration(pending_registration_id)
 
-    def _publish_managed_revision(
+    def _publish_weight_revision(
         self, plan: WeightUploadPlan, manifest: StoredWeightManifest
     ) -> Optional[WeightRevisionMetadata]:
         identity = plan.management_identity
@@ -701,7 +711,7 @@ class WeightStore:
         )
 
     @staticmethod
-    def _verify_managed_manifest(
+    def _verify_weight_manifest(
         metadata: WeightRevisionMetadata, manifest: StoredWeightManifest
     ) -> None:
         if metadata.availability is not WeightAvailabilityState.READY:
@@ -715,9 +725,9 @@ class WeightStore:
             or manifest.group_id != metadata.manifest.payload_group_id
             or manifest.manifest_key != metadata.manifest.manifest_key
         ):
-            raise WeightStoreError("managed manifest identity mismatch")
+            raise WeightStoreError("weight manifest identity mismatch")
         if manifest.manifest_digest != metadata.manifest.manifest_sha256:
-            raise WeightStoreError("managed manifest digest mismatch")
+            raise WeightStoreError("weight manifest digest mismatch")
 
 
 __all__ = ["WeightStore", "WeightStoreError"]

@@ -22,6 +22,7 @@ from ..management import (
     WeightRevisionPage,
     WeightRevisionView,
     WeightStoragePolicy,
+    WeightUpsertMode,
     lease_from_native,
     metadata_from_native,
     operation_from_native,
@@ -212,6 +213,66 @@ class StoreBackend:
         )
         return metadata_from_native(value)
 
+    def weight_upsert_begin(
+        self,
+        request_id: str,
+        mode: WeightUpsertMode,
+        replacing: WeightRevisionIdentity,
+        *,
+        expected_metadata_generation: int,
+        target: WeightRevisionIdentity,
+        payload_group_id: str,
+        expected_payload_count: int,
+        expected_logical_bytes: int,
+        policy: Optional[WeightStoragePolicy],
+        affinity_count: int,
+        affinity_digest: str,
+    ) -> WeightRevisionMetadata:
+        value = self._management_call(
+            "begin_weight_upsert",
+            request_id,
+            int(mode),
+            *self._identity_args(replacing),
+            expected_metadata_generation,
+            *self._identity_args(target),
+            payload_group_id,
+            expected_payload_count,
+            expected_logical_bytes,
+            policy is not None,
+            int(policy.preferred_residency) if policy is not None else 0,
+            policy.mixed_hot_ratio if policy is not None else 0.5,
+            int(policy.migration_mode) if policy is not None else 0,
+            affinity_count,
+            affinity_digest,
+        )
+        return metadata_from_native(value)
+
+    def weight_upsert_commit(
+        self,
+        request_id: str,
+        replacing: WeightRevisionIdentity,
+        target: WeightRevisionIdentity,
+    ) -> object:
+        return self._management_call(
+            "commit_weight_upsert",
+            request_id,
+            *self._identity_args(replacing),
+            *self._identity_args(target),
+        )
+
+    def weight_upsert_abort(
+        self,
+        request_id: str,
+        replacing: WeightRevisionIdentity,
+        target: WeightRevisionIdentity,
+    ) -> object:
+        return self._management_call(
+            "abort_weight_upsert",
+            request_id,
+            *self._identity_args(replacing),
+            *self._identity_args(target),
+        )
+
     def weight_get_metadata(
         self, identity: WeightRevisionIdentity
     ) -> WeightRevisionView:
@@ -291,7 +352,7 @@ class StoreBackend:
         )
         return operation_from_native(value)
 
-    def weight_update(
+    def weight_update_policy(
         self,
         identity: WeightRevisionIdentity,
         *,
