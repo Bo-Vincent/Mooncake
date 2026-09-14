@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from importlib import import_module
-from typing import Literal, Optional, Protocol, cast
+from typing import Any, Literal, Optional, Protocol, cast
 
 from ..._typing import TypeAlias
 
@@ -21,6 +21,7 @@ from ..management import (
     WeightRevisionMetadata,
     WeightRevisionPage,
     WeightRevisionView,
+    WeightStoragePolicy,
     lease_from_native,
     metadata_from_native,
     operation_from_native,
@@ -81,7 +82,7 @@ class StoreBackend:
     def __init__(self, raw: object) -> None:
         self._raw = raw
 
-    def get(self, key: str) -> bytes:
+    def weight_get_object(self, key: str) -> bytes:
         result = self._call("get", key)
         if isinstance(result, bytearray):
             return bytes(result)
@@ -89,19 +90,21 @@ class StoreBackend:
             return result
         raise WeightStoreError(f"get returned invalid payload for {key}")
 
-    def put(self, key: str, value: bytes, config: object) -> int:
+    def weight_put_object(self, key: str, value: bytes, config: object) -> int:
         return self._status("put", key, value, config)
 
-    def remove(self, key: str, *, force: bool) -> int:
+    def weight_remove_object(self, key: str, *, force: bool) -> int:
         return self._status("remove", key, force=force)
 
-    def is_exist(self, key: str) -> int:
+    def weight_is_exist_object(self, key: str) -> int:
         result = self._call("is_exist", key)
         if type(result) is not int:
             raise WeightStoreError(f"is_exist returned invalid status for {key}")
         return result
 
-    def batch_is_exist(self, keys: Sequence[str]) -> Optional[tuple[int, ...]]:
+    def weight_batch_is_exist(
+        self, keys: Sequence[str]
+    ) -> Optional[tuple[int, ...]]:
         candidate = self._optional_method("batch_is_exist")
         if candidate is None:
             return None
@@ -110,7 +113,7 @@ class StoreBackend:
             raise WeightStoreError(f"existence check failed: {result}")
         return self._int_sequence(result, "batch_is_exist")
 
-    def batch_put_from(
+    def weight_batch_put_from(
         self,
         keys: Sequence[str],
         addresses: Sequence[int],
@@ -153,7 +156,7 @@ class StoreBackend:
             raise WeightStoreError("Store returned an invalid ranged-read snapshot")
         return snapshot
 
-    def begin_weight_import(
+    def weight_put_begin_import(
         self,
         identity: WeightRevisionIdentity,
         *,
@@ -179,7 +182,7 @@ class StoreBackend:
         )
         return metadata_from_native(value)
 
-    def commit_weight_import(
+    def weight_put_commit_import(
         self,
         identity: WeightRevisionIdentity,
         *,
@@ -199,7 +202,7 @@ class StoreBackend:
         )
         return metadata_from_native(value)
 
-    def abort_weight_import(
+    def weight_put_abort_import(
         self, identity: WeightRevisionIdentity, expected_metadata_generation: int
     ) -> WeightRevisionMetadata:
         value = self._management_call(
@@ -209,7 +212,7 @@ class StoreBackend:
         )
         return metadata_from_native(value)
 
-    def get_weight_revision(
+    def weight_get_metadata(
         self, identity: WeightRevisionIdentity
     ) -> WeightRevisionView:
         value = self._management_call(
@@ -217,7 +220,7 @@ class StoreBackend:
         )
         return view_from_native(value)
 
-    def list_weight_revisions(
+    def weight_list(
         self,
         *,
         tenant_id: str,
@@ -236,9 +239,10 @@ class StoreBackend:
         )
         if isinstance(value, WeightRevisionPage):
             return value
+        native = cast(Any, value)
         return WeightRevisionPage(
-            revisions=tuple(view_from_native(item) for item in value.revisions),
-            next_page_token=value.next_page_token,
+            revisions=tuple(view_from_native(item) for item in native.revisions),
+            next_page_token=native.next_page_token,
         )
 
     def acquire_weight_revision_lease(
@@ -267,14 +271,10 @@ class StoreBackend:
             )
         )
 
-    def release_weight_revision_lease(
-        self, *, tenant_id: str, lease_id: int
-    ) -> None:
-        self._management_call(
-            "release_weight_revision_lease", tenant_id, lease_id
-        )
+    def release_weight_revision_lease(self, *, tenant_id: str, lease_id: int) -> None:
+        self._management_call("release_weight_revision_lease", tenant_id, lease_id)
 
-    def start_weight_residency_operation(
+    def weight_migrate(
         self,
         identity: WeightRevisionIdentity,
         *,
@@ -291,16 +291,31 @@ class StoreBackend:
         )
         return operation_from_native(value)
 
-    def query_weight_operation(
+    def weight_update(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        expected_metadata_generation: int,
+        policy: WeightStoragePolicy,
+    ) -> WeightRevisionMetadata:
+        value = self._management_call(
+            "update_weight_policy",
+            *self._identity_args(identity),
+            expected_metadata_generation,
+            int(policy.preferred_residency),
+            policy.mixed_hot_ratio,
+            int(policy.migration_mode),
+        )
+        return metadata_from_native(value)
+
+    def weight_get_operation(
         self, *, tenant_id: str, operation_id: int
     ) -> WeightResidencyOperation:
         return operation_from_native(
-            self._management_call(
-                "query_weight_operation", tenant_id, operation_id
-            )
+            self._management_call("query_weight_operation", tenant_id, operation_id)
         )
 
-    def reconcile_weight_revision(
+    def weight_reconcile(
         self, identity: WeightRevisionIdentity
     ) -> WeightRevisionMetadata:
         return metadata_from_native(
@@ -309,7 +324,7 @@ class StoreBackend:
             )
         )
 
-    def delete_weight_revision(
+    def weight_remove(
         self, identity: WeightRevisionIdentity, expected_metadata_generation: int
     ) -> WeightRevisionMetadata:
         return metadata_from_native(
@@ -320,7 +335,7 @@ class StoreBackend:
             )
         )
 
-    def get_into_ranges(
+    def weight_get_into_ranges(
         self,
         addresses: Sequence[int],
         all_keys: Sequence[Sequence[str]],
