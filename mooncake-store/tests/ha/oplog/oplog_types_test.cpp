@@ -87,19 +87,21 @@ TEST(OpLogTypesTest, WeightDeleteTombstonesRoundTrip) {
 
 TEST(OpLogTypesTest, WeightLeaseAccessRoundTrips) {
     const WeightLeaseUpsertOp upsert{
-        .lease = WeightRevisionLease{
-            .lease_id = 42,
-            .identity = WeightRevisionIdentity{
-                .tenant_id = "tenant-a",
-                .name_space = "production",
-                .resource_id = "llama-70b",
-                .revision = "step-100",
-                .weight_generation = 7,
+        .lease =
+            WeightRevisionLease{
+                .lease_id = 42,
+                .identity =
+                    WeightRevisionIdentity{
+                        .tenant_id = "tenant-a",
+                        .name_space = "production",
+                        .resource_id = "llama-70b",
+                        .revision = "step-100",
+                        .weight_generation = 7,
+                    },
+                .holder = "reader",
+                .expires_at_ms = 1000,
+                .fenced_metadata_generation = 9,
             },
-            .holder = "reader",
-            .expires_at_ms = 1000,
-            .fenced_metadata_generation = 9,
-        },
         .last_accessed_at_ms = 500,
     };
     const auto bytes = struct_pack::serialize(upsert);

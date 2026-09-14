@@ -665,8 +665,7 @@ TEST_F(SnapshotChildProcessTest, RestoreRebuildsGroupedObjectRouting) {
     ASSERT_TRUE(restored_replicas.has_value())
         << "Grouped key should remain reachable by key after restore";
     EXPECT_EQ("opaque-affinity-id",
-              ObjectResidencyAffinityId(
-                  key, GetShardIndexForTest(key)));
+              ObjectResidencyAffinityId(key, GetShardIndexForTest(key)));
     ASSERT_TRUE(
         service_->Remove(key, TenantId::Default(), /*force=*/true).has_value());
     EXPECT_FALSE(service_->ExistKey(key, TenantId::Default()).value_or(true));

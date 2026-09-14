@@ -53,14 +53,16 @@ class MasterServiceWeightManagementTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = payload_count,
             .expected_logical_bytes = logical_bytes,
-            .policy = WeightStoragePolicy{
-                .preferred_residency = WeightResidencyState::HOT,
-                .migration_mode = WeightMigrationMode::MANUAL,
-            },
-            .affinity_summary = WeightAffinitySummary{
-                .affinity_count = payload_count,
-                .affinity_digest = std::string(64, 'c'),
-            },
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = payload_count,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
         EXPECT_TRUE(result.has_value());
         return *result;
@@ -114,8 +116,7 @@ TEST_F(MasterServiceWeightManagementTest,
     EXPECT_EQ(WeightResidencyState::COLD,
               importing->policy.preferred_residency);
     EXPECT_DOUBLE_EQ(0.25, importing->policy.mixed_hot_ratio);
-    EXPECT_EQ(WeightMigrationMode::MANUAL,
-              importing->policy.migration_mode);
+    EXPECT_EQ(WeightMigrationMode::MANUAL, importing->policy.migration_mode);
 }
 
 TEST_F(MasterServiceWeightManagementTest,
@@ -134,8 +135,7 @@ TEST_F(MasterServiceWeightManagementTest,
         .migration_mode = WeightMigrationMode::PINNED,
     };
 
-    auto importing =
-        service.BeginWeightImport(BeginRequest(request_policy));
+    auto importing = service.BeginWeightImport(BeginRequest(request_policy));
 
     ASSERT_TRUE(importing.has_value());
     EXPECT_EQ(request_policy, importing->policy);
@@ -160,12 +160,10 @@ TEST_F(MasterServiceWeightManagementTest,
     auto importing = service.BeginWeightImport(request);
 
     ASSERT_FALSE(importing.has_value());
-    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE,
-              importing.error());
+    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE, importing.error());
 }
 
-TEST_F(MasterServiceWeightManagementTest,
-       RejectsZeroMigrationBatchLimits) {
+TEST_F(MasterServiceWeightManagementTest, RejectsZeroMigrationBatchLimits) {
     MasterServiceConfig config;
     config.weight_migration_max_members_per_round = 0;
     EXPECT_THROW(MasterService service(config), std::invalid_argument);
@@ -193,11 +191,12 @@ TEST_F(MasterServiceWeightManagementTest,
     const UpdateWeightPolicyRequest request{
         .identity = ready->identity,
         .expected_metadata_generation = ready->metadata_generation,
-        .policy = WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::COLD,
-            .mixed_hot_ratio = 0.5,
-            .migration_mode = WeightMigrationMode::AUTO,
-        },
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::COLD,
+                .mixed_hot_ratio = 0.5,
+                .migration_mode = WeightMigrationMode::AUTO,
+            },
     };
 
     auto updated = service.UpdateWeightPolicy(request);

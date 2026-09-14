@@ -2164,8 +2164,9 @@ void RegisterRpcService(
     server
         .register_handler<&mooncake::WrappedMasterService::ListWeightRevisions>(
             &wrapped_master_service);
-    server.register_handler<&mooncake::WrappedMasterService::UpdateWeightPolicy>(
-        &wrapped_master_service);
+    server
+        .register_handler<&mooncake::WrappedMasterService::UpdateWeightPolicy>(
+            &wrapped_master_service);
     server.register_handler<
         &mooncake::WrappedMasterService::AcquireWeightRevisionLease>(
         &wrapped_master_service);

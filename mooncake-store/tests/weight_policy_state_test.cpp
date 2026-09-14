@@ -149,8 +149,7 @@ TEST(WeightPolicyStateTest, PinnedPolicyRejectsExplicitMigration) {
         300);
 
     ASSERT_FALSE(migration.has_value());
-    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE,
-              migration.error());
+    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE, migration.error());
     const auto unchanged = metadata_store.Get(ready.identity, 301);
     ASSERT_TRUE(unchanged.has_value());
     EXPECT_EQ(ready.metadata_generation,
@@ -180,8 +179,7 @@ TEST(WeightPolicyStateTest,
     auto update = metadata_store.PrepareUpdatePolicy(request, 300);
     ASSERT_TRUE(update.has_value());
     ASSERT_TRUE(update->operation.has_value());
-    EXPECT_EQ(WeightResidencyState::COLD,
-              update->operation->target_residency);
+    EXPECT_EQ(WeightResidencyState::COLD, update->operation->target_residency);
     auto updated = metadata_store.Publish(*update);
     ASSERT_TRUE(updated.has_value());
     EXPECT_EQ(WeightResidencyState::COLD, updated->policy.preferred_residency);
@@ -240,11 +238,12 @@ TEST(WeightPolicyStateTest, ManualPolicyUpdateDoesNotStartMigration) {
         UpdateWeightPolicyRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
-            .policy = WeightStoragePolicy{
-                .preferred_residency = WeightResidencyState::COLD,
-                .mixed_hot_ratio = 0.5,
-                .migration_mode = WeightMigrationMode::MANUAL,
-            },
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::COLD,
+                    .mixed_hot_ratio = 0.5,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
         },
         300);
 

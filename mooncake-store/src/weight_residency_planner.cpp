@@ -194,8 +194,7 @@ PlanMixedWeightResidency(const std::vector<WeightAffinityUnit>& units,
 
 std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     const WeightRevisionMetadata& metadata, uint64_t active_lease_count,
-    WeightAutoMigrationSignal signal, uint64_t now_ms,
-    uint64_t cooldown_ms) {
+    WeightAutoMigrationSignal signal, uint64_t now_ms, uint64_t cooldown_ms) {
     const uint64_t cooldown_origin =
         signal == WeightAutoMigrationSignal::MEMORY_PRESSURE
             ? std::max(metadata.updated_at_ms, metadata.last_accessed_at_ms)
@@ -237,8 +236,7 @@ std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     }
 
     if (metadata.residency == WeightResidencyState::COLD) {
-        if (metadata.policy.preferred_residency ==
-            WeightResidencyState::HOT) {
+        if (metadata.policy.preferred_residency == WeightResidencyState::HOT) {
             return WeightAutoMigrationTarget{
                 .residency = WeightResidencyState::HOT,
                 .mixed_hot_ratio = std::nullopt,
@@ -255,8 +253,7 @@ std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     }
 
     if (metadata.residency == WeightResidencyState::MIXED) {
-        if (metadata.policy.preferred_residency ==
-            WeightResidencyState::HOT) {
+        if (metadata.policy.preferred_residency == WeightResidencyState::HOT) {
             return WeightAutoMigrationTarget{
                 .residency = WeightResidencyState::HOT,
                 .mixed_hot_ratio = std::nullopt,

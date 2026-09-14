@@ -90,13 +90,13 @@ TEST(WeightResidencyPlannerTest, AutoPressureStepsTowardCold) {
               }),
               PlanAutomaticWeightMigration(
                   hot, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50));
-    EXPECT_EQ((WeightAutoMigrationTarget{
-                  .residency = WeightResidencyState::COLD,
-                  .mixed_hot_ratio = std::nullopt,
-              }),
-              PlanAutomaticWeightMigration(
-                  mixed, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200,
-                  50));
+    EXPECT_EQ(
+        (WeightAutoMigrationTarget{
+            .residency = WeightResidencyState::COLD,
+            .mixed_hot_ratio = std::nullopt,
+        }),
+        PlanAutomaticWeightMigration(
+            mixed, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50));
 
     hot.affinity_count = 1;
     EXPECT_EQ((WeightAutoMigrationTarget{
@@ -124,49 +124,49 @@ TEST(WeightResidencyPlannerTest, AutoAccessPromotesTowardPreferred) {
               }),
               PlanAutomaticWeightMigration(
                   cold, 1, WeightAutoMigrationSignal::ACCESS, 200, 50));
-    EXPECT_EQ((WeightAutoMigrationTarget{
-                  .residency = WeightResidencyState::HOT,
-                  .mixed_hot_ratio = std::nullopt,
-              }),
-              PlanAutomaticWeightMigration(
-                  mixed, 0, WeightAutoMigrationSignal::CAPACITY_AVAILABLE, 200,
-                  50));
+    EXPECT_EQ(
+        (WeightAutoMigrationTarget{
+            .residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = std::nullopt,
+        }),
+        PlanAutomaticWeightMigration(
+            mixed, 0, WeightAutoMigrationSignal::CAPACITY_AVAILABLE, 200, 50));
 }
 
 TEST(WeightResidencyPlannerTest, AutoDecisionEnforcesEligibilityAndCooldown) {
     auto metadata = AutoMetadata(WeightResidencyState::HOT);
-    EXPECT_FALSE(PlanAutomaticWeightMigration(
-                     metadata, 1, WeightAutoMigrationSignal::MEMORY_PRESSURE,
-                     200, 50)
-                     .has_value());
-    EXPECT_FALSE(PlanAutomaticWeightMigration(
-                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
-                     149, 50)
-                     .has_value());
+    EXPECT_FALSE(
+        PlanAutomaticWeightMigration(
+            metadata, 1, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50)
+            .has_value());
+    EXPECT_FALSE(
+        PlanAutomaticWeightMigration(
+            metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 149, 50)
+            .has_value());
     metadata.last_accessed_at_ms = 190;
-    EXPECT_FALSE(PlanAutomaticWeightMigration(
-                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
-                     200, 50)
-                     .has_value());
+    EXPECT_FALSE(
+        PlanAutomaticWeightMigration(
+            metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50)
+            .has_value());
     metadata.last_accessed_at_ms = 100;
 
     metadata.policy.migration_mode = WeightMigrationMode::MANUAL;
-    EXPECT_FALSE(PlanAutomaticWeightMigration(
-                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
-                     200, 50)
-                     .has_value());
+    EXPECT_FALSE(
+        PlanAutomaticWeightMigration(
+            metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50)
+            .has_value());
     metadata.policy.migration_mode = WeightMigrationMode::AUTO;
     metadata.operation_id = 9;
-    EXPECT_FALSE(PlanAutomaticWeightMigration(
-                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
-                     200, 50)
-                     .has_value());
+    EXPECT_FALSE(
+        PlanAutomaticWeightMigration(
+            metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50)
+            .has_value());
     metadata.operation_id.reset();
     metadata.availability = WeightAvailabilityState::DEGRADED;
-    EXPECT_FALSE(PlanAutomaticWeightMigration(
-                     metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE,
-                     200, 50)
-                     .has_value());
+    EXPECT_FALSE(
+        PlanAutomaticWeightMigration(
+            metadata, 0, WeightAutoMigrationSignal::MEMORY_PRESSURE, 200, 50)
+            .has_value());
 }
 
 TEST(WeightResidencyPlannerTest, AutoCandidatesUsePersistentAccessOrder) {

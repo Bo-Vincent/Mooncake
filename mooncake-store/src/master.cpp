@@ -1030,8 +1030,8 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         master_config.max_kv_soft_pin_ttl = ParseDurationFlagOrDie(
             "max_kv_soft_pin_ttl", FLAGS_max_kv_soft_pin_ttl);
     }
-    if ((google::GetCommandLineFlagInfo(
-             "default_weight_preferred_residency", &info) &&
+    if ((google::GetCommandLineFlagInfo("default_weight_preferred_residency",
+                                        &info) &&
          !info.is_default) ||
         !conf_set) {
         master_config.default_weight_storage_policy.preferred_residency =
@@ -1067,8 +1067,8 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         master_config.weight_migration_max_members_per_round =
             FLAGS_weight_migration_max_members_per_round;
     }
-    if ((google::GetCommandLineFlagInfo(
-             "weight_migration_max_bytes_per_round", &info) &&
+    if ((google::GetCommandLineFlagInfo("weight_migration_max_bytes_per_round",
+                                        &info) &&
          !info.is_default) ||
         !conf_set) {
         master_config.weight_migration_max_bytes_per_round =

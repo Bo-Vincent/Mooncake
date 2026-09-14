@@ -671,8 +671,8 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 1, operation->total_units, 1024,
-        operation->total_bytes, "unit-1", {}, WeightResidencyState::MIXED,
-        0.75, 400);
+        operation->total_bytes, "unit-1", {}, WeightResidencyState::MIXED, 0.75,
+        400);
     ASSERT_TRUE(progress.has_value());
     EXPECT_FALSE(progress->no_op);
     auto published = metadata_store.Publish(*progress);
@@ -681,8 +681,8 @@ TEST(WeightMetadataStoreTest, UnchangedOperationProgressIsIdempotent) {
 
     auto retry = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 1, operation->total_units, 1024,
-        operation->total_bytes, "unit-1", {}, WeightResidencyState::MIXED,
-        0.75, 500);
+        operation->total_bytes, "unit-1", {}, WeightResidencyState::MIXED, 0.75,
+        500);
     ASSERT_TRUE(retry.has_value());
     EXPECT_TRUE(retry->no_op);
     auto retried = metadata_store.Publish(*retry);
@@ -706,8 +706,8 @@ TEST(WeightMetadataStoreTest, OperationTimestampsRemainMonotonic) {
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 1, operation->total_units, 1024,
-        operation->total_bytes, "member-1", {},
-        WeightResidencyState::MIXED, 0.5, 250);
+        operation->total_bytes, "member-1", {}, WeightResidencyState::MIXED,
+        0.5, 250);
     ASSERT_TRUE(progress.has_value());
     operation = metadata_store.Publish(*progress);
     ASSERT_TRUE(operation.has_value());
@@ -742,29 +742,29 @@ TEST(WeightMetadataStoreTest, OperationProgressRejectsRegression) {
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 2, operation->total_units, 2048,
-        operation->total_bytes, "unit-2", {}, WeightResidencyState::MIXED,
-        0.5, 400);
+        operation->total_bytes, "unit-2", {}, WeightResidencyState::MIXED, 0.5,
+        400);
     ASSERT_TRUE(progress.has_value());
     ASSERT_TRUE(metadata_store.Publish(*progress).has_value());
 
     auto units_regressed = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 1, operation->total_units, 2048,
-        operation->total_bytes, "unit-1", {}, WeightResidencyState::MIXED,
-        0.5, 500);
+        operation->total_bytes, "unit-1", {}, WeightResidencyState::MIXED, 0.5,
+        500);
     ASSERT_FALSE(units_regressed.has_value());
     EXPECT_EQ(WeightManagementError::CONFLICT, units_regressed.error());
 
     auto bytes_regressed = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 2, operation->total_units, 1024,
-        operation->total_bytes, "unit-2", {}, WeightResidencyState::MIXED,
-        0.5, 500);
+        operation->total_bytes, "unit-2", {}, WeightResidencyState::MIXED, 0.5,
+        500);
     ASSERT_FALSE(bytes_regressed.has_value());
     EXPECT_EQ(WeightManagementError::CONFLICT, bytes_regressed.error());
 
     auto totals_changed = metadata_store.PrepareUpdateOperationProgress(
         operation->operation_id, 2, operation->total_units + 1, 2048,
-        operation->total_bytes, "unit-2", {}, WeightResidencyState::MIXED,
-        0.5, 500);
+        operation->total_bytes, "unit-2", {}, WeightResidencyState::MIXED, 0.5,
+        500);
     ASSERT_FALSE(totals_changed.has_value());
     EXPECT_EQ(WeightManagementError::CONFLICT, totals_changed.error());
 }
@@ -797,8 +797,7 @@ TEST(WeightMetadataStoreTest,
     const auto after = metadata_store.Get(ready.identity, 400);
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(before->metadata, after->metadata);
-    EXPECT_EQ(WeightAvailabilityState::READY,
-              after->metadata.availability);
+    EXPECT_EQ(WeightAvailabilityState::READY, after->metadata.availability);
     EXPECT_EQ(WeightResidencyState::HOT, after->metadata.residency);
 
     auto retry = metadata_store.PrepareRecordOperationError(
@@ -907,8 +906,7 @@ TEST(WeightMetadataStoreTest, RejectsReadyRevisionWithoutReadableResidency) {
     auto ready = PublishReady(metadata_store);
     auto reconcile = metadata_store.PrepareReconcile(
         ready.identity, ready.metadata_generation,
-        WeightAvailabilityState::READY, WeightResidencyState::ABSENT, 0.0,
-        300);
+        WeightAvailabilityState::READY, WeightResidencyState::ABSENT, 0.0, 300);
     ASSERT_FALSE(reconcile.has_value());
     EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, reconcile.error());
     EXPECT_EQ(WeightResidencyState::HOT,

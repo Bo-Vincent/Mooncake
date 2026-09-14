@@ -250,8 +250,7 @@ TEST_F(OpLogApplierTest, AppliesWeightLeaseAndDeleteTombstones) {
                       .last_accessed_at_ms = 500,
                   }))));
     EXPECT_EQ(lease, mock_metadata_store_->GetWeightLease(lease.lease_id));
-    auto accessed =
-        mock_metadata_store_->GetWeightMetadata(metadata.identity);
+    auto accessed = mock_metadata_store_->GetWeightMetadata(metadata.identity);
     ASSERT_TRUE(accessed.has_value());
     EXPECT_EQ(500, accessed->last_accessed_at_ms);
 
@@ -536,8 +535,7 @@ TEST_F(OpLogApplierTest, TestApplyPutEndPreservesResidencyAffinityId) {
     ASSERT_TRUE(applier_->ApplyOpLogEntry(entry));
     auto stored = mock_metadata_store_->GetMetadata("key1");
     ASSERT_TRUE(stored.has_value());
-    EXPECT_EQ("opaque-affinity-id",
-              stored->residency_affinity_id.value_or(""));
+    EXPECT_EQ("opaque-affinity-id", stored->residency_affinity_id.value_or(""));
 }
 
 TEST_F(OpLogApplierTest, TestApplyPutEnd_InvalidPayload) {

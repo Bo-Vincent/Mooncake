@@ -14,8 +14,8 @@ namespace mooncake {
 
 inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS = 30'000;
 inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND = 64;
-inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND =
-    1ULL << 30;
+inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND = 1ULL
+                                                                         << 30;
 
 struct ClientLivenessConfigSource {
     std::optional<int64_t> active_ttl_sec;

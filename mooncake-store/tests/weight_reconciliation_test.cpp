@@ -29,16 +29,13 @@ class WeightReconciliationTest : public MasterServiceTest {
                std::to_string(identity.weight_generation) + "/manifest";
     }
 
-    WeightRevisionMetadata PublishReady(MasterService& service,
-                                        const UUID& client_id,
-                                        std::string revision,
-                                        WeightStoragePolicy policy = {
-                                            .preferred_residency =
-                                                WeightResidencyState::HOT,
-                                            .mixed_hot_ratio = 0.5,
-                                            .migration_mode =
-                                                WeightMigrationMode::MANUAL,
-                                        }) {
+    WeightRevisionMetadata PublishReady(
+        MasterService& service, const UUID& client_id, std::string revision,
+        WeightStoragePolicy policy = {
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        }) {
         const auto identity = Identity(std::move(revision));
         auto importing = service.BeginWeightImport(BeginWeightImportRequest{
             .identity = identity,
@@ -46,10 +43,11 @@ class WeightReconciliationTest : public MasterServiceTest {
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
             .policy = policy,
-            .affinity_summary = WeightAffinitySummary{
-                .affinity_count = 1,
-                .affinity_digest = std::string(64, 'c'),
-            },
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 1,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
         EXPECT_TRUE(importing.has_value());
         const auto payload_key = identity.revision + "-payload";
@@ -90,13 +88,13 @@ TEST_F(WeightReconciliationTest,
     config.eviction_high_watermark_ratio = 0.0;
     MasterService service(config);
     const auto context = PrepareSimpleSegment(service);
-    auto ready = PublishReady(
-        service, context.client_id, "step-auto-pressure",
-        WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .mixed_hot_ratio = 0.5,
-            .migration_mode = WeightMigrationMode::AUTO,
-        });
+    auto ready =
+        PublishReady(service, context.client_id, "step-auto-pressure",
+                     WeightStoragePolicy{
+                         .preferred_residency = WeightResidencyState::HOT,
+                         .mixed_hot_ratio = 0.5,
+                         .migration_mode = WeightMigrationMode::AUTO,
+                     });
 
     EXPECT_EQ(1, service.RunWeightReconciliationForTesting(
                      ready.updated_at_ms + 30'001, 1));
@@ -120,15 +118,15 @@ TEST_F(WeightReconciliationTest, AutoPressureSkipsActiveRevisionLease) {
     config.eviction_high_watermark_ratio = 0.0;
     MasterService service(config);
     const auto context = PrepareSimpleSegment(service);
-    auto ready = PublishReady(
-        service, context.client_id, "step-auto-leased",
-        WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .mixed_hot_ratio = 0.5,
-            .migration_mode = WeightMigrationMode::AUTO,
-        });
-    auto lease = service.AcquireWeightRevisionLease(
-        AcquireWeightRevisionLeaseRequest{
+    auto ready =
+        PublishReady(service, context.client_id, "step-auto-leased",
+                     WeightStoragePolicy{
+                         .preferred_residency = WeightResidencyState::HOT,
+                         .mixed_hot_ratio = 0.5,
+                         .migration_mode = WeightMigrationMode::AUTO,
+                     });
+    auto lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
             .holder = "reader",
@@ -136,8 +134,7 @@ TEST_F(WeightReconciliationTest, AutoPressureSkipsActiveRevisionLease) {
         });
     ASSERT_TRUE(lease.has_value());
 
-    service.RunWeightReconciliationForTesting(ready.updated_at_ms + 30'001,
-                                              1);
+    service.RunWeightReconciliationForTesting(ready.updated_at_ms + 30'001, 1);
 
     auto view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = ready.identity});
@@ -164,14 +161,16 @@ TEST_F(WeightReconciliationTest, ExpiresLeasesAndAbortsAbandonedImports) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-        .policy = WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .migration_mode = WeightMigrationMode::MANUAL,
-        },
-        .affinity_summary = WeightAffinitySummary{
-            .affinity_count = 1,
-            .affinity_digest = std::string(64, 'c'),
-        },
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing.has_value());
     const uint64_t now_ms = std::max(
@@ -203,28 +202,32 @@ TEST_F(WeightReconciliationTest, WorkLimitBoundsAbandonedImportTransitions) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-        .policy = WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .migration_mode = WeightMigrationMode::MANUAL,
-        },
-        .affinity_summary = WeightAffinitySummary{
-            .affinity_count = 1,
-            .affinity_digest = std::string(64, 'c'),
-        },
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     auto second = service.BeginWeightImport(BeginWeightImportRequest{
         .identity = Identity("step-b"),
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-        .policy = WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .migration_mode = WeightMigrationMode::MANUAL,
-        },
-        .affinity_summary = WeightAffinitySummary{
-            .affinity_count = 1,
-            .affinity_digest = std::string(64, 'c'),
-        },
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
@@ -284,8 +287,8 @@ TEST_F(WeightReconciliationTest, MissingPayloadOrManifestBecomesDegraded) {
                      "degraded"));
     EXPECT_EQ(1, MasterMetricManager::instance().get_weight_residency_count(
                      "absent"));
-    EXPECT_EQ(1,
-              MasterMetricManager::instance().get_weight_residency_count("hot"));
+    EXPECT_EQ(
+        1, MasterMetricManager::instance().get_weight_residency_count("hot"));
 }
 
 TEST_F(WeightReconciliationTest, ProjectsLeaseAndOperationMetrics) {
