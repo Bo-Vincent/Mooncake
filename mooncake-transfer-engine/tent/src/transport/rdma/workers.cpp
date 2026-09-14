@@ -876,8 +876,18 @@ void Workers::asyncPostSend() {
                 slice = slice->next;
                 continue;
             }
-            auto status = generatePostPath(slice);
+            bool recovery_probe_in_progress = false;
+            auto status =
+                generatePostPath(slice, &recovery_probe_in_progress);
             if (!status.ok()) {
+                if (recovery_probe_in_progress) {
+                    // One sibling is proving this rail. Keep the remaining
+                    // slices pending until its WC either recovers the rail or
+                    // consumes this metadata generation on failure.
+                    submitFromTick(worker, slice);
+                    slice = slice->next;
+                    continue;
+                }
                 LOG(ERROR) << "Failed to generate post path for slice " << slice
                            << ": " << status.ToString();
                 releaseSliceQuota(slice, getCurrentTimeInNano());
@@ -1779,7 +1789,8 @@ int Workers::getDeviceRank(const RouteHint& hint, int device_id) {
 }
 
 Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
-                                    RdmaSlice* slice) {
+                                    RdmaSlice* slice,
+                                    bool* recovery_probe_in_progress) {
     auto& worker = worker_context_[tl_wid];
     if (slice->source_dev_id < 0) {
         CHECK_STATUS(device_selector_->allocate(
@@ -1876,7 +1887,8 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
         LOG(INFO) << "Optimal device pair not available: source_dev_id "
                   << slice->source_dev_id << ", target_dev_id "
                   << slice->target_dev_id;
-        return selectFallbackDevice(source, target, slice);
+        return selectFallbackDevice(source, target, slice,
+                                    recovery_probe_in_progress);
     }
 
     return Status::OK();
@@ -1917,7 +1929,8 @@ bool Workers::gdrPairExcluded(const RouteHint& source, const RouteHint& target,
 }
 
 Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
-                                     RdmaSlice* slice) {
+                                     RdmaSlice* slice,
+                                     bool* recovery_probe_in_progress) {
     LOG_EVERY_N(INFO, 100) << "fallback device selection for slice " << slice;
     bool same_machine =
         (source.segment->machine_id == target.segment->machine_id);
@@ -1987,8 +2000,12 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
         bool reachable = same_machine ? (sdev == tdev)  // loopback is safe
                                       : rail_mon->available(sdev, tdev);
         if (!same_machine && !reachable) {
+            bool pair_probe_in_progress = false;
             reachable = rail_mon->tryRecoveryProbe(
-                sdev, tdev, slice->rail_probe_token);
+                sdev, tdev, slice->rail_probe_token,
+                &pair_probe_in_progress);
+            if (pair_probe_in_progress && recovery_probe_in_progress)
+                *recovery_probe_in_progress = true;
         }
 
         if (reachable) {
@@ -2009,7 +2026,8 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
     return Status::DeviceNotFound("No available path" LOC_MARK);
 }
 
-Status Workers::generatePostPath(RdmaSlice* slice) {
+Status Workers::generatePostPath(RdmaSlice* slice,
+                                 bool* recovery_probe_in_progress) {
     RouteHint source, target;
     CHECK_STATUS(getRouteHint(source, LOCAL_SEGMENT_ID,
                               (uint64_t)slice->source_addr, slice->length));
@@ -2019,9 +2037,11 @@ Status Workers::generatePostPath(RdmaSlice* slice) {
                               slice->length));
 
     if (slice->retry_count == 0)
-        CHECK_STATUS(selectOptimalDevice(source, target, slice));
+        CHECK_STATUS(selectOptimalDevice(source, target, slice,
+                                         recovery_probe_in_progress));
     else
-        CHECK_STATUS(selectFallbackDevice(source, target, slice));
+        CHECK_STATUS(selectFallbackDevice(source, target, slice,
+                                          recovery_probe_in_progress));
     // Keys are NicID-indexed. A peer running an older build publishes a
     // compacted rkey vector, so a NicID from its device_list can point past the
     // end; fail the slice instead of reading out of bounds.
