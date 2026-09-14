@@ -445,6 +445,7 @@ fi
 # libmpcomm.so; and (b) let patchelf rewrite a library carrying CUDA fatbins
 # (MPComm builds TMA kernels with USE_CUDA_KERNELS=ON by default), the same
 # corruption risk the EP/PG extensions are kept away from below.
+# Keep libcrypto repairable because mooncake/store.so links OpenSSL::Crypto.
 ${AUDITWHEEL_CMD} repair ${OUTPUT_DIR}/*.whl \
     --exclude libcurl.so* \
     --exclude libfabric.so* \
@@ -461,7 +462,6 @@ ${AUDITWHEEL_CMD} repair ${OUTPUT_DIR}/*.whl \
     --exclude libssh.so* \
     --exclude libpsl.so* \
     --exclude libssl.so* \
-    --exclude libcrypto.so* \
     --exclude libgssapi_krb5.so* \
     --exclude libldap.so* \
     --exclude liblber.so* \
