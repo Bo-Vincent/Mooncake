@@ -2618,7 +2618,8 @@ TEST_F(MasterServiceHATest, WeightLeaseBecomesVisibleOnlyAfterDurableCallback) {
     EXPECT_EQ(1u, after->active_lease_count);
 }
 
-TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightMetadataStore) {
+TEST_F(MasterServiceHATest,
+       StandbyPromotionRestoresCompleteWeightMetadataStore) {
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -2691,7 +2692,8 @@ TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadataStore) {
 
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}));
     EXPECT_FALSE(
-        service.GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
+        service
+            .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
             .has_value());
 }
 

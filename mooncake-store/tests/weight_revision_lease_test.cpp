@@ -17,7 +17,8 @@ WeightRevisionIdentity Identity() {
     };
 }
 
-WeightRevisionMetadata PublishReady(WeightMetadataStore& catalog, uint64_t now_ms) {
+WeightRevisionMetadata PublishReady(WeightMetadataStore& catalog,
+                                    uint64_t now_ms) {
     const auto identity = Identity();
     const auto group_id = MakeWeightPayloadGroupId(identity);
     auto begin = catalog.PrepareBeginImport(
@@ -102,8 +103,7 @@ TEST(WeightRevisionLeaseTest, RejectsStaleGenerationAndExpiredRenewal) {
     auto stale = catalog.PrepareAcquireLease(
         AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
-            .expected_metadata_generation =
-                ready.metadata_generation - 1,
+            .expected_metadata_generation = ready.metadata_generation - 1,
             .holder = "worker-0",
             .ttl_ms = 1000,
         },
