@@ -570,8 +570,8 @@ class MasterServiceTest : public ::testing::Test {
     bool IsObjectProcessingForTest(MasterService& service,
                                    const std::string& key) {
         MasterService::MetadataAccessorRO accessor(
-            &service, MasterService::MakeObjectIdentity(
-                          key, TenantId::Default()));
+            &service,
+            MasterService::MakeObjectIdentity(key, TenantId::Default()));
         return accessor.Exists() && accessor.InProcessing();
     }
 

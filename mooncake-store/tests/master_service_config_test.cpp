@@ -134,8 +134,7 @@ TEST(MasterServiceConfigTest, DefaultWeightPolicyPropagatesToServingConfig) {
     EXPECT_EQ(12u, supervisor_config.weight_migration_max_members_per_round);
     EXPECT_EQ(12u, wrapped_config.weight_migration_max_members_per_round);
     EXPECT_EQ(12u, service_config.weight_migration_max_members_per_round);
-    EXPECT_EQ(34'567u,
-              supervisor_config.weight_migration_max_bytes_per_round);
+    EXPECT_EQ(34'567u, supervisor_config.weight_migration_max_bytes_per_round);
     EXPECT_EQ(34'567u, wrapped_config.weight_migration_max_bytes_per_round);
     EXPECT_EQ(34'567u, service_config.weight_migration_max_bytes_per_round);
 

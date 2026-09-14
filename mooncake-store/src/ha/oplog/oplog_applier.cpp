@@ -262,25 +262,20 @@ bool OpLogApplier::ApplyWeightMetadataUpsert(const OpLogEntry& entry) {
           (upsert.operation->kind != WeightOperationKind::MIGRATING &&
            upsert.operation->kind != WeightOperationKind::REPAIRING) ||
           !IsWeightResidencyTarget(upsert.operation->target_residency) ||
-          (upsert.operation->target_residency ==
-               WeightResidencyState::MIXED &&
+          (upsert.operation->target_residency == WeightResidencyState::MIXED &&
            (!upsert.operation->target_hot_ratio.has_value() ||
             !std::isfinite(*upsert.operation->target_hot_ratio) ||
             *upsert.operation->target_hot_ratio <= 0.0 ||
             *upsert.operation->target_hot_ratio >= 1.0)) ||
-          (upsert.operation->target_residency !=
-               WeightResidencyState::MIXED &&
+          (upsert.operation->target_residency != WeightResidencyState::MIXED &&
            upsert.operation->target_hot_ratio.has_value()) ||
           upsert.operation->total_units == 0 ||
           upsert.operation->total_bytes == 0 ||
-          upsert.operation->processed_units >
-              upsert.operation->total_units ||
-          upsert.operation->processed_bytes >
-              upsert.operation->total_bytes ||
+          upsert.operation->processed_units > upsert.operation->total_units ||
+          upsert.operation->processed_bytes > upsert.operation->total_bytes ||
           (!upsert.operation->cursor.empty() &&
            !IsValidWeightComponent(upsert.operation->cursor)))) ||
-        (!next.operation_id.has_value() &&
-         upsert.operation.has_value() &&
+        (!next.operation_id.has_value() && upsert.operation.has_value() &&
          (upsert.operation->identity != next.identity ||
           upsert.operation->message != "completed" ||
           upsert.operation->target_residency != next.residency))) {
@@ -373,16 +368,13 @@ bool OpLogApplier::ApplyWeightLeaseUpsert(const OpLogEntry& entry) {
     WeightLeaseUpsertOp upsert;
     if (struct_pack::deserialize_to(upsert, entry.payload) !=
             struct_pack::errc::ok ||
-        upsert.last_accessed_at_ms == 0 ||
-        upsert.lease.lease_id == 0 ||
+        upsert.last_accessed_at_ms == 0 || upsert.lease.lease_id == 0 ||
         !ValidateWeightRevisionIdentity(upsert.lease.identity).ok() ||
         !IsValidWeightComponent(upsert.lease.holder) ||
         upsert.lease.expires_at_ms == 0 ||
         upsert.lease.fenced_metadata_generation == 0 ||
-        NormalizeTenantId(entry.tenant_id) !=
-            upsert.lease.identity.tenant_id ||
-        entry.object_key !=
-            MakeWeightLeaseMetadataKey(upsert.lease.lease_id)) {
+        NormalizeTenantId(entry.tenant_id) != upsert.lease.identity.tenant_id ||
+        entry.object_key != MakeWeightLeaseMetadataKey(upsert.lease.lease_id)) {
         LOG(ERROR) << "OpLogApplier: invalid weight lease upsert, key="
                    << entry.object_key << ", sequence_id=" << entry.sequence_id;
         return false;
@@ -405,8 +397,7 @@ bool OpLogApplier::ApplyWeightLeaseUpsert(const OpLogEntry& entry) {
     const auto current = metadata_store_->GetWeightLease(next.lease_id);
     bool lease_applied = false;
     if (!current.has_value()) {
-        if (revision->metadata_generation !=
-            next.fenced_metadata_generation) {
+        if (revision->metadata_generation != next.fenced_metadata_generation) {
             LOG(ERROR)
                 << "OpLogApplier: new weight lease references stale revision, "
                 << "id=" << next.lease_id;
