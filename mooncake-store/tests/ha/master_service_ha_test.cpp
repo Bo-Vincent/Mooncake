@@ -5832,6 +5832,87 @@ TEST_F(MasterServiceHATest,
     EXPECT_FALSE(batch.entries[0].payload.empty());
 }
 
+TEST_F(MasterServiceHATest,
+       ConcurrentBeginWeightImportProducesReplayableDurableHistory) {
+    const std::string cluster_id =
+        "test_concurrent_weight_import_replay_cluster";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .set_oplog_batch_max_entries(2)
+                      .build();
+    MasterService service(config);
+    auto* writer = InstallGatedWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
+    ASSERT_TRUE(writer->PauseCallbacksAfter(0));
+
+    const WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    auto begin = [&](size_t payload_count, uint64_t logical_bytes,
+                     char digest) {
+        return service.BeginWeightImport(BeginWeightImportRequest{
+            .identity = identity,
+            .expected_payload_count = payload_count,
+            .expected_logical_bytes = logical_bytes,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = payload_count,
+                    .affinity_digest = std::string(64, digest),
+                },
+        });
+    };
+
+    OpLogBatchStorage storage(cluster_id, *backend);
+    OpLogBatchRecord first_batch;
+    OpLogBatchRecord second_batch;
+    auto first =
+        std::async(std::launch::async, [&] { return begin(2, 2048, 'c'); });
+    ASSERT_EQ(std::future_status::timeout,
+              first.wait_for(std::chrono::milliseconds(200)))
+        << "BeginWeightImport returned before its durable callback";
+    ReadBatchEventually(storage, 1, first_batch);
+    auto second =
+        std::async(std::launch::async, [&] { return begin(3, 3072, 'd'); });
+    ASSERT_EQ(1u, first_batch.entries.size());
+    ErrorCode second_batch_error = ErrorCode::ETCD_KEY_NOT_EXIST;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        second_batch_error = storage.ReadBatch(2, second_batch);
+        if (second_batch_error == ErrorCode::OK) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_EQ(ErrorCode::ETCD_KEY_NOT_EXIST, second_batch_error);
+    ASSERT_TRUE(writer->RunCallbacksThrough(1));
+
+    const auto first_result = first.get();
+    const auto second_status = second.wait_for(std::chrono::seconds(1));
+    if (second_status != std::future_status::ready) {
+        writer->Stop();
+        second.wait();
+    }
+    EXPECT_EQ(std::future_status::ready, second_status)
+        << "A conflicting import must wait for the first publication rather "
+           "than append an unpublishable durable record";
+    const auto second_result = second.get();
+    EXPECT_TRUE(first_result.has_value());
+    EXPECT_FALSE(second_result.has_value());
+
+    MockMetadataStore standby_metadata;
+    OpLogApplier applier(&standby_metadata, cluster_id);
+    EXPECT_EQ(1u, applier.ApplyOpLogEntries(first_batch.entries));
+    EXPECT_EQ(ErrorCode::ETCD_KEY_NOT_EXIST,
+              storage.ReadBatch(2, second_batch));
+}
+
 }  // namespace mooncake::test
 
 int main(int argc, char** argv) {

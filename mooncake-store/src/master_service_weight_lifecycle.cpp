@@ -519,6 +519,10 @@ size_t MasterService::ReconcileWeightMetadataOnce(uint64_t now_ms,
             }
             if (!target || target->metadata.availability ==
                                WeightAvailabilityState::DELETED) {
+                [[maybe_unused]] auto group_operation_lock =
+                    AcquireWeightGroupOperationLock(
+                        TenantId(claim.target_identity.tenant_id),
+                        MakeWeightPayloadGroupId(claim.target_identity));
                 auto import = weight_metadata_.PrepareBeginImport(
                     BeginWeightImportRequest{
                         .identity = claim.target_identity,
@@ -606,15 +610,27 @@ size_t MasterService::ReconcileWeightMetadataOnce(uint64_t now_ms,
             continue;
         }
         if (next_phase == WeightUpsertPhase::TARGET_IMPORTING) {
-            auto imported = BeginWeightImport(BeginWeightImportRequest{
-                .identity = claim.target_identity,
-                .payload_group_id = claim.import.payload_group_id,
-                .expected_payload_count = claim.import.expected_payload_count,
-                .expected_logical_bytes = claim.import.expected_logical_bytes,
-                .policy = claim.import.policy,
-                .affinity_summary = claim.import.affinity_summary,
-            });
-            if (!imported) {
+            const auto canonical_group =
+                MakeWeightPayloadGroupId(claim.target_identity);
+            if (canonical_group.empty()) {
+                continue;
+            }
+            [[maybe_unused]] auto group_operation_lock =
+                AcquireWeightGroupOperationLock(
+                    TenantId(claim.target_identity.tenant_id), canonical_group);
+            auto imported = weight_metadata_.PrepareBeginImport(
+                BeginWeightImportRequest{
+                    .identity = claim.target_identity,
+                    .payload_group_id = claim.import.payload_group_id,
+                    .expected_payload_count =
+                        claim.import.expected_payload_count,
+                    .expected_logical_bytes =
+                        claim.import.expected_logical_bytes,
+                    .policy = claim.import.policy,
+                    .affinity_summary = claim.import.affinity_summary,
+                },
+                now_ms, true);
+            if (!imported || !PersistAndPublishWeightMutation(*imported)) {
                 continue;
             }
         }
@@ -653,6 +669,13 @@ size_t MasterService::ReconcileWeightMetadataOnce(uint64_t now_ms,
                 now_ms - metadata.updated_at_ms < kImportAbandonTimeoutMs) {
                 continue;
             }
+            [[maybe_unused]] auto lineage_operation_lock =
+                AcquireWeightLineageOperationLock(
+                    ToWeightLineageIdentity(metadata.identity));
+            [[maybe_unused]] auto group_operation_lock =
+                AcquireWeightGroupOperationLock(
+                    TenantId(metadata.identity.tenant_id),
+                    MakeWeightPayloadGroupId(metadata.identity));
             auto mutation = weight_metadata_.PrepareAbortImport(
                 AbortWeightImportRequest{
                     .identity = metadata.identity,
