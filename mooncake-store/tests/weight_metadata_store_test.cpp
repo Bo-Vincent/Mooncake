@@ -501,8 +501,8 @@ TEST(WeightMetadataStoreTest,
     auto published = metadata_store.Publish(*operation);
     ASSERT_FALSE(published.has_value());
     EXPECT_EQ(WeightManagementError::BUSY, published.error());
-    EXPECT_EQ(WeightOperationState::NONE,
-              metadata_store.Get(ready.identity, 301)->metadata.operation);
+    EXPECT_FALSE(metadata_store.Get(ready.identity, 301)
+                     ->metadata.operation_id.has_value());
 }
 
 TEST(WeightMetadataStoreTest, RejectsReadyRevisionWithoutReadableResidency) {
@@ -510,7 +510,8 @@ TEST(WeightMetadataStoreTest, RejectsReadyRevisionWithoutReadableResidency) {
     auto ready = PublishReady(metadata_store);
     auto reconcile = metadata_store.PrepareReconcile(
         ready.identity, ready.metadata_generation,
-        WeightAvailabilityState::READY, WeightResidencyState::ABSENT, 300);
+        WeightAvailabilityState::READY, WeightResidencyState::ABSENT, 0.0,
+        300);
     ASSERT_TRUE(reconcile.has_value());
 
     auto published = metadata_store.Publish(*reconcile);
@@ -606,7 +607,7 @@ TEST(WeightMetadataStoreTest, RejectsUnknownSnapshotEnums) {
     ASSERT_TRUE(start.has_value());
     ASSERT_TRUE(metadata_store.Publish(*start).has_value());
     snapshot = metadata_store.ExportSnapshot();
-    snapshot.operations[0].operation = static_cast<WeightOperationState>(255);
+    snapshot.operations[0].kind = static_cast<WeightOperationKind>(255);
     EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT,
               restored.RestoreSnapshot(snapshot).error());
 
