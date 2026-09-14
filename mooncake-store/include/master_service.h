@@ -221,6 +221,15 @@ class MasterService {
         const RenewWeightRevisionLeaseRequest& request);
     WeightMetadataStore::Result<void> ReleaseWeightRevisionLease(
         const ReleaseWeightRevisionLeaseRequest& request);
+    WeightMetadataStore::Result<WeightResidencyOperation>
+    StartWeightResidencyOperation(
+        const StartWeightResidencyOperationRequest& request);
+    WeightMetadataStore::Result<WeightResidencyOperation> QueryWeightOperation(
+        const QueryWeightOperationRequest& request) const;
+    WeightMetadataStore::Result<WeightRevisionMetadata> ReconcileWeightRevision(
+        const ReconcileWeightRevisionRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> DeleteWeightRevision(
+        const DeleteWeightRevisionRequest& request);
 
     ErrorCode SetBatchOpLogBackendForTesting(
         std::shared_ptr<HaKvBackend> backend);
@@ -1817,6 +1826,8 @@ class MasterService {
         uint64_t size{0};
         ObjectDataType data_type{ObjectDataType::UNKNOWN};
         bool readable{false};
+        bool has_memory{false};
+        bool has_cold{false};
     };
 
     WeightMetadataStore::Result<std::vector<WeightGroupMemberSnapshot>>
@@ -1826,8 +1837,14 @@ class MasterService {
         const CommitWeightImportRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionMetadata>
     PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
+    WeightMetadataStore::Result<WeightResidencyOperation>
+    PersistAndPublishWeightOperationMutation(
+        const WeightOperationMutation& mutation);
     WeightMetadataStore::Result<WeightRevisionLease>
     PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
+    auto RemoveObject(const std::string& key, const TenantId& tenant_id,
+                      bool force, bool allow_managed_weight)
+        -> tl::expected<void, ErrorCode>;
 
     class SoftPinDeadlineIndex {
        public:
@@ -1901,8 +1918,12 @@ class MasterService {
 
     ObjectOperationLock AcquireObjectOperationLock(const TenantId& tenant_id,
                                                    const std::string& key);
+    ObjectOperationLock AcquireWeightGroupOperationLock(
+        const TenantId& tenant_id, const std::string& group_id);
 
     std::array<std::mutex, kObjectOperationLockStripes> object_operation_locks_;
+    std::array<std::mutex, kObjectOperationLockStripes>
+        weight_group_operation_locks_;
 
     // For accessing a metadata shard with read-write permission
     class MetadataShardAccessorRW {
@@ -2049,6 +2070,9 @@ class MasterService {
     // Reads the member keys registered for `group_id`; empty if unregistered.
     std::vector<std::string> GetGroupMemberKeys(
         const TenantId& tenant_id, const std::string& group_id) const;
+    std::unordered_set<std::string> SnapshotManagedWeightGroups() const;
+    bool IsManagedWeightObject(const TenantId& tenant_id,
+                               const std::string& key) const;
 
     // A single group member's eviction outcome, fed back by the
     // EvictGroupOrObject callback.
@@ -2065,6 +2089,8 @@ class MasterService {
         bool stop_scan{false};
         ErrorCode error{ErrorCode::OK};
     };
+    GroupEvictionResult EvictManagedWeightGroupToCold(
+        const WeightRevisionMetadata& metadata);
 
     // Evicts every member of `group_id` across its metadata shards. MUST be
     // called WITHOUT holding any metadata shard lock: the caller releases the
@@ -2086,6 +2112,7 @@ class MasterService {
     GroupEvictionResult EvictGroupOrObject(
         const TenantId& tenant_id, const std::string& key,
         const std::string& group_id, bool allow_soft_pinned,
+        bool allow_managed_weight, bool allow_hard_pinned,
         std::chrono::system_clock::time_point now,
         const std::function<EvictMemberOutcome(
             const std::string&, ObjectMetadata&, TenantState&,

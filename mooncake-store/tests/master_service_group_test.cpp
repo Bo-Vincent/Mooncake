@@ -92,6 +92,92 @@ TEST_F(MasterServiceTest, GroupedEvictionSkipsUnsafeMembersAndEvictsSafePeers) {
             .has_value());
 }
 
+TEST_F(MasterServiceTest,
+       ManagedWeightGroupIsSkippedByEvictionAndGenericRemoval) {
+    constexpr size_t kSegmentSize = 4 * 1024 * 1024;
+    constexpr size_t kObjectSize = 1024 * 1024;
+    auto service_config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
+    MasterService service(service_config);
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(
+        service, "managed_weight_segment", kDefaultSegmentBase, kSegmentSize);
+    const UUID client_id = generate_uuid();
+    const WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    auto importing = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = identity,
+        .payload_group_id = {},
+        .expected_payload_count = 1,
+        .expected_logical_bytes = kObjectSize,
+    });
+    ASSERT_TRUE(importing.has_value());
+    const std::string payload_key = "managed-weight-payload";
+    const std::string manifest_key =
+        "weights/production/llama-70b/step-100/7/manifest";
+    ReplicateConfig payload_config;
+    payload_config.replica_num = 1;
+    payload_config.data_type = ObjectDataType::WEIGHT;
+    payload_config.group_ids =
+        std::vector<std::string>{importing->manifest.payload_group_id};
+    PutCompletedObject(service, client_id, payload_key, payload_config,
+                       kObjectSize);
+    auto manifest_config = payload_config;
+    manifest_config.data_type = ObjectDataType::METADATA;
+    PutCompletedObject(service, client_id, manifest_key, manifest_config,
+                       kObjectSize);
+    auto ready = service.CommitWeightImport(CommitWeightImportRequest{
+        .identity = identity,
+        .expected_metadata_generation = importing->metadata_generation,
+        .manifest =
+            WeightManifestReference{
+                .manifest_key = manifest_key,
+                .manifest_sha256 = std::string(64, 'a'),
+                .payload_group_id = importing->manifest.payload_group_id,
+                .payload_keys_sha256 =
+                    ComputeWeightPayloadKeysSha256({payload_key}),
+                .payload_count = 1,
+                .logical_bytes = kObjectSize,
+            },
+    });
+    ASSERT_TRUE(ready.has_value());
+
+    auto extra_config = payload_config;
+    auto extra = service.PutStart(client_id, "managed-weight-extra",
+                                  TenantId::Default(), kObjectSize,
+                                  extra_config);
+    ASSERT_FALSE(extra.has_value());
+    EXPECT_EQ(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS, extra.error());
+
+    ReplicateConfig trigger_config;
+    trigger_config.replica_num = 1;
+    auto trigger = service.PutStart(client_id, "managed-weight-pressure",
+                                    TenantId::Default(), 3 * kObjectSize,
+                                    trigger_config);
+    ASSERT_FALSE(trigger.has_value());
+    EXPECT_EQ(ErrorCode::NO_AVAILABLE_HANDLE, trigger.error());
+    EXPECT_TRUE(service.ExistKey(payload_key, TenantId::Default())
+                    .value_or(false));
+    EXPECT_TRUE(service.ExistKey(manifest_key, TenantId::Default())
+                    .value_or(false));
+
+    auto remove =
+        service.Remove(payload_key, TenantId::Default(), /*force=*/true);
+    ASSERT_FALSE(remove.has_value());
+    EXPECT_EQ(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS, remove.error());
+    auto batch_remove = service.BatchRemove(
+        {payload_key, manifest_key}, TenantId::Default(), /*force=*/true);
+    ASSERT_EQ(2u, batch_remove.size());
+    for (const auto& result : batch_remove) {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS, result.error());
+    }
+}
+
 TEST_F(MasterServiceTest, WrappedBatchPutStartMixedGroupIdsPreservesOrder) {
     WrappedMasterServiceConfig service_config;
     service_config.default_kv_lease_ttl = 100;
