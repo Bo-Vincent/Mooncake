@@ -96,30 +96,6 @@ enum class WeightOperationKind : uint8_t {
     REPAIRING = 1,
 };
 
-inline constexpr bool IsValidWeightAvailabilityState(
-    WeightAvailabilityState state) {
-    return state == WeightAvailabilityState::IMPORTING ||
-           state == WeightAvailabilityState::READY ||
-           state == WeightAvailabilityState::DEGRADED ||
-           state == WeightAvailabilityState::DELETING ||
-           state == WeightAvailabilityState::DELETED;
-}
-
-inline constexpr bool IsValidWeightResidencyState(WeightResidencyState state) {
-    return state == WeightResidencyState::UNKNOWN ||
-           state == WeightResidencyState::HOT ||
-           state == WeightResidencyState::COLD ||
-           state == WeightResidencyState::MIXED ||
-           state == WeightResidencyState::ABSENT;
-}
-
-inline constexpr bool IsValidWeightOperationState(WeightOperationState state) {
-    return state == WeightOperationState::NONE ||
-           state == WeightOperationState::EVICTING ||
-           state == WeightOperationState::REHYDRATING ||
-           state == WeightOperationState::REPAIRING;
-}
-
 enum class WeightManagementError : uint8_t {
     INVALID_ARGUMENT = 1,
     NOT_FOUND = 2,
@@ -543,11 +519,6 @@ inline bool IsValidWeightAvailabilityTransition(WeightAvailabilityState from,
 
 inline WeightValidationResult ValidateWeightRevisionMetadata(
     const WeightRevisionMetadata& metadata) {
-    if (!IsValidWeightAvailabilityState(metadata.availability) ||
-        !IsValidWeightResidencyState(metadata.residency) ||
-        !IsValidWeightOperationState(metadata.operation)) {
-        return WeightValidationResult::Failure("invalid weight state");
-    }
     auto identity_result = ValidateWeightRevisionIdentity(metadata.identity);
     if (!identity_result.ok()) {
         return identity_result;
@@ -600,17 +571,6 @@ inline WeightValidationResult ValidateWeightRevisionMetadata(
           metadata.observed_hot_ratio >= 1.0))) {
         return WeightValidationResult::Failure(
             "observed residency and hot ratio disagree");
-    }
-    if (metadata.operation != WeightOperationState::NONE &&
-        metadata.availability != WeightAvailabilityState::READY &&
-        metadata.availability != WeightAvailabilityState::DEGRADED) {
-        return WeightValidationResult::Failure(
-            "active operation requires a published revision");
-    }
-    if (metadata.availability == WeightAvailabilityState::IMPORTING &&
-        metadata.residency != WeightResidencyState::UNKNOWN) {
-        return WeightValidationResult::Failure(
-            "importing revision must have unknown residency");
     }
     if (metadata.availability == WeightAvailabilityState::READY ||
         metadata.availability == WeightAvailabilityState::DEGRADED) {
