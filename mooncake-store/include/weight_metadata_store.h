@@ -4,6 +4,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -13,7 +14,7 @@
 
 namespace mooncake {
 
-inline constexpr uint32_t kWeightMetadataSchemaVersion = 2;
+inline constexpr uint32_t kWeightMetadataSchemaVersion = 3;
 
 enum class WeightMetadataMutationKind : uint8_t {
     UPSERT = 0,
@@ -45,6 +46,13 @@ struct WeightOperationMutation {
     bool no_op{false};
 };
 
+struct WeightLineageMutation {
+    WeightLineageIdentity identity;
+    std::optional<WeightLineageMetadata> previous;
+    WeightLineageMetadata next;
+    bool no_op{false};
+};
+
 struct WeightMetadataSnapshot {
     uint32_t schema_version{kWeightMetadataSchemaVersion};
     std::vector<WeightRevisionMetadata> metadata;
@@ -52,12 +60,13 @@ struct WeightMetadataSnapshot {
     std::vector<WeightResidencyOperation> operations;
     uint64_t next_lease_id{1};
     uint64_t next_operation_id{1};
+    struct_pack::compatible<std::vector<WeightLineageMetadata>, 1> lineages;
 
     friend bool operator==(const WeightMetadataSnapshot&,
                            const WeightMetadataSnapshot&) = default;
 };
 YLT_REFL(WeightMetadataSnapshot, schema_version, metadata, leases, operations,
-         next_lease_id, next_operation_id);
+         next_lease_id, next_operation_id, lineages);
 
 class WeightMetadataStore {
    public:
@@ -65,7 +74,8 @@ class WeightMetadataStore {
     using Result = tl::expected<T, WeightManagementError>;
 
     Result<WeightMetadataMutation> PrepareBeginImport(
-        const BeginWeightImportRequest& request, uint64_t now_ms) const;
+        const BeginWeightImportRequest& request, uint64_t now_ms,
+        bool allow_deleted_restart = false) const;
     Result<WeightMetadataMutation> PrepareCommitImport(
         const CommitWeightImportRequest& request, uint64_t now_ms);
     Result<WeightMetadataMutation> PrepareAbortImport(
@@ -74,6 +84,19 @@ class WeightMetadataStore {
         const WeightMetadataMutation& mutation);
     Result<WeightMetadataMutation> PrepareUpdatePolicy(
         const UpdateWeightPolicyRequest& request, uint64_t now_ms);
+    Result<WeightLineageMutation> PrepareBeginUpsert(
+        const BeginWeightUpsertRequest& request, uint64_t now_ms) const;
+    Result<WeightLineageMutation> PrepareCommitUpsert(
+        const CommitWeightUpsertRequest& request, uint64_t now_ms) const;
+    Result<WeightLineageMutation> PrepareAbortUpsert(
+        const AbortWeightUpsertRequest& request, uint64_t now_ms) const;
+    Result<WeightLineageMutation> PrepareAdvanceUpsert(
+        const WeightLineageIdentity& identity, std::string_view request_id,
+        WeightUpsertPhase phase, uint64_t now_ms, std::string error = {}) const;
+    Result<WeightLineageMetadata> Publish(
+        const WeightLineageMutation& mutation);
+    Result<WeightLineageMetadata> GetLineage(
+        const WeightLineageIdentity& identity) const;
 
     Result<WeightRevisionView> Get(const WeightRevisionIdentity& identity,
                                    uint64_t now_ms) const;
@@ -88,6 +111,7 @@ class WeightMetadataStore {
         const ReleaseWeightRevisionLeaseRequest& request) const;
     std::vector<WeightLeaseMutation> PrepareExpireLeases(uint64_t now_ms) const;
     Result<WeightRevisionLease> Publish(const WeightLeaseMutation& mutation);
+    Result<WeightRevisionLease> GetLease(uint64_t lease_id) const;
     bool HasActiveLease(const WeightRevisionIdentity& identity,
                         uint64_t metadata_generation, uint64_t now_ms) const;
 
@@ -110,7 +134,8 @@ class WeightMetadataStore {
         uint64_t operation_id) const;
 
     Result<WeightMetadataMutation> PrepareDelete(
-        const DeleteWeightRevisionRequest& request, uint64_t now_ms) const;
+        const DeleteWeightRevisionRequest& request, uint64_t now_ms,
+        bool allow_active_upsert = false) const;
     Result<WeightMetadataMutation> PrepareFinishDelete(
         const WeightRevisionIdentity& identity,
         uint64_t expected_metadata_generation, uint64_t now_ms) const;
@@ -122,6 +147,9 @@ class WeightMetadataStore {
 
     bool IsManagedGroup(const std::string& payload_group_id) const;
     bool AllowsGroupMemberMutation(const std::string& payload_group_id) const;
+    bool HasActiveUpsertClaim(const WeightRevisionIdentity& identity) const;
+    bool IsWeightRevisionMutationFenced(
+        const WeightRevisionIdentity& identity) const;
     WeightMetadataSnapshot ExportSnapshot() const;
     Result<void> RestoreSnapshot(const WeightMetadataSnapshot& snapshot);
     void Clear();
@@ -140,6 +168,7 @@ class WeightMetadataStore {
     std::map<std::string, WeightRevisionIdentity> group_index_;
     std::unordered_map<uint64_t, WeightRevisionLease> leases_;
     std::unordered_map<uint64_t, WeightResidencyOperation> operations_;
+    std::map<WeightLineageIdentity, WeightLineageMetadata> lineages_;
     uint64_t next_lease_id_{1};
     uint64_t next_operation_id_{1};
 };

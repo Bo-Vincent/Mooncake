@@ -23,8 +23,17 @@ enum class OpType : uint8_t {
     WEIGHT_METADATA_DELETE = 9,
     WEIGHT_LEASE_UPSERT = 10,
     WEIGHT_LEASE_DELETE = 11,
+    WEIGHT_LINEAGE_UPSERT = 12,
     OP_TYPE_MAX,
 };
+
+struct WeightLineageUpsertOp {
+    WeightLineageMetadata lineage;
+
+    friend bool operator==(const WeightLineageUpsertOp&,
+                           const WeightLineageUpsertOp&) = default;
+};
+YLT_REFL(WeightLineageUpsertOp, lineage);
 
 struct WeightMetadataUpsertOp {
     WeightRevisionMetadata metadata;

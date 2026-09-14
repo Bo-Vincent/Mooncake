@@ -96,6 +96,20 @@ enum class WeightOperationKind : uint8_t {
     REPAIRING = 1,
 };
 
+enum class WeightUpsertMode : uint8_t {
+    PUT_FIRST = 0,
+    DELETE_FIRST = 1,
+};
+
+enum class WeightUpsertPhase : uint8_t {
+    PREPARING_TARGET = 0,
+    DELETING_BASE = 1,
+    TARGET_IMPORTING = 2,
+    RETIRING_BASE = 3,
+    COMPLETED = 4,
+    ABORTED = 5,
+};
+
 enum class WeightManagementError : uint8_t {
     INVALID_ARGUMENT = 1,
     NOT_FOUND = 2,
@@ -128,6 +142,33 @@ struct WeightRevisionIdentity {
 };
 YLT_REFL(WeightRevisionIdentity, tenant_id, name_space, resource_id, revision,
          weight_generation);
+
+struct WeightLineageIdentity {
+    std::string tenant_id{"default"};
+    std::string name_space;
+    std::string resource_id;
+    std::string revision;
+
+    friend bool operator==(const WeightLineageIdentity&,
+                           const WeightLineageIdentity&) = default;
+    friend bool operator<(const WeightLineageIdentity& lhs,
+                          const WeightLineageIdentity& rhs) {
+        return std::tie(lhs.tenant_id, lhs.name_space, lhs.resource_id,
+                        lhs.revision) < std::tie(rhs.tenant_id, rhs.name_space,
+                                                 rhs.resource_id, rhs.revision);
+    }
+};
+YLT_REFL(WeightLineageIdentity, tenant_id, name_space, resource_id, revision);
+
+inline WeightLineageIdentity ToWeightLineageIdentity(
+    const WeightRevisionIdentity& identity) {
+    return WeightLineageIdentity{
+        .tenant_id = identity.tenant_id,
+        .name_space = identity.name_space,
+        .resource_id = identity.resource_id,
+        .revision = identity.revision,
+    };
+}
 
 struct WeightManifestReference {
     std::string manifest_key;
@@ -243,6 +284,80 @@ YLT_REFL(BeginWeightImportRequest, identity, payload_group_id,
          expected_payload_count, expected_logical_bytes, policy,
          affinity_summary);
 
+struct WeightUpsertImportSummary {
+    std::string payload_group_id;
+    uint64_t expected_payload_count{0};
+    uint64_t expected_logical_bytes{0};
+    std::optional<WeightStoragePolicy> policy;
+    WeightAffinitySummary affinity_summary;
+
+    friend bool operator==(const WeightUpsertImportSummary&,
+                           const WeightUpsertImportSummary&) = default;
+};
+YLT_REFL(WeightUpsertImportSummary, payload_group_id, expected_payload_count,
+         expected_logical_bytes, policy, affinity_summary);
+
+struct WeightUpsertClaim {
+    std::string request_id;
+    WeightRevisionIdentity base_identity;
+    WeightRevisionIdentity target_identity;
+    WeightUpsertMode mode{WeightUpsertMode::PUT_FIRST};
+    WeightUpsertPhase phase{WeightUpsertPhase::PREPARING_TARGET};
+    uint64_t expected_base_metadata_generation{0};
+    WeightUpsertImportSummary import;
+    uint64_t created_at_ms{0};
+    uint64_t updated_at_ms{0};
+    std::string error;
+
+    friend bool operator==(const WeightUpsertClaim&,
+                           const WeightUpsertClaim&) = default;
+};
+YLT_REFL(WeightUpsertClaim, request_id, base_identity, target_identity, mode,
+         phase, expected_base_metadata_generation, import, created_at_ms,
+         updated_at_ms, error);
+
+struct WeightLineageMetadata {
+    WeightLineageIdentity identity;
+    uint64_t lineage_metadata_generation{1};
+    uint64_t committed_weight_generation{0};
+    std::optional<WeightUpsertClaim> latest_claim;
+
+    friend bool operator==(const WeightLineageMetadata&,
+                           const WeightLineageMetadata&) = default;
+};
+YLT_REFL(WeightLineageMetadata, identity, lineage_metadata_generation,
+         committed_weight_generation, latest_claim);
+
+struct BeginWeightUpsertRequest {
+    std::string request_id;
+    WeightUpsertMode mode{WeightUpsertMode::PUT_FIRST};
+    WeightRevisionIdentity base_identity;
+    uint64_t expected_base_metadata_generation{0};
+    WeightRevisionIdentity target_identity;
+    BeginWeightImportRequest import;
+};
+YLT_REFL(BeginWeightUpsertRequest, request_id, mode, base_identity,
+         expected_base_metadata_generation, target_identity, import);
+
+struct CommitWeightUpsertRequest {
+    std::string request_id;
+    WeightRevisionIdentity base_identity;
+    WeightRevisionIdentity target_identity;
+};
+YLT_REFL(CommitWeightUpsertRequest, request_id, base_identity, target_identity);
+
+struct AbortWeightUpsertRequest {
+    std::string request_id;
+    WeightRevisionIdentity base_identity;
+    WeightRevisionIdentity target_identity;
+};
+YLT_REFL(AbortWeightUpsertRequest, request_id, base_identity, target_identity);
+
+struct GetWeightLineageRequest {
+    WeightLineageIdentity identity;
+};
+YLT_REFL(GetWeightLineageRequest, identity);
+
 struct CommitWeightImportRequest {
     WeightRevisionIdentity identity;
     uint64_t expected_metadata_generation{0};
@@ -339,6 +454,7 @@ std::string ComputeWeightPayloadKeysSha256(
 std::string MakeWeightPayloadGroupId(const WeightRevisionIdentity& identity);
 std::string MakeWeightRevisionMetadataKey(
     const WeightRevisionIdentity& identity);
+std::string MakeWeightLineageMetadataKey(const WeightLineageIdentity& identity);
 std::string MakeWeightLeaseMetadataKey(uint64_t lease_id);
 
 class WeightValidationResult {
@@ -431,6 +547,22 @@ inline WeightValidationResult ValidateWeightRevisionIdentity(
     return WeightValidationResult::Success();
 }
 
+inline WeightValidationResult ValidateWeightLineageIdentity(
+    const WeightLineageIdentity& identity) {
+    return ValidateWeightRevisionIdentity(WeightRevisionIdentity{
+        .tenant_id = identity.tenant_id,
+        .name_space = identity.name_space,
+        .resource_id = identity.resource_id,
+        .revision = identity.revision,
+        .weight_generation = 1,
+    });
+}
+
+inline bool IsTerminalWeightUpsertPhase(WeightUpsertPhase phase) {
+    return phase == WeightUpsertPhase::COMPLETED ||
+           phase == WeightUpsertPhase::ABORTED;
+}
+
 inline WeightValidationResult ValidateWeightManifestReference(
     const WeightManifestReference& manifest) {
     if (!IsValidWeightComponent(manifest.manifest_key)) {
@@ -496,6 +628,88 @@ inline WeightValidationResult ValidateWeightAffinitySummary(
     if (summary.affinity_count == 0 ||
         !IsValidSha256(summary.affinity_digest)) {
         return WeightValidationResult::Failure("invalid affinity_digest");
+    }
+    return WeightValidationResult::Success();
+}
+
+inline bool IsValidWeightUpsertMode(WeightUpsertMode mode) {
+    return mode == WeightUpsertMode::PUT_FIRST ||
+           mode == WeightUpsertMode::DELETE_FIRST;
+}
+
+inline bool IsValidWeightUpsertPhase(WeightUpsertPhase phase) {
+    return phase == WeightUpsertPhase::PREPARING_TARGET ||
+           phase == WeightUpsertPhase::DELETING_BASE ||
+           phase == WeightUpsertPhase::TARGET_IMPORTING ||
+           phase == WeightUpsertPhase::RETIRING_BASE ||
+           phase == WeightUpsertPhase::COMPLETED ||
+           phase == WeightUpsertPhase::ABORTED;
+}
+
+inline bool IsWeightUpsertPhaseAllowedForMode(WeightUpsertMode mode,
+                                              WeightUpsertPhase phase) {
+    if (mode == WeightUpsertMode::PUT_FIRST) {
+        return phase == WeightUpsertPhase::PREPARING_TARGET ||
+               phase == WeightUpsertPhase::RETIRING_BASE ||
+               phase == WeightUpsertPhase::COMPLETED ||
+               phase == WeightUpsertPhase::ABORTED;
+    }
+    if (mode == WeightUpsertMode::DELETE_FIRST) {
+        return phase == WeightUpsertPhase::DELETING_BASE ||
+               phase == WeightUpsertPhase::TARGET_IMPORTING ||
+               phase == WeightUpsertPhase::COMPLETED ||
+               phase == WeightUpsertPhase::ABORTED;
+    }
+    return false;
+}
+
+inline WeightValidationResult ValidateWeightLineageMetadata(
+    const WeightLineageMetadata& lineage) {
+    if (!ValidateWeightLineageIdentity(lineage.identity).ok() ||
+        lineage.lineage_metadata_generation == 0 ||
+        lineage.lineage_metadata_generation ==
+            std::numeric_limits<uint64_t>::max() ||
+        !lineage.latest_claim.has_value()) {
+        return WeightValidationResult::Failure("invalid lineage metadata");
+    }
+    const auto& claim = *lineage.latest_claim;
+    if (!IsValidWeightComponent(claim.request_id) ||
+        !ValidateWeightRevisionIdentity(claim.base_identity).ok() ||
+        !ValidateWeightRevisionIdentity(claim.target_identity).ok() ||
+        ToWeightLineageIdentity(claim.base_identity) != lineage.identity ||
+        ToWeightLineageIdentity(claim.target_identity) != lineage.identity ||
+        claim.target_identity.weight_generation <=
+            claim.base_identity.weight_generation ||
+        !IsValidWeightUpsertMode(claim.mode) ||
+        !IsValidWeightUpsertPhase(claim.phase) ||
+        !IsWeightUpsertPhaseAllowedForMode(claim.mode, claim.phase) ||
+        claim.expected_base_metadata_generation == 0 ||
+        claim.expected_base_metadata_generation ==
+            std::numeric_limits<uint64_t>::max() ||
+        claim.created_at_ms == 0 || claim.updated_at_ms < claim.created_at_ms ||
+        (!claim.error.empty() && !IsValidWeightComponent(claim.error))) {
+        return WeightValidationResult::Failure("invalid lineage claim");
+    }
+    const auto& import = claim.import;
+    if (!IsValidWeightComponent(import.payload_group_id) ||
+        import.expected_payload_count == 0 ||
+        import.expected_logical_bytes == 0 ||
+        (import.policy.has_value() &&
+         !ValidateWeightStoragePolicy(*import.policy).ok()) ||
+        !ValidateWeightAffinitySummary(import.affinity_summary).ok() ||
+        (import.policy.value_or(WeightStoragePolicy{}).preferred_residency ==
+             WeightResidencyState::MIXED &&
+         import.affinity_summary.affinity_count < 2)) {
+        return WeightValidationResult::Failure("invalid lineage import");
+    }
+    const bool target_committed =
+        claim.phase == WeightUpsertPhase::RETIRING_BASE ||
+        claim.phase == WeightUpsertPhase::COMPLETED;
+    const uint64_t expected_watermark =
+        target_committed ? claim.target_identity.weight_generation
+                         : claim.base_identity.weight_generation;
+    if (lineage.committed_weight_generation != expected_watermark) {
+        return WeightValidationResult::Failure("invalid lineage watermark");
     }
     return WeightValidationResult::Success();
 }

@@ -218,6 +218,9 @@ class MetadataStore {
         const WeightResidencyOperation& operation) = 0;
     virtual std::optional<WeightResidencyOperation> GetWeightOperation(
         uint64_t operation_id) const = 0;
+    virtual bool PutWeightLineage(const WeightLineageMetadata& lineage) = 0;
+    virtual std::optional<WeightLineageMetadata> GetWeightLineage(
+        const WeightLineageIdentity& identity) const = 0;
 };
 
 }  // namespace mooncake
