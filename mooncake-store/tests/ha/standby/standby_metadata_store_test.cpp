@@ -133,7 +133,8 @@ TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
     EXPECT_EQ(snapshot, store.SnapshotWeightMetadata());
 }
 
-TEST(StandbyMetadataStoreTest, RejectsInvalidWeightMetadataStoreWithoutMutation) {
+TEST(StandbyMetadataStoreTest,
+     RejectsInvalidWeightMetadataStoreWithoutMutation) {
     StandbyMetadataStore store;
     const WeightMetadataSnapshot empty;
     ASSERT_TRUE(store.RestoreWeightMetadata(empty));
