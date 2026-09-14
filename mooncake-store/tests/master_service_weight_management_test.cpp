@@ -461,7 +461,7 @@ TEST_F(MasterServiceWeightManagementTest,
 
     auto result = operation.get();
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(WeightOperationState::EVICTING, result->operation);
+    EXPECT_EQ(WeightOperationKind::MIGRATING, result->kind);
 }
 
 }  // namespace

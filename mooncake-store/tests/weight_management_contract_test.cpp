@@ -164,10 +164,6 @@ TEST(WeightManagementContractTest, EnforcesStateCombinationAndOperationIds) {
     metadata.residency = static_cast<WeightResidencyState>(255);
     EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
     metadata.residency = WeightResidencyState::ABSENT;
-    metadata.operation = static_cast<WeightOperationState>(255);
-    EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
-
-    metadata.operation = WeightOperationState::NONE;
     metadata.availability = WeightAvailabilityState::IMPORTING;
     metadata.residency = WeightResidencyState::ABSENT;
     EXPECT_FALSE(ValidateWeightRevisionMetadata(metadata).ok());
