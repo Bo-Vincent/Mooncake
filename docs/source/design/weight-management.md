@@ -9,15 +9,6 @@ in advance.
 This design adds revision-level discovery and lifecycle control without adding
 independent tensor-level management metadata.
 
-## Delivery Status
-
-The first implementation stage introduces the weight-management contracts and
-the standalone `WeightMetadataStore` state machine. Master integration, HA
-replication, managed payload-group operations, and client RPCs are delivered
-as follow-up changes. The state machine is intentionally independent of tensor
-geometry and physical placement so those integrations do not redefine its
-metadata contract.
-
 ## Authority Model
 
 Three records have distinct authority:
@@ -174,9 +165,11 @@ serving revision.
 
 ## Integration Boundary
 
-Follow-up changes expose the lifecycle primitives through the Master RPC and
-C++ client surfaces, then add a managed `WeightStore` Python facade for
-manifest upload and load. Framework adapters remain responsible for building
-and validating tensor manifests, holding runtime allocation guards, and
-activating revisions. Manifest-only objects without a Weight metadata record
-remain outside this lifecycle.
+This layer exposes the native lifecycle primitives through the Master RPC and
+C++ client surfaces. A follow-up change adds the managed `WeightStore` Python
+facade that composes these primitives with manifest upload and load. A
+framework adapter remains responsible for constructing and validating the
+immutable tensor manifest, holding runtime allocation guards, and activating a
+revision in the serving system. Manifest-only objects written without a Weight
+metadata record are outside this lifecycle and are not discovered
+automatically.
