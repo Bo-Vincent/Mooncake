@@ -230,6 +230,10 @@ class MasterService {
         const ReconcileWeightRevisionRequest& request);
     WeightMetadataStore::Result<WeightRevisionMetadata> DeleteWeightRevision(
         const DeleteWeightRevisionRequest& request);
+    size_t RunWeightReconciliationForTesting(uint64_t now_ms,
+                                             size_t limit = 32);
+    bool DropWeightGroupMemberForTesting(
+        const WeightRevisionIdentity& identity, const std::string& key);
 
     ErrorCode SetBatchOpLogBackendForTesting(
         std::shared_ptr<HaKvBackend> backend);
@@ -1820,6 +1824,7 @@ class MasterService {
     };
     GroupDomain group_domain_;
     WeightMetadataStore weight_metadata_;
+    std::atomic<size_t> weight_reconciliation_offset_{0};
 
     struct WeightGroupMemberSnapshot {
         std::string key;
@@ -1842,6 +1847,7 @@ class MasterService {
         const WeightOperationMutation& mutation);
     WeightMetadataStore::Result<WeightRevisionLease>
     PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
+    size_t ReconcileWeightMetadataStoreOnce(uint64_t now_ms, size_t limit);
     auto RemoveObject(const std::string& key, const TenantId& tenant_id,
                       bool force, bool allow_managed_weight)
         -> tl::expected<void, ErrorCode>;
