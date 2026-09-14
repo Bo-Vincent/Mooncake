@@ -4033,6 +4033,26 @@ WeightRpcResult<WeightRevisionMetadata> Client::BeginWeightImport(
     return master_client_.BeginWeightImport(request);
 }
 
+WeightRpcResult<WeightRevisionMetadata> Client::BeginWeightUpsert(
+    const BeginWeightUpsertRequest& request) {
+    return master_client_.BeginWeightUpsert(request);
+}
+
+WeightRpcResult<WeightLineageMetadata> Client::CommitWeightUpsert(
+    const CommitWeightUpsertRequest& request) {
+    return master_client_.CommitWeightUpsert(request);
+}
+
+WeightRpcResult<WeightLineageMetadata> Client::AbortWeightUpsert(
+    const AbortWeightUpsertRequest& request) {
+    return master_client_.AbortWeightUpsert(request);
+}
+
+WeightRpcResult<WeightLineageMetadata> Client::GetWeightLineage(
+    const GetWeightLineageRequest& request) {
+    return master_client_.GetWeightLineage(request);
+}
+
 WeightRpcResult<WeightRevisionMetadata> Client::CommitWeightImport(
     const CommitWeightImportRequest& request) {
     return master_client_.CommitWeightImport(request);

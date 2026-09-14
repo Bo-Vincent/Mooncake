@@ -88,6 +88,7 @@ class OpLogApplier {
     bool ApplyWeightMetadataDelete(const OpLogEntry& entry);
     bool ApplyWeightLeaseUpsert(const OpLogEntry& entry);
     bool ApplyWeightLeaseDelete(const OpLogEntry& entry);
+    bool ApplyWeightLineageUpsert(const OpLogEntry& entry);
 
     MetadataStore* metadata_store_;
 

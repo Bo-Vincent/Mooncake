@@ -167,6 +167,14 @@ class MasterService {
     ListWeightRevisions(const ListWeightRevisionsRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionMetadata> UpdateWeightPolicy(
         const UpdateWeightPolicyRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request);
     WeightMetadataStore::Result<WeightRevisionLease> RenewWeightRevisionLease(
@@ -184,6 +192,8 @@ class MasterService {
         const DeleteWeightRevisionRequest& request);
     size_t RunWeightReconciliationForTesting(uint64_t now_ms,
                                              size_t limit = 32);
+    bool RestoreWeightMetadataForTesting(
+        const WeightMetadataSnapshot& snapshot);
     bool DropWeightGroupMemberForTesting(const WeightRevisionIdentity& identity,
                                          const std::string& key);
 
@@ -1131,6 +1141,15 @@ class MasterService {
         const CommitWeightImportRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionMetadata>
     PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    DeleteWeightRevisionInternal(const DeleteWeightRevisionRequest& request,
+                                 bool allow_active_upsert);
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    ReconcileWeightRevisionInternal(
+        const ReconcileWeightRevisionRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata>
+    PersistAndPublishWeightLineageMutation(
+        const WeightLineageMutation& mutation);
     WeightMetadataStore::Result<WeightResidencyOperation>
     PersistAndPublishWeightOperationMutation(
         const WeightOperationMutation& mutation);
@@ -1218,10 +1237,14 @@ class MasterService {
                                                    const std::string& key);
     ObjectOperationLock AcquireWeightGroupOperationLock(
         const TenantId& tenant_id, const std::string& group_id);
+    ObjectOperationLock AcquireWeightLineageOperationLock(
+        const WeightLineageIdentity& identity);
 
     std::array<std::mutex, kObjectOperationLockStripes> object_operation_locks_;
     std::array<std::mutex, kObjectOperationLockStripes>
         weight_group_operation_locks_;
+    std::array<std::mutex, kObjectOperationLockStripes>
+        weight_lineage_operation_locks_;
 
     // For accessing a metadata shard with read-write permission
     class MetadataShardAccessorRW {
@@ -1438,6 +1461,10 @@ class MasterService {
         const TenantId& tenant_id, QuotaEraseMode quota_mode);
     tl::expected<void, ErrorCode> SettlePrimaryWriteQuotaIfReady(
         TenantState& tenant_state, ObjectMetadata& metadata);
+    static void LogTenantQuotaLedgerError(const TenantQuotaResult& result,
+                                          std::string_view operation,
+                                          const TenantId& tenant_id,
+                                          std::string_view key);
     uint64_t CompletedMemoryQuotaCharge(const ObjectMetadata& metadata) const;
     uint64_t RequestedMemoryQuotaCharge(uint64_t value_length,
                                         const ReplicateConfig& config) const;
@@ -2225,6 +2252,7 @@ class MasterService {
 
     const bool enable_oplog_;
     const bool weight_management_mutations_enabled_;
+    const bool weight_lineage_mutations_enabled_;
     const WeightStoragePolicy default_weight_storage_policy_;
     const uint64_t weight_migration_cooldown_ms_;
     const uint64_t weight_migration_max_members_per_round_;

@@ -2524,6 +2524,14 @@ std::vector<int> RealClient::batchIsExist(
 
 DEFINE_REAL_WEIGHT_METHOD(begin_weight_import, BeginWeightImport,
                           BeginWeightImportRequest, WeightRevisionMetadata)
+DEFINE_REAL_WEIGHT_METHOD(begin_weight_upsert, BeginWeightUpsert,
+                          BeginWeightUpsertRequest, WeightRevisionMetadata)
+DEFINE_REAL_WEIGHT_METHOD(commit_weight_upsert, CommitWeightUpsert,
+                          CommitWeightUpsertRequest, WeightLineageMetadata)
+DEFINE_REAL_WEIGHT_METHOD(abort_weight_upsert, AbortWeightUpsert,
+                          AbortWeightUpsertRequest, WeightLineageMetadata)
+DEFINE_REAL_WEIGHT_METHOD(get_weight_lineage, GetWeightLineage,
+                          GetWeightLineageRequest, WeightLineageMetadata)
 DEFINE_REAL_WEIGHT_METHOD(commit_weight_import, CommitWeightImport,
                           CommitWeightImportRequest, WeightRevisionMetadata)
 DEFINE_REAL_WEIGHT_METHOD(abort_weight_import, AbortWeightImport,
