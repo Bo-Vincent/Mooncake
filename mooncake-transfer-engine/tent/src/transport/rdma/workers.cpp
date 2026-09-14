@@ -1909,14 +1909,10 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
                                        slice->target_dev_id, src_gpu, dst_gpu);
     }
 
-    bool rail_available =
-        rail.available(slice->source_dev_id, slice->target_dev_id);
-    if (!gdr_excluded && !rail_available) {
-        rail_available = rail.tryRecoveryProbe(
-            slice->source_dev_id, slice->target_dev_id,
-            slice->rail_probe_token);
-    }
-    if (gdr_excluded || !rail_available) {
+    if (gdr_excluded ||
+        (!rail.available(slice->source_dev_id, slice->target_dev_id) &&
+         !rail.tryRecoveryProbe(slice->source_dev_id, slice->target_dev_id,
+                                slice->rail_probe_token))) {
         LOG(INFO) << "Optimal device pair not available: source_dev_id "
                   << slice->source_dev_id << ", target_dev_id "
                   << slice->target_dev_id;
