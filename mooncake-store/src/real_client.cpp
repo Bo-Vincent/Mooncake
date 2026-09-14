@@ -6827,8 +6827,7 @@ std::vector<int> RealClient::batch_put_session_start(
             filtered_affinity_ids.push_back(
                 start_config.residency_affinity_ids->at(idx));
         }
-        start_config.residency_affinity_ids =
-            std::move(filtered_affinity_ids);
+        start_config.residency_affinity_ids = std::move(filtered_affinity_ids);
     }
 
     // Same first half as Client::BatchPut (StartBatchPut → master

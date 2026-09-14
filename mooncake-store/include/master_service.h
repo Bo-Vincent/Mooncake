@@ -1155,8 +1155,7 @@ class MasterService {
         const WeightOperationMutation& mutation);
     WeightMetadataStore::Result<WeightResidencyOperation>
     StartWeightResidencyOperationLocked(
-        const StartWeightResidencyOperationRequest& request,
-        uint64_t now_ms);
+        const StartWeightResidencyOperationRequest& request, uint64_t now_ms);
     WeightMetadataStore::Result<WeightRevisionLease>
     PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
     size_t ReconcileWeightMetadataOnce(uint64_t now_ms, size_t limit);
@@ -1415,9 +1414,8 @@ class MasterService {
     GroupEvictionResult EvictManagedWeightMembersToCold(
         const WeightRevisionMetadata& metadata,
         const std::vector<std::string>& member_keys);
-    bool QueueManagedWeightMemberOffload(
-        const WeightRevisionMetadata& metadata,
-        const std::string& member_key);
+    bool QueueManagedWeightMemberOffload(const WeightRevisionMetadata& metadata,
+                                         const std::string& member_key);
 
     // Evicts every member of `group_id` across its metadata shards. MUST be
     // called WITHOUT holding any metadata shard lock: the caller releases the
@@ -1588,8 +1586,8 @@ class MasterService {
         MetadataShardAccessorRW& shard, const UUID& client_id,
         const std::string& key, uint64_t value_length,
         const ReplicateConfig& config, const std::string& writer_host_id,
-        const std::string& group_id,
-        const std::string& residency_affinity_id, const TenantId& tenant_id,
+        const std::string& group_id, const std::string& residency_affinity_id,
+        const TenantId& tenant_id,
         const std::chrono::system_clock::time_point& now,
         const ResolvedSoftPinRequest& soft_pin_request,
         std::optional<std::chrono::system_clock::time_point>
@@ -1913,8 +1911,7 @@ class MasterService {
                 std::forward_as_tuple(
                     client_id, now, total_length, std::move(replicas),
                     std::nullopt, enable_hard_pin, data_type, group_id,
-                    std::string{}, object_id_.tenant_id,
-                    object_id_.user_key));
+                    std::string{}, object_id_.tenant_id, object_id_.user_key));
             it_ = result.first;
         }
 

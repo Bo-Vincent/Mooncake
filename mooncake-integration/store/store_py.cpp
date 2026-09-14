@@ -2236,17 +2236,16 @@ PYBIND11_MODULE(store, m) {
 
     py::class_<WeightRevisionIdentity>(m, "WeightRevisionIdentity")
         .def_property_readonly(
-            "tenant_id", [](const WeightRevisionIdentity &value) {
-                return value.tenant_id;
-            })
+            "tenant_id",
+            [](const WeightRevisionIdentity &value) { return value.tenant_id; })
         .def_property_readonly("namespace",
                                [](const WeightRevisionIdentity &value) {
                                    return value.name_space;
                                })
-        .def_property_readonly(
-            "name_space", [](const WeightRevisionIdentity &value) {
-                return value.name_space;
-            })
+        .def_property_readonly("name_space",
+                               [](const WeightRevisionIdentity &value) {
+                                   return value.name_space;
+                               })
         .def_readonly("resource_id", &WeightRevisionIdentity::resource_id)
         .def_readonly("revision", &WeightRevisionIdentity::revision)
         .def_readonly("weight_generation",
@@ -2608,7 +2607,7 @@ PYBIND11_MODULE(store, m) {
         "capsule)");
 
     py::class_<MooncakeStorePyWrapper> store_class(m,
-                                                    "MooncakeDistributedStore");
+                                                   "MooncakeDistributedStore");
     store_class.def(py::init<>())
         .def(
             "_get_pyclient_capsule",
@@ -3880,15 +3879,14 @@ PYBIND11_MODULE(store, m) {
             const std::string &name_space, const std::string &resource_id,
             const std::string &revision, uint64_t weight_generation,
             uint64_t expected_metadata_generation,
-            const std::string &manifest_key,
-            const std::string &manifest_sha256,
+            const std::string &manifest_key, const std::string &manifest_sha256,
             const std::string &payload_group_id,
             const std::string &payload_keys_sha256, uint64_t payload_count,
             uint64_t logical_bytes) {
             auto request = CommitWeightImportRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
                 .expected_metadata_generation = expected_metadata_generation,
                 .manifest =
                     WeightManifestReference{
@@ -3916,17 +3914,15 @@ PYBIND11_MODULE(store, m) {
         py::arg("logical_bytes"));
     store_class.def(
         "abort_weight_import",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation,
-                             uint64_t expected_metadata_generation) {
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            uint64_t expected_metadata_generation) {
             auto request = AbortWeightImportRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
                 .expected_metadata_generation = expected_metadata_generation,
             };
             WeightRpcResult<WeightRevisionMetadata> result =
@@ -3942,19 +3938,14 @@ PYBIND11_MODULE(store, m) {
         py::arg("expected_metadata_generation"));
     store_class.def(
         "get_weight_revision",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation) {
-            auto request = GetWeightRevisionRequest{.identity =
-                                                        identity_from_args(
-                                                            tenant_id,
-                                                            name_space,
-                                                            resource_id,
-                                                            revision,
-                                                            weight_generation)};
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation) {
+            auto request =
+                GetWeightRevisionRequest{.identity = identity_from_args(
+                                             tenant_id, name_space, resource_id,
+                                             revision, weight_generation)};
             WeightRpcResult<WeightRevisionView> result =
                 tl::make_unexpected(ErrorCode::INVALID_PARAMS);
             if (self.store_) {
@@ -4024,18 +4015,16 @@ PYBIND11_MODULE(store, m) {
         py::arg("mixed_hot_ratio"), py::arg("migration_mode"));
     store_class.def(
         "acquire_weight_revision_lease",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation,
-                             uint64_t expected_metadata_generation,
-                             const std::string &holder, uint64_t ttl_ms) {
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            uint64_t expected_metadata_generation, const std::string &holder,
+            uint64_t ttl_ms) {
             auto request = AcquireWeightRevisionLeaseRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
                 .expected_metadata_generation = expected_metadata_generation,
                 .holder = holder,
                 .ttl_ms = ttl_ms,
@@ -4135,16 +4124,14 @@ PYBIND11_MODULE(store, m) {
         py::arg("tenant_id"), py::arg("operation_id"));
     store_class.def(
         "reconcile_weight_revision",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation) {
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation) {
             auto request = ReconcileWeightRevisionRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
             };
             WeightRpcResult<WeightRevisionMetadata> result =
                 tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -4158,17 +4145,15 @@ PYBIND11_MODULE(store, m) {
         py::arg("revision"), py::arg("weight_generation"));
     store_class.def(
         "delete_weight_revision",
-        [identity_from_args](MooncakeStorePyWrapper &self,
-                             const std::string &tenant_id,
-                             const std::string &name_space,
-                             const std::string &resource_id,
-                             const std::string &revision,
-                             uint64_t weight_generation,
-                             uint64_t expected_metadata_generation) {
+        [identity_from_args](
+            MooncakeStorePyWrapper &self, const std::string &tenant_id,
+            const std::string &name_space, const std::string &resource_id,
+            const std::string &revision, uint64_t weight_generation,
+            uint64_t expected_metadata_generation) {
             auto request = DeleteWeightRevisionRequest{
-                .identity = identity_from_args(
-                    tenant_id, name_space, resource_id, revision,
-                    weight_generation),
+                .identity =
+                    identity_from_args(tenant_id, name_space, resource_id,
+                                       revision, weight_generation),
                 .expected_metadata_generation = expected_metadata_generation,
             };
             WeightRpcResult<WeightRevisionMetadata> result =

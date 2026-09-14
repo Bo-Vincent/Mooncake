@@ -2523,10 +2523,11 @@ TEST_F(MasterServiceHATest,
             .payload_group_id = {},
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
-            .affinity_summary = WeightAffinitySummary{
-                .affinity_count = 2,
-                .affinity_digest = std::string(64, 'c'),
-            },
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 2,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
     });
 
@@ -2624,10 +2625,11 @@ TEST_F(MasterServiceHATest,
         .payload_group_id = {},
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
-        .affinity_summary = WeightAffinitySummary{
-            .affinity_count = 2,
-            .affinity_digest = std::string(64, 'c'),
-        },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 2,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
@@ -2872,10 +2874,11 @@ TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
         .payload_group_id = {},
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
-        .affinity_summary = WeightAffinitySummary{
-            .affinity_count = 2,
-            .affinity_digest = std::string(64, 'c'),
-        },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 2,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
@@ -3108,14 +3111,16 @@ TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadata) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-        .policy = WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .migration_mode = WeightMigrationMode::MANUAL,
-        },
-        .affinity_summary = WeightAffinitySummary{
-            .affinity_count = 1,
-            .affinity_digest = std::string(64, 'c'),
-        },
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     }));
 
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}));

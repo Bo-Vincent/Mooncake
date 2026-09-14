@@ -619,10 +619,11 @@ TEST_F(WeightGroupLifecycleTest, SnapshotExposesOpaqueResidencyAffinityId) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-        .policy = WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .migration_mode = WeightMigrationMode::MANUAL,
-        },
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
         .affinity_summary =
             WeightAffinitySummary{
                 .affinity_count = 1,
@@ -823,8 +824,7 @@ TEST_F(WeightGroupLifecycleTest,
     auto failed = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = ready.identity});
     ASSERT_TRUE(failed.has_value());
-    EXPECT_EQ(WeightAvailabilityState::READY,
-              failed->metadata.availability);
+    EXPECT_EQ(WeightAvailabilityState::READY, failed->metadata.availability);
     EXPECT_EQ(WeightResidencyState::HOT, failed->metadata.residency);
     ASSERT_TRUE(failed->metadata.operation_id.has_value());
     auto failed_operation =
@@ -867,13 +867,13 @@ TEST_F(WeightGroupLifecycleTest,
     MasterService service(config);
     const auto context = PrepareSimpleSegment(service);
     ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
-    auto ready = PublishReady(
-        service, context.client_id,
-        WeightStoragePolicy{
-            .preferred_residency = WeightResidencyState::HOT,
-            .mixed_hot_ratio = 0.5,
-            .migration_mode = WeightMigrationMode::AUTO,
-        });
+    auto ready =
+        PublishReady(service, context.client_id,
+                     WeightStoragePolicy{
+                         .preferred_residency = WeightResidencyState::HOT,
+                         .mixed_hot_ratio = 0.5,
+                         .migration_mode = WeightMigrationMode::AUTO,
+                     });
     AddLocalDiskReplica(service, context.client_id, "payload-a", 1024,
                         "test_segment");
     ASSERT_TRUE(service.StartWeightResidencyOperation(
@@ -911,8 +911,7 @@ TEST_F(WeightGroupLifecycleTest,
         });
 
     ASSERT_TRUE(lease.has_value());
-    EXPECT_EQ(cold->metadata_generation + 1,
-              lease->fenced_metadata_generation);
+    EXPECT_EQ(cold->metadata_generation + 1, lease->fenced_metadata_generation);
     auto view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = cold->identity});
     ASSERT_TRUE(view.has_value());
@@ -947,8 +946,7 @@ TEST_F(WeightGroupLifecycleTest,
     ASSERT_TRUE(service.ReconcileWeightRevision(
         ReconcileWeightRevisionRequest{.identity = ready.identity}));
 
-    auto failed_tasks =
-        service.OffloadObjectHeartbeat(context.client_id, true);
+    auto failed_tasks = service.OffloadObjectHeartbeat(context.client_id, true);
     ASSERT_TRUE(failed_tasks.has_value());
     ASSERT_EQ(2u, failed_tasks->size());
     std::vector<StorageObjectMetadata> failures(
@@ -1044,8 +1042,7 @@ TEST_F(WeightGroupLifecycleTest,
             {.key = "payload-a1", .size = 600, .affinity_id = "a"},
             {.key = "payload-b", .size = 500, .affinity_id = "b"},
         });
-    for (const auto& [key, size] :
-         std::vector<std::pair<std::string, int64_t>>{
+    for (const auto& [key, size] : std::vector<std::pair<std::string, int64_t>>{
              {"payload-a0", 600},
              {"payload-a1", 600},
              {"payload-b", 500},
@@ -1211,11 +1208,10 @@ TEST_F(WeightGroupLifecycleTest,
     const auto remaining = GetWeightGroupResidencyForTest(
         service, ready.identity, ready.manifest.payload_group_id);
     ASSERT_EQ(2u, remaining.size());
-    EXPECT_TRUE(std::any_of(remaining.begin(), remaining.end(),
-                            [](const auto& member) {
-                                return member.data_type ==
-                                       ObjectDataType::METADATA;
-                            }));
+    EXPECT_TRUE(
+        std::any_of(remaining.begin(), remaining.end(), [](const auto& member) {
+            return member.data_type == ObjectDataType::METADATA;
+        }));
 
     auto deleted = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
         .identity = ready.identity,

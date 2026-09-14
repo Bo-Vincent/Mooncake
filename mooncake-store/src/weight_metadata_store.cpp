@@ -216,11 +216,10 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
         !ValidateWeightAffinitySummary(request.affinity_summary).ok()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
-    if (request.policy.value_or(WeightStoragePolicy{})
-                .preferred_residency == WeightResidencyState::MIXED &&
+    if (request.policy.value_or(WeightStoragePolicy{}).preferred_residency ==
+            WeightResidencyState::MIXED &&
         request.affinity_summary.affinity_count < 2) {
-        return tl::make_unexpected(
-            WeightManagementError::POLICY_UNSATISFIABLE);
+        return tl::make_unexpected(WeightManagementError::POLICY_UNSATISFIABLE);
     }
 
     std::lock_guard lock(mutex_);
@@ -443,9 +442,8 @@ WeightMetadataStore::Publish(const WeightMetadataMutation& mutation) {
         current->second.availability != WeightAvailabilityState::DELETING &&
         mutation.next->availability == WeightAvailabilityState::DELETING) {
         std::optional<uint64_t> nearest;
-        if (CountActiveLeasesLocked(current->second,
-                                    mutation.next->updated_at_ms, &nearest) !=
-            0) {
+        if (CountActiveLeasesLocked(
+                current->second, mutation.next->updated_at_ms, &nearest) != 0) {
             return tl::make_unexpected(WeightManagementError::BUSY);
         }
     }
@@ -1196,9 +1194,8 @@ WeightMetadataStore::Result<WeightRevisionLease> WeightMetadataStore::Publish(
     if (!mutation.previous.has_value()) {
         next_lease_id_ = std::max(next_lease_id_, next.lease_id + 1);
     }
-    revision->second.last_accessed_at_ms =
-        std::max(revision->second.last_accessed_at_ms,
-                 *mutation.last_accessed_at_ms);
+    revision->second.last_accessed_at_ms = std::max(
+        revision->second.last_accessed_at_ms, *mutation.last_accessed_at_ms);
     return next;
 }
 
@@ -1278,10 +1275,8 @@ WeightMetadataStore::PrepareStartOperation(
         current->second.availability != WeightAvailabilityState::DEGRADED) {
         return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
-    if (current->second.policy.migration_mode ==
-        WeightMigrationMode::PINNED) {
-        return tl::make_unexpected(
-            WeightManagementError::POLICY_UNSATISFIABLE);
+    if (current->second.policy.migration_mode == WeightMigrationMode::PINNED) {
+        return tl::make_unexpected(WeightManagementError::POLICY_UNSATISFIABLE);
     }
     if (!CanAdvanceWeightMetadataGeneration(
             current->second.metadata_generation) ||
@@ -1515,8 +1510,9 @@ WeightMetadataStore::PrepareUpdateOperationProgress(
 }
 
 WeightMetadataStore::Result<WeightOperationMutation>
-WeightMetadataStore::PrepareRecordOperationError(
-    uint64_t operation_id, std::string message, uint64_t now_ms) const {
+WeightMetadataStore::PrepareRecordOperationError(uint64_t operation_id,
+                                                 std::string message,
+                                                 uint64_t now_ms) const {
     if (operation_id == 0 || message == "completed" ||
         !IsValidWeightComponent(message)) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
@@ -1921,8 +1917,7 @@ WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
             !IsValidWeightComponent(lease.holder) || lease.expires_at_ms == 0 ||
             lease.fenced_metadata_generation == 0 ||
             revision == revisions.end() ||
-            (revision->second.availability !=
-                 WeightAvailabilityState::READY &&
+            (revision->second.availability != WeightAvailabilityState::READY &&
              revision->second.availability !=
                  WeightAvailabilityState::DEGRADED) ||
             lease.fenced_metadata_generation >

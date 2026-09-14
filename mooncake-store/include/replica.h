@@ -135,8 +135,8 @@ struct ReplicateConfig {
                 std::vector<std::string>{group_ids->at(key_index)};
         }
         if (residency_affinity_ids.has_value()) {
-            key_config.residency_affinity_ids = std::vector<std::string>{
-                residency_affinity_ids->at(key_index)};
+            key_config.residency_affinity_ids =
+                std::vector<std::string>{residency_affinity_ids->at(key_index)};
         }
         return key_config;
     }

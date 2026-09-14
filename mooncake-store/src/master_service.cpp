@@ -4931,8 +4931,7 @@ auto MasterService::AllocateAndInsertMetadata(
     const std::string& key, uint64_t value_length,
     const ReplicateConfig& config, const std::string& writer_host_id,
     const std::string& group_id, const std::string& residency_affinity_id,
-    const TenantId& tenant_id,
-    const std::chrono::system_clock::time_point& now,
+    const TenantId& tenant_id, const std::chrono::system_clock::time_point& now,
     const ResolvedSoftPinRequest& soft_pin_request,
     std::optional<std::chrono::system_clock::time_point>
         committed_soft_pin_timeout)
@@ -5807,9 +5806,8 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 }
                 if (config.residency_affinity_ids.has_value() &&
                     metadata.residency_affinity_id != residency_affinity_id) {
-                    LOG(ERROR)
-                        << "key=" << key
-                        << ", error=residency_affinity_is_immutable";
+                    LOG(ERROR) << "key=" << key
+                               << ", error=residency_affinity_is_immutable";
                     return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
                 }
 
@@ -8624,14 +8622,12 @@ auto MasterService::NotifyOffloadSuccess(
             }
             continue;
         }
-        auto published =
-            PersistAndPublishWeightOperationMutation(*mutation);
+        auto published = PersistAndPublishWeightOperationMutation(*mutation);
         if (!published) {
             operation_error_persist_failed = true;
             LOG(ERROR) << "Failed to persist weight offload error"
                        << ", operation_id=" << operation_id
-                       << ", error="
-                       << static_cast<int>(published.error());
+                       << ", error=" << static_cast<int>(published.error());
         }
     }
 
@@ -13260,8 +13256,8 @@ MasterService::MetadataSerializer::SerializeMetadata(
 
     size_t array_size = 11;  // client_id, put_start_time, size, lease_timeout,
                              // has_soft_pin_timeout, soft_pin_timeout,
-                             // replicas_count, data_type, hard_pinned, group_id,
-                             // residency_affinity_id
+                             // replicas_count, data_type, hard_pinned,
+                             // group_id, residency_affinity_id
     array_size += metadata.CountReplicas();  // One element per replica
     if (metadata.object_checksum.has_value()) {
         ++array_size;
