@@ -572,6 +572,16 @@ void Workers::rechargeSlice(RdmaSlice* slice, int dev_id) {
     if (prev >= 0) device_selector_->release(prev, slice->length, 0.0);
 }
 
+void Workers::abandonRecoveryProbe(RdmaSlice* slice) {
+    if (!slice || slice->rail_probe_token == 0) return;
+    if (auto* rail = slice->rail_monitor) {
+        rail->abandonRecoveryProbe(slice->source_dev_id,
+                                   slice->target_dev_id,
+                                   slice->rail_probe_token);
+    }
+    slice->rail_probe_token = 0;
+}
+
 bool Workers::dropUnpostableSlice(WorkerContext& worker, RdmaSlice* slice) {
     if (!slice || !slice->task) return false;
     // Two reasons not to post. The caller cancelled the transfer; or another
@@ -586,6 +596,7 @@ bool Workers::dropUnpostableSlice(WorkerContext& worker, RdmaSlice* slice) {
     // back where they came from, each idempotently, since whichever path
     // resolved the slice may already have run them -- and updateSliceStatus
     // is a no-op once the slice is terminal.
+    abandonRecoveryProbe(slice);
     retireSweptSlice(worker, slice, getCurrentTimeInNano(), nullptr);
     updateSliceStatus(slice, CANCELED);
     return true;
@@ -914,6 +925,7 @@ void Workers::asyncPostSend() {
                     slice = slice->next;
                     continue;
                 }
+                abandonRecoveryProbe(slice);
                 LOG(ERROR) << "Failed to generate post path for slice " << slice
                            << ": " << status.ToString();
                 releaseSliceQuota(slice, getCurrentTimeInNano());
@@ -2085,6 +2097,10 @@ Status Workers::generatePostPath(RdmaSlice* slice,
     else
         CHECK_STATUS(selectFallbackDevice(source, target, slice,
                                           recovery_probe_in_progress));
+    // Cache the RailMonitor pointer before any remaining validation can
+    // reject an admitted probe, so that path can return its ownership.
+    slice->rail_monitor = &getOrCreateRail(worker_context_[tl_wid].rails,
+                                           target.segment->machine_id);
     // Keys are NicID-indexed. A peer running an older build publishes a
     // compacted rkey vector, so a NicID from its device_list can point past the
     // end; fail the slice instead of reading out of bounds.
@@ -2098,11 +2114,6 @@ Status Workers::generatePostPath(RdmaSlice* slice,
             "Selected device has no registered memory key" LOC_MARK);
     slice->source_lkey = lkeys[slice->source_dev_id];
     slice->target_rkey = rkeys[slice->target_dev_id];
-    // Cache the RailMonitor pointer so asyncPollCq / disableEndpoint can
-    // update rail state without a segment lookup or string-keyed map
-    // lookup on the hot path.
-    slice->rail_monitor = &getOrCreateRail(worker_context_[tl_wid].rails,
-                                           target.segment->machine_id);
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
     if (congestion_control_config_.mode !=
         adaptive_congestion_control::Mode::kOff) {
