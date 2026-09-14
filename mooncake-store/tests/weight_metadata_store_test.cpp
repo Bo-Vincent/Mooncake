@@ -399,7 +399,8 @@ TEST(WeightMetadataStoreTest, OperationTimestampsRemainMonotonic) {
     ASSERT_TRUE(operation.has_value());
 
     auto progress = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 1, 2, 1024, 2048, "member-1", {},
+        operation->operation_id, 1, operation->total_units, 1024,
+        operation->total_bytes, "member-1", {},
         WeightResidencyState::MIXED, 0.5, 250);
     ASSERT_TRUE(progress.has_value());
     operation = metadata_store.Publish(*progress);
@@ -765,7 +766,7 @@ TEST(WeightMetadataStoreTest, RejectsUnknownSnapshotEnums) {
               restored.RestoreSnapshot(snapshot).error());
 
     snapshot = metadata_store.ExportSnapshot();
-    snapshot.operations[0].target_residency = WeightResidencyState::HOT;
+    snapshot.operations[0].target_residency = WeightResidencyState::MIXED;
     EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT,
               restored.RestoreSnapshot(snapshot).error());
 }
