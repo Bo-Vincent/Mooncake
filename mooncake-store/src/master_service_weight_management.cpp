@@ -40,6 +40,9 @@ MasterService::BeginWeightImport(const BeginWeightImportRequest& request) {
     if (!normalized.policy.has_value()) {
         normalized.policy = default_weight_storage_policy_;
     }
+    [[maybe_unused]] auto lineage_operation_lock =
+        AcquireWeightLineageOperationLock(
+            ToWeightLineageIdentity(request.identity));
     [[maybe_unused]] auto group_operation_lock =
         AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
                                         canonical_group);
@@ -61,6 +64,9 @@ MasterService::CommitWeightImport(const CommitWeightImportRequest& request) {
         request.manifest.payload_group_id != canonical_group) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
+    [[maybe_unused]] auto lineage_operation_lock =
+        AcquireWeightLineageOperationLock(
+            ToWeightLineageIdentity(request.identity));
     [[maybe_unused]] auto group_operation_lock =
         AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
                                         canonical_group);
@@ -94,6 +100,9 @@ MasterService::AbortWeightImport(const AbortWeightImportRequest& request) {
     if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
+    [[maybe_unused]] auto lineage_operation_lock =
+        AcquireWeightLineageOperationLock(
+            ToWeightLineageIdentity(request.identity));
     [[maybe_unused]] auto group_operation_lock =
         AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
                                         canonical_group);
@@ -245,6 +254,9 @@ MasterService::BeginWeightUpsert(const BeginWeightUpsertRequest& request) {
             return tl::make_unexpected(lineage.error());
         }
     }
+    [[maybe_unused]] auto group_operation_lock =
+        AcquireWeightGroupOperationLock(
+            TenantId(request.target_identity.tenant_id), canonical_group);
     import = weight_metadata_.PrepareBeginImport(
         normalized.import, now_ms,
         lineage->latest_claim->mode == WeightUpsertMode::DELETE_FIRST &&
@@ -319,13 +331,27 @@ MasterService::AbortWeightUpsert(const AbortWeightUpsertRequest& request) {
     auto target = weight_metadata_.Get(request.target_identity, now_ms);
     if (target &&
         target->metadata.availability == WeightAvailabilityState::IMPORTING) {
-        auto aborted = AbortWeightImport(AbortWeightImportRequest{
-            .identity = request.target_identity,
-            .expected_metadata_generation =
-                target->metadata.metadata_generation,
-        });
+        const auto canonical_group =
+            MakeWeightPayloadGroupId(request.target_identity);
+        if (canonical_group.empty()) {
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+        }
+        [[maybe_unused]] auto group_operation_lock =
+            AcquireWeightGroupOperationLock(
+                TenantId(request.target_identity.tenant_id), canonical_group);
+        auto aborted = weight_metadata_.PrepareAbortImport(
+            AbortWeightImportRequest{
+                .identity = request.target_identity,
+                .expected_metadata_generation =
+                    target->metadata.metadata_generation,
+            },
+            now_ms);
         if (!aborted) {
             return tl::make_unexpected(aborted.error());
+        }
+        auto published = PersistAndPublishWeightMutation(*aborted);
+        if (!published) {
+            return tl::make_unexpected(published.error());
         }
     }
     return PersistAndPublishWeightLineageMutation(*mutation);
