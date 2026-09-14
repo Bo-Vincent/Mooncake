@@ -165,6 +165,12 @@ class MasterService {
         const GetWeightRevisionRequest& request) const;
     WeightMetadataStore::Result<ListWeightRevisionsResponse> ListWeightRevisions(
         const ListWeightRevisionsRequest& request) const;
+    WeightMetadataStore::Result<WeightRevisionLease> AcquireWeightRevisionLease(
+        const AcquireWeightRevisionLeaseRequest& request);
+    WeightMetadataStore::Result<WeightRevisionLease> RenewWeightRevisionLease(
+        const RenewWeightRevisionLeaseRequest& request);
+    WeightMetadataStore::Result<void> ReleaseWeightRevisionLease(
+        const ReleaseWeightRevisionLeaseRequest& request);
 
     void SetBatchOpLogTerminalCallback(
         OrderedOpLogWriter::TerminalCallback callback);
@@ -1106,6 +1112,8 @@ class MasterService {
         const CommitWeightImportRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionMetadata>
     PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
+    WeightMetadataStore::Result<WeightRevisionLease>
+    PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
 
     class SoftPinDeadlineIndex {
         friend class test::MasterServiceTestPeer;
