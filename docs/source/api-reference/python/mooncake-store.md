@@ -95,6 +95,126 @@ print(store.get("hello_key").decode())
 store.close()
 ```
 
+## Managed Model-Weight Revisions
+
+The high-level `mooncake.reshard.weight.WeightStore` API publishes and loads an
+exact immutable weight revision through the Store weight metadata:
+
+```python
+from mooncake.reshard.weight import (
+    WeightMigrationMode,
+    WeightResidencyState,
+    WeightSnapshotDescriptor,
+    WeightStoragePolicy,
+    WeightStore,
+    WeightUpsertMode,
+)
+
+weight_store = WeightStore(
+    store,
+    default_policy=WeightStoragePolicy(
+        preferred_residency=WeightResidencyState.HOT,
+        migration_mode=WeightMigrationMode.MANUAL,
+    ),
+)
+
+snapshot = WeightSnapshotDescriptor(
+    resource_id=source_placement.resource_id,
+    revision=source_placement.revision,
+    weight_generation=source_placement.weight_generation,
+    namespace="production",
+)
+writer = weight_store.weight_put(
+    snapshot,
+    adapter,
+    tenant_id="default",
+)
+for tensor_id, tensor in tensors.items():
+    writer.weight_put_tensor(tensor_id, tensor)
+identity = writer.identity
+manifest = writer.commit()
+
+view = weight_store.weight_get_metadata(identity)
+weight_store.weight_get(identity, target_placement, target_bindings)
+
+next_policy = WeightStoragePolicy(
+    preferred_residency=WeightResidencyState.COLD,
+    migration_mode=WeightMigrationMode.MANUAL,
+)
+updated = weight_store.weight_update_policy(
+    identity,
+    policy=next_policy,
+    expected_metadata_generation=view.metadata.metadata_generation,
+)
+
+successor = weight_store.weight_upsert(
+    next_snapshot,
+    adapter,
+    replacing=identity,
+    expected_metadata_generation=updated.metadata_generation,
+    mode=WeightUpsertMode.PUT_FIRST,
+    request_id="rollout-2026-09-11-001",
+    policy=next_policy,
+)
+for tensor_id, tensor in next_tensors.items():
+    successor.weight_put_tensor(tensor_id, tensor)
+next_identity = successor.identity
+successor.commit()
+```
+
+`weight_get` acquires and renews a revision lease, validates the manifest
+identity and SHA-256 against the metadata record, executes the
+Store-to-runtime loads, and releases the lease after terminal completion. Use
+`weight_list(namespace=..., resource_id=...)` for bounded discovery.
+
+The native `MooncakeDistributedStore` binding also exposes lower-level
+`begin_weight_import`, `commit_weight_import`, `abort_weight_import`,
+`begin_weight_upsert`, `commit_weight_upsert`, `abort_weight_upsert`, revision
+get/list, lease acquire/renew/release, residency start/query/reconcile, and
+delete operations. Native management calls return the value,
+weight-management-domain error, and transport error separately; most
+applications should use the typed `WeightStore` facade.
+
+`weight_update_policy(identity, *, policy,
+expected_metadata_generation)` is the only policy-only mutation. The former
+public name has no compatibility wrapper.
+
+`weight_upsert(snapshot, adapter, *, replacing, expected_metadata_generation,
+mode=WeightUpsertMode.PUT_FIRST, tenant_id="default", policy=None,
+request_id=None)` replaces a base with a
+higher generation in the same
+`(tenant_id, namespace, resource_id, revision)` lineage. It creates a writer;
+upload tensors and call `commit()` as for `weight_put`. The operation is not an
+in-place overwrite of an ordinary Store key, and Store's durable lineage claim
+is not a serving-active pointer.
+
+`PUT_FIRST` keeps the base readable until the target is `READY`, then fences
+new base leases and renewals, drains existing leases, and deletes the base. A
+target failure leaves the base intact, while peak storage approaches two
+complete revisions. `DELETE_FIRST` first requires no active base lease or
+lifecycle operation, deletes the base, and only then permits target import. It
+uses less peak space but has an unavailable and non-rollback window if the
+target fails.
+
+When `request_id` is omitted, `WeightStore` deterministically hashes the
+canonical base identity, target identity, mode, and
+`expected_metadata_generation`. Repeating the same call after a lost begin
+response derives the same ID. An explicit `request_id` is used unchanged. The
+same request and arguments resume one claim; a competing request cannot create
+a second successor. After Master recovery, Store resumes the persisted phase
+and never decreases the lineage generation watermark.
+
+In an HA cluster using the etcd batch OpLog, ordinary Weight metadata OpTypes
+8–11 remain gated by `weight_management_oplog_capability_confirmed`.
+`weight_upsert` also requires
+`weight_lineage_oplog_capability_confirmed=true` for lineage OpType 12. Upgrade
+every standby to replay OpType 12 before enabling the lineage flag on the
+active configuration.
+
+Manifest lookup and payload transfer are internal to `WeightStore`; there is no
+manifest-key-based public load path. See
+[Weight Management Architecture](../../design/weight-management.md).
+
 ## Basic API Usage
 
 ### Simple Get/Put Operations
@@ -770,7 +890,7 @@ and the manifest-backed weight snapshot API have different storage contracts.
 | --- | --- | --- |
 | Store and retrieve a complete tensor | `put_tensor()` / `get_tensor()` | One ordinary Store tensor object. |
 | Split a full tensor and read a TP shard | `put_tensor_with_tp()` / `get_tensor_with_tp()` | Legacy single-axis TP tensor objects; batch and registered-buffer variants are also available. |
-| Save weights and restore into a different TP/DP/EP/PP placement | `begin_weight_snapshot()` and `WeightStore.load_manifest()` / `plan_load()` / `load()` | Immutable manifest-managed fragments, with framework-supplied placement and runtime bindings. |
+| Save weights and restore into a different TP/DP/EP/PP placement | `WeightStore.weight_put()` / `WeightStore.weight_get()` | Immutable manifest-managed fragments, with framework-supplied placement and runtime bindings. |
 | Use `put/get_tensor_with_cp`, `*_with_dp`, `*_with_ep`, or `*_with_pp` | No such public convenience methods | DP/EP/PP weight placement is expressed through the manifest API; CP is not a supported axis. |
 | Supply an arbitrary parallel strategy through `*_with_config` | No such public tensor API | `ReplicateConfig` controls Store replication and placement policy, not tensor parallel topology. |
 
@@ -812,41 +932,61 @@ for the configuration and execution boundaries.
 
 ## Model Weight Snapshot API
 
-Heterogeneous model-weight snapshots use the manifest-backed Reshard API.
-The framework adapter owns model semantics and exports a complete source
-placement plus live runtime bindings. Mooncake Store persists the resulting
-payloads and the immutable stored manifest.
+Heterogeneous model-weight snapshots use the managed `WeightStore` API. The
+framework adapter owns model semantics and exports a complete source placement
+plus live runtime bindings. Mooncake Store persists the payloads, manifest, and
+revision lifecycle metadata.
 
 ```python
-from mooncake.reshard.weight.store import WeightStore
+from mooncake.reshard.weight import WeightStore, WeightUpsertMode
 
 weight_store = WeightStore(store)
-session = weight_store.begin_weight_snapshot(descriptor, adapter)
-session.write_tensor(tensor_id, tensor)
+session = weight_store.weight_put(descriptor, adapter)
+session.weight_put_tensor(tensor_id, tensor)
+identity = session.identity
 manifest = session.commit()
 ```
 
-`MooncakeDistributedStore.begin_weight_snapshot(descriptor, adapter)` provides
-the same session for callers that already hold the native Store object.
+To replace an existing generation, use the same writer lifecycle with an
+explicit base identity:
 
-`write_tensor()` validates the adapter-selected source fragments against the
-session placement and runtime bindings. `commit()` publishes one
-`StoredWeightManifest` after complete durable coverage. Restore uses
-`WeightStore.load_manifest()`, `plan_load()`, and `load()` with the target
-placement and runtime binding manifests.
+```python
+base_view = weight_store.weight_get_metadata(identity)
+session = weight_store.weight_upsert(
+    next_descriptor,
+    adapter,
+    replacing=identity,
+    expected_metadata_generation=base_view.metadata.metadata_generation,
+    mode=WeightUpsertMode.PUT_FIRST,
+    request_id="rollout-2026-09-11-001",
+)
+session.weight_put_tensor(tensor_id, tensor)
+next_identity = session.identity
+manifest = session.commit()
+```
+
+The next descriptor must keep the base lineage and increase
+`weight_generation`. Sparse updates from #3747 or #3953 may enter this API
+after an adapter materializes a complete new generation. Delta-backed
+dependencies on base payloads require a separate retention and compaction
+design.
+
+`weight_put_tensor()` validates the adapter-selected source fragments against
+the session placement and runtime bindings. `commit()` publishes the revision
+only after every required payload and the immutable manifest are durable.
+Restore uses `weight_get(identity, target_placement, target_bindings)`.
 
 ### Breaking Change and Migration
 
 PR [#3772](https://github.com/kvcache-ai/Mooncake/pull/3772) removed the public
 `*_with_parallelism` API family and the
 associated `ParallelAxis`, `TensorParallelism`, and `ReadTarget` helper types.
-Applications that create heterogeneous model-weight snapshots migrate their
-write path to `begin_weight_snapshot()`, `write_tensor()`, and `commit()`.
+Applications that create heterogeneous model-weight snapshots use
+`weight_put()`, `weight_put_tensor()`, and `commit()`.
 The writer creates manifest-managed payload fragments and one
 `StoredWeightManifest`; it does not create ordinary Store tensor objects.
 
-Applications restore a snapshot through `load_manifest()`, `plan_load()`, and
-`load()` with the target placement and runtime binding manifests. The existing
+Applications restore an exact revision through `weight_get()`. The existing
 single-axis TP APIs named `*_with_tp` remain separate compatibility APIs.
 
 When `commit()` reports a manifest publication failure after Store records the
