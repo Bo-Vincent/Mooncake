@@ -41,6 +41,7 @@
 #include "tenant_quota_sharded.h"
 #include "tenant_quota_policy_store.h"
 #include "types.h"
+#include "weight_metadata_store.h"
 #include "master_config.h"
 #include "object_metadata.h"
 #include "object_runtime_state.h"
@@ -153,6 +154,17 @@ class MasterService {
     tl::expected<std::optional<TenantQuotaSnapshot>, ErrorCode>
     DeleteTenantQuotaPolicy(const TenantId& tenant_id);
     uint64_t GetTenantQuotaAllocatableCapacityBytes();
+
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
+        const BeginWeightImportRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
+        const CommitWeightImportRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> AbortWeightImport(
+        const AbortWeightImportRequest& request);
+    WeightMetadataStore::Result<WeightRevisionView> GetWeightRevision(
+        const GetWeightRevisionRequest& request) const;
+    WeightMetadataStore::Result<ListWeightRevisionsResponse> ListWeightRevisions(
+        const ListWeightRevisionsRequest& request) const;
 
     void SetBatchOpLogTerminalCallback(
         OrderedOpLogWriter::TerminalCallback callback);
@@ -1076,6 +1088,20 @@ class MasterService {
         std::unordered_map<std::string, GroupState> groups GUARDED_BY(mutex);
     };
     GroupDomain group_domain_;
+    WeightMetadataStore weight_metadata_;
+
+    struct WeightGroupMemberSnapshot {
+        std::string key;
+        uint64_t size{0};
+        ObjectDataType data_type{ObjectDataType::UNKNOWN};
+        bool readable{false};
+    };
+
+    WeightMetadataStore::Result<std::vector<WeightGroupMemberSnapshot>>
+    SnapshotWeightGroup(const WeightRevisionIdentity& identity,
+                        const std::string& payload_group_id) const;
+    WeightMetadataStore::Result<void> ValidateWeightGroupForCommit(
+        const CommitWeightImportRequest& request) const;
 
     class SoftPinDeadlineIndex {
         friend class test::MasterServiceTestPeer;
