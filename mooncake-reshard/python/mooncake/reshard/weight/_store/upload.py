@@ -204,7 +204,7 @@ def _residency_affinity_id(fragment: PlacementFragment) -> str:
     return hashlib.sha256("\0".join(sorted(logical_names)).encode()).hexdigest()
 
 
-def plan_weight_upload(
+def _build_weight_put_plan(
     source_placement: WeightPlacementManifest,
     source_bindings: Sequence[WeightRuntimeBindingManifest],
     *,
@@ -306,7 +306,7 @@ class WeightUploadService:
         *,
         namespace: str = "default",
     ) -> WeightUploadPlan:
-        return plan_weight_upload(
+        return _build_weight_put_plan(
             source_placement,
             source_bindings,
             namespace=namespace,
