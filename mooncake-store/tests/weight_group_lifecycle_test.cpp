@@ -39,7 +39,12 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
 
     WeightRevisionMetadata PublishReadyWithPayloads(
         MasterService& service, const UUID& client_id,
-        const std::vector<PayloadSpec>& payloads) {
+        const std::vector<PayloadSpec>& payloads,
+        WeightStoragePolicy policy = {
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        }) {
         uint64_t logical_bytes = 0;
         std::vector<std::string> payload_keys;
         std::set<std::string> affinity_ids;
@@ -53,11 +58,7 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = payloads.size(),
             .expected_logical_bytes = logical_bytes,
-            .policy =
-                WeightStoragePolicy{
-                    .preferred_residency = WeightResidencyState::HOT,
-                    .migration_mode = WeightMigrationMode::MANUAL,
-                },
+            .policy = policy,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = affinity_ids.size(),
@@ -103,11 +104,17 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
         return *ready;
     }
 
-    WeightRevisionMetadata PublishReady(MasterService& service,
-                                        const UUID& client_id) {
+    WeightRevisionMetadata PublishReady(
+        MasterService& service, const UUID& client_id,
+        WeightStoragePolicy policy = {
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        }) {
         return PublishReadyWithPayloads(
             service, client_id,
-            {{.key = "payload-a", .size = 1024, .affinity_id = "affinity-a"}});
+            {{.key = "payload-a", .size = 1024, .affinity_id = "affinity-a"}},
+            policy);
     }
 
     static void AddLocalDiskReplica(MasterService& service,
