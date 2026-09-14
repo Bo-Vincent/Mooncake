@@ -2612,8 +2612,7 @@ TEST_F(MasterServiceHATest,
 
     OpLogBatchStorage storage(cluster_id, *backend);
     OpLogBatchRecord first_batch;
-    auto first =
-        std::async(std::launch::async, [&] { return begin(2, 2048); });
+    auto first = std::async(std::launch::async, [&] { return begin(2, 2048); });
     ReadBatchEventually(storage, 1, first_batch);
     ASSERT_EQ(1u, first_batch.entries.size());
 
@@ -2713,7 +2712,8 @@ TEST_F(MasterServiceHATest, WeightLeaseBecomesVisibleOnlyAfterDurableCallback) {
     EXPECT_EQ(1u, after->active_lease_count);
 }
 
-TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightMetadataStore) {
+TEST_F(MasterServiceHATest,
+       StandbyPromotionRestoresCompleteWeightMetadataStore) {
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -2787,7 +2787,8 @@ TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadataStore) {
 
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}));
     EXPECT_FALSE(
-        service.GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
+        service
+            .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
             .has_value());
 }
 

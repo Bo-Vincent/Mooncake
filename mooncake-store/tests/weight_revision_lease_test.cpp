@@ -103,8 +103,7 @@ TEST(WeightRevisionLeaseTest, RejectsStaleGenerationAndExpiredRenewal) {
     auto stale = metadata_store.PrepareAcquireLease(
         AcquireWeightRevisionLeaseRequest{
             .identity = ready.identity,
-            .expected_metadata_generation =
-                ready.metadata_generation - 1,
+            .expected_metadata_generation = ready.metadata_generation - 1,
             .holder = "worker-0",
             .ttl_ms = 1000,
         },

@@ -817,14 +817,12 @@ TEST_F(HotStandbyServiceTest, SnapshotWeightMetadataSurvivesPromotionExport) {
     ASSERT_EQ(ErrorCode::OK, service_->Start("", "", cluster_id_));
 
     StandbySnapshot exported;
-    ASSERT_EQ(ErrorCode::OK,
-              service_->PromoteAndExportSnapshot(exported));
+    ASSERT_EQ(ErrorCode::OK, service_->PromoteAndExportSnapshot(exported));
     ASSERT_TRUE(exported.weight_metadata.has_value());
     EXPECT_EQ(MakeWeightMetadataSnapshot(), exported.weight_metadata.value());
 }
 
-TEST_F(HotStandbyServiceTest,
-       AppliesNewerWeightMetadataOpLogAfterSnapshot) {
+TEST_F(HotStandbyServiceTest, AppliesNewerWeightMetadataOpLogAfterSnapshot) {
     const std::string cluster_id = "weight-snapshot-catch-up";
     auto backend = std::make_shared<FakeCaptureHaKvBackend>();
     config_.enable_snapshot_bootstrap = true;
@@ -858,29 +856,26 @@ TEST_F(HotStandbyServiceTest,
     ready.metadata_generation = 2;
     ready.updated_at_ms = 200;
     const auto encoded = struct_pack::serialize(ready);
-    auto batch = MakeCaptureBatch(
-        1, 2, OpType::WEIGHT_METADATA_UPSERT,
-        MakeWeightRevisionMetadataKey(ready.identity),
-        std::string(encoded.begin(), encoded.end()));
+    auto batch = MakeCaptureBatch(1, 2, OpType::WEIGHT_METADATA_UPSERT,
+                                  MakeWeightRevisionMetadataKey(ready.identity),
+                                  std::string(encoded.begin(), encoded.end()));
     batch.entries.front().tenant_id = ready.identity.tenant_id;
-    ASSERT_EQ(ErrorCode::OK,
-              backend->Put(BuildBatchRecordKey(cluster_id, 1),
-                           EncodeOpLogBatchRecord(batch)));
-    ASSERT_EQ(ErrorCode::OK,
-              backend->Put(BuildDurablePrefixKey(cluster_id),
-                           EncodeDurablePrefix(
-                               {.batch_id = 1, .last_seq = 2})));
+    ASSERT_EQ(ErrorCode::OK, backend->Put(BuildBatchRecordKey(cluster_id, 1),
+                                          EncodeOpLogBatchRecord(batch)));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        backend->Put(BuildDurablePrefixKey(cluster_id),
+                     EncodeDurablePrefix({.batch_id = 1, .last_seq = 2})));
 
     ASSERT_EQ(ErrorCode::OK, service_->Start("", "", cluster_id));
-    for (int i = 0;
-         i < 100 && service_->GetLatestAppliedSequenceId() < 2; ++i) {
+    for (int i = 0; i < 100 && service_->GetLatestAppliedSequenceId() < 2;
+         ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     ASSERT_EQ(2u, service_->GetLatestAppliedSequenceId());
 
     StandbySnapshot promoted;
-    ASSERT_EQ(ErrorCode::OK,
-              service_->PromoteAndExportSnapshot(promoted));
+    ASSERT_EQ(ErrorCode::OK, service_->PromoteAndExportSnapshot(promoted));
     ASSERT_TRUE(promoted.weight_metadata.has_value());
     ASSERT_EQ(1u, promoted.weight_metadata->metadata.size());
     EXPECT_EQ(ready, promoted.weight_metadata->metadata.front());

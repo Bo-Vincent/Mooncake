@@ -219,7 +219,8 @@ TEST_F(MasterSnapshotCodecTest,
               operating_view->metadata.operation);
 }
 
-TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightMetadataStoreRestoresEmpty) {
+TEST_F(MasterSnapshotCodecTest,
+       OldSnapshotWithoutWeightMetadataStoreRestoresEmpty) {
     PublishReady(*master_service_,
                  WeightRevisionIdentity{
                      .tenant_id = "default",
@@ -233,8 +234,8 @@ TEST_F(MasterSnapshotCodecTest, OldSnapshotWithoutWeightMetadataStoreRestoresEmp
     auto state_view = MakeStateView(*master_service_);
     auto encoded = codec.Encode(state_view);
     ASSERT_TRUE(encoded.has_value());
-    encoded->metadata =
-        RewriteWeightMetadataStoreField(encoded->metadata, /*keep_field=*/false);
+    encoded->metadata = RewriteWeightMetadataStoreField(encoded->metadata,
+                                                        /*keep_field=*/false);
 
     auto target = MakeMasterService();
     ASSERT_TRUE(codec.Decode(target.get(), *encoded).has_value());

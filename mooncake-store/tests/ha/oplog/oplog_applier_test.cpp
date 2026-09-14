@@ -216,9 +216,9 @@ TEST_F(OpLogApplierTest, AppliesWeightLeaseAndDeleteTombstones) {
 
 TEST_F(OpLogApplierTest, RejectsMalformedWeightPayloadAndMismatchedKey) {
     auto metadata = MakeWeightMetadata(1);
-    EXPECT_FALSE(applier_->ApplyOpLogEntry(
-        MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT,
-                  MakeWeightRevisionMetadataKey(metadata.identity), "invalid")));
+    EXPECT_FALSE(applier_->ApplyOpLogEntry(MakeEntry(
+        1, OpType::WEIGHT_METADATA_UPSERT,
+        MakeWeightRevisionMetadataKey(metadata.identity), "invalid")));
     EXPECT_EQ(1u, applier_->GetExpectedSequenceId());
 
     EXPECT_FALSE(applier_->ApplyOpLogEntry(

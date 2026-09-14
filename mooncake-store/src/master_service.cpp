@@ -1647,8 +1647,8 @@ MasterService::ObjectOperationLock MasterService::AcquireObjectOperationLock(
 }
 
 MasterService::ObjectOperationLock
-MasterService::AcquireWeightGroupOperationLock(
-    const TenantId& tenant_id, const std::string& group_id) {
+MasterService::AcquireWeightGroupOperationLock(const TenantId& tenant_id,
+                                               const std::string& group_id) {
     const auto scoped_group = tenant_id.MakeScopedKey(group_id);
     const auto stripe_idx =
         std::hash<std::string>{}(scoped_group) % kObjectOperationLockStripes;
@@ -1672,8 +1672,8 @@ std::shared_ptr<Lease> MasterService::RegisterGroupMember(
     return it->second.lease;
 }
 
-WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightImport(
-    const BeginWeightImportRequest& request) {
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::BeginWeightImport(const BeginWeightImportRequest& request) {
     auto normalized = request;
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty() ||
@@ -1695,8 +1695,8 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightIm
     return PersistAndPublishWeightMutation(*mutation);
 }
 
-WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightImport(
-    const CommitWeightImportRequest& request) {
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::CommitWeightImport(const CommitWeightImportRequest& request) {
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty() ||
         request.manifest.payload_group_id != canonical_group) {
@@ -1728,8 +1728,8 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightI
     return PersistAndPublishWeightMutation(*mutation);
 }
 
-WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::AbortWeightImport(
-    const AbortWeightImportRequest& request) {
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::AbortWeightImport(const AbortWeightImportRequest& request) {
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
@@ -1747,7 +1747,8 @@ WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::AbortWeightIm
     return PersistAndPublishWeightMutation(*mutation);
 }
 
-WeightMetadataStore::Result<WeightRevisionView> MasterService::GetWeightRevision(
+WeightMetadataStore::Result<WeightRevisionView>
+MasterService::GetWeightRevision(
     const GetWeightRevisionRequest& request) const {
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1821,8 +1822,7 @@ WeightMetadataStore::Result<void> MasterService::ReleaseWeightRevisionLease(
         const auto canonical_group =
             MakeWeightPayloadGroupId(mutation->previous->identity);
         if (canonical_group.empty()) {
-            return tl::make_unexpected(
-                WeightManagementError::INVALID_ARGUMENT);
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
         }
         [[maybe_unused]] auto operation_lock = AcquireWeightGroupOperationLock(
             TenantId(mutation->previous->identity.tenant_id), canonical_group);
@@ -1843,7 +1843,8 @@ WeightMetadataStore::Result<void> MasterService::ReleaseWeightRevisionLease(
     return {};
 }
 
-WeightMetadataStore::Result<std::vector<MasterService::WeightGroupMemberSnapshot>>
+WeightMetadataStore::Result<
+    std::vector<MasterService::WeightGroupMemberSnapshot>>
 MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
                                    const std::string& payload_group_id) const {
     const TenantId tenant_id(identity.tenant_id);
@@ -1959,7 +1960,8 @@ MasterService::PersistAndPublishWeightMutation(
     struct Completion {
         std::mutex mutex;
         std::condition_variable cv;
-        std::optional<WeightMetadataStore::Result<WeightRevisionMetadata>> result;
+        std::optional<WeightMetadataStore::Result<WeightRevisionMetadata>>
+            result;
     };
     auto completion = std::make_shared<Completion>();
     auto persisted = AppendOpLogWithDurableFinalize(
@@ -13090,7 +13092,8 @@ MasterService::MetadataSerializer::Serialize() {
 
     packer.pack("weight_metadata");
     const auto weight_metadata = service_->weight_metadata_.ExportSnapshot();
-    const auto encoded_weight_metadata = struct_pack::serialize(weight_metadata);
+    const auto encoded_weight_metadata =
+        struct_pack::serialize(weight_metadata);
     packer.pack_bin(encoded_weight_metadata.size());
     packer.pack_bin_body(encoded_weight_metadata.data(),
                          encoded_weight_metadata.size());
@@ -13237,9 +13240,9 @@ MasterService::MetadataSerializer::Deserialize(
                 "Invalid MessagePack format: weight_metadata must be binary"));
         }
         WeightMetadataSnapshot weight_metadata;
-        const std::string encoded(
-            weight_metadata_obj->via.bin.ptr,
-            weight_metadata_obj->via.bin.ptr + weight_metadata_obj->via.bin.size);
+        const std::string encoded(weight_metadata_obj->via.bin.ptr,
+                                  weight_metadata_obj->via.bin.ptr +
+                                      weight_metadata_obj->via.bin.size);
         if (struct_pack::deserialize_to(weight_metadata, encoded) !=
             struct_pack::errc::ok) {
             return tl::make_unexpected(SerializationError(
