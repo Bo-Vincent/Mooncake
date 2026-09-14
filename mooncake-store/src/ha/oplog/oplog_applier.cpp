@@ -117,6 +117,9 @@ bool OpLogApplier::ApplyOpLogEntry(const OpLogEntry& entry) {
         case OpType::WEIGHT_LEASE_DELETE:
             applied = ApplyWeightLeaseDelete(entry);
             break;
+        case OpType::WEIGHT_LINEAGE_UPSERT:
+            applied = ApplyWeightLineageUpsert(entry);
+            break;
         default:
             LOG(ERROR) << "OpLogApplier: unsupported op_type="
                        << static_cast<int>(entry.op_type)
@@ -467,6 +470,41 @@ bool OpLogApplier::ApplyWeightLeaseDelete(const OpLogEntry& entry) {
     return metadata_store_->RemoveWeightLease(
         deletion.lease_id, deletion.identity,
         deletion.fenced_metadata_generation);
+}
+
+bool OpLogApplier::ApplyWeightLineageUpsert(const OpLogEntry& entry) {
+    WeightLineageUpsertOp upsert;
+    if (struct_pack::deserialize_to(upsert, entry.payload) !=
+            struct_pack::errc::ok ||
+        !ValidateWeightLineageMetadata(upsert.lineage).ok() ||
+        NormalizeTenantId(entry.tenant_id) !=
+            upsert.lineage.identity.tenant_id ||
+        entry.object_key !=
+            MakeWeightLineageMetadataKey(upsert.lineage.identity)) {
+        LOG(ERROR) << "OpLogApplier: invalid weight lineage upsert, key="
+                   << entry.object_key;
+        return false;
+    }
+    const auto current =
+        metadata_store_->GetWeightLineage(upsert.lineage.identity);
+    if (!current.has_value()) {
+        return upsert.lineage.lineage_metadata_generation == 1 &&
+               metadata_store_->PutWeightLineage(upsert.lineage);
+    }
+    if (*current == upsert.lineage) {
+        return true;
+    }
+    if (!CanAdvanceWeightMetadataGeneration(
+            current->lineage_metadata_generation) ||
+        upsert.lineage.lineage_metadata_generation !=
+            current->lineage_metadata_generation + 1 ||
+        upsert.lineage.committed_weight_generation <
+            current->committed_weight_generation) {
+        LOG(ERROR) << "OpLogApplier: stale weight lineage upsert, key="
+                   << entry.object_key;
+        return false;
+    }
+    return metadata_store_->PutWeightLineage(upsert.lineage);
 }
 
 const StandbySegmentRegistry& OpLogApplier::GetSegmentRegistry() const {

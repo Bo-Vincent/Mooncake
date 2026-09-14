@@ -62,6 +62,10 @@ enable_oplog: false
 enable_oplog_snapshot: false
 # Maximum objects per standby batch OpLog snapshot chunk
 snapshot_chunk_object_count: 1000000
+# Confirm all standbys support weight metadata OpLog entry types 8 through 11
+weight_management_oplog_capability_confirmed: false
+# Confirm all standbys support weight lineage OpLog entry type 12
+weight_lineage_oplog_capability_confirmed: false
 # Batch standby base polling/retry delay in milliseconds
 oplog_poll_interval_ms: 1000
 # Maximum consecutive retryable batch-standby failure window in seconds
