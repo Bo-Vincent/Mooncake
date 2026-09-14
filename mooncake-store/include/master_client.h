@@ -474,6 +474,14 @@ class MasterClient {
         const ListWeightRevisionsRequest& request);
     WeightRpcResult<WeightRevisionMetadata> UpdateWeightPolicy(
         const UpdateWeightPolicyRequest& request);
+    WeightRpcResult<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request);
+    WeightRpcResult<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request);
+    WeightRpcResult<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request);
+    WeightRpcResult<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request);
     WeightRpcResult<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request);
     WeightRpcResult<WeightRevisionLease> RenewWeightRevisionLease(

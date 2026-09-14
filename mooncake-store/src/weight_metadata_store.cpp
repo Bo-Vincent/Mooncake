@@ -38,6 +38,61 @@ bool SameManifest(const WeightRevisionMetadata& metadata,
     return metadata.manifest == manifest;
 }
 
+bool SameUpsertRequest(const WeightUpsertClaim& claim,
+                       const BeginWeightUpsertRequest& request) {
+    const auto& import = request.import;
+    return claim.request_id == request.request_id &&
+           claim.base_identity == request.base_identity &&
+           claim.target_identity == request.target_identity &&
+           claim.mode == request.mode &&
+           claim.expected_base_metadata_generation ==
+               request.expected_base_metadata_generation &&
+           claim.import ==
+               WeightUpsertImportSummary{
+                   .payload_group_id = import.payload_group_id,
+                   .expected_payload_count = import.expected_payload_count,
+                   .expected_logical_bytes = import.expected_logical_bytes,
+                   .policy = import.policy,
+                   .affinity_summary = import.affinity_summary,
+               };
+}
+
+bool IsValidUpsertPhaseTransition(WeightUpsertPhase from, WeightUpsertPhase to,
+                                  WeightUpsertMode mode) {
+    if (from == to) {
+        return true;
+    }
+    if (to == WeightUpsertPhase::ABORTED &&
+        !IsTerminalWeightUpsertPhase(from)) {
+        return true;
+    }
+    if (mode == WeightUpsertMode::PUT_FIRST) {
+        return (from == WeightUpsertPhase::PREPARING_TARGET &&
+                to == WeightUpsertPhase::RETIRING_BASE) ||
+               (from == WeightUpsertPhase::RETIRING_BASE &&
+                to == WeightUpsertPhase::COMPLETED);
+    }
+    return (from == WeightUpsertPhase::DELETING_BASE &&
+            to == WeightUpsertPhase::TARGET_IMPORTING) ||
+           (from == WeightUpsertPhase::TARGET_IMPORTING &&
+            to == WeightUpsertPhase::COMPLETED);
+}
+
+bool IsBaseLeaseFenced(const WeightLineageMetadata& lineage,
+                       const WeightRevisionIdentity& identity) {
+    if (!lineage.latest_claim.has_value() ||
+        lineage.latest_claim->base_identity != identity) {
+        return false;
+    }
+    const auto phase = lineage.latest_claim->phase;
+    if (lineage.latest_claim->mode == WeightUpsertMode::DELETE_FIRST) {
+        return !IsTerminalWeightUpsertPhase(phase) ||
+               phase == WeightUpsertPhase::COMPLETED;
+    }
+    return phase == WeightUpsertPhase::RETIRING_BASE ||
+           phase == WeightUpsertPhase::COMPLETED;
+}
+
 std::string Sha256Hex(const std::vector<std::string_view>& chunks) {
     using Context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
     Context context(EVP_MD_CTX_new(), EVP_MD_CTX_free);
@@ -93,6 +148,21 @@ std::string ComputeWeightIdentitySha256(
     return Sha256Hex(chunks);
 }
 
+std::string ComputeWeightLineageSha256(const WeightLineageIdentity& identity) {
+    if (!ValidateWeightLineageIdentity(identity).ok()) {
+        return {};
+    }
+    std::vector<std::string> lengths;
+    lengths.reserve(4);
+    std::vector<std::string_view> chunks;
+    chunks.reserve(16);
+    AppendLengthPrefixed(&lengths, &chunks, identity.tenant_id);
+    AppendLengthPrefixed(&lengths, &chunks, identity.name_space);
+    AppendLengthPrefixed(&lengths, &chunks, identity.resource_id);
+    AppendLengthPrefixed(&lengths, &chunks, identity.revision);
+    return Sha256Hex(chunks);
+}
+
 }  // namespace
 
 std::string ComputeWeightPayloadKeysSha256(
@@ -120,6 +190,12 @@ std::string MakeWeightRevisionMetadataKey(
     return digest.empty() ? std::string() : "weight-revision:" + digest;
 }
 
+std::string MakeWeightLineageMetadataKey(
+    const WeightLineageIdentity& identity) {
+    const auto digest = ComputeWeightLineageSha256(identity);
+    return digest.empty() ? std::string() : "weight-lineage:" + digest;
+}
+
 std::string MakeWeightLeaseMetadataKey(uint64_t lease_id) {
     return lease_id == 0 ? std::string()
                          : "weight-lease:" + std::to_string(lease_id);
@@ -127,7 +203,8 @@ std::string MakeWeightLeaseMetadataKey(uint64_t lease_id) {
 
 WeightMetadataStore::Result<WeightMetadataMutation>
 WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
-                                        uint64_t now_ms) const {
+                                        uint64_t now_ms,
+                                        bool allow_deleted_restart) const {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         !IsValidWeightComponent(request.payload_group_id) ||
         request.expected_payload_count == 0 ||
@@ -151,6 +228,8 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
     }
 
     const auto current = revisions_.find(request.identity);
+    std::optional<WeightRevisionMetadata> previous;
+    uint64_t metadata_generation = 1;
     if (current != revisions_.end()) {
         if ((current->second.availability ==
                  WeightAvailabilityState::IMPORTING ||
@@ -163,7 +242,17 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
                 .no_op = true,
             };
         }
-        return tl::make_unexpected(WeightManagementError::CONFLICT);
+        if (!allow_deleted_restart ||
+            current->second.availability != WeightAvailabilityState::DELETED) {
+            return tl::make_unexpected(WeightManagementError::CONFLICT);
+        }
+        if (!CanAdvanceWeightMetadataGeneration(
+                current->second.metadata_generation)) {
+            return tl::make_unexpected(
+                WeightManagementError::GENERATION_EXHAUSTED);
+        }
+        previous = current->second;
+        metadata_generation = current->second.metadata_generation + 1;
     }
 
     WeightRevisionMetadata metadata{
@@ -184,7 +273,7 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
         .affinity_count = request.affinity_summary.affinity_count,
         .affinity_digest = request.affinity_summary.affinity_digest,
         .observed_hot_ratio = 0.0,
-        .metadata_generation = 1,
+        .metadata_generation = metadata_generation,
         .created_at_ms = now_ms,
         .updated_at_ms = now_ms,
         .last_accessed_at_ms = now_ms,
@@ -192,7 +281,7 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
     return WeightMetadataMutation{
         .kind = WeightMetadataMutationKind::UPSERT,
         .identity = request.identity,
-        .previous = std::nullopt,
+        .previous = std::move(previous),
         .next = std::move(metadata),
         .no_op = false,
     };
@@ -419,6 +508,12 @@ WeightMetadataStore::PrepareUpdatePolicy(
     if (revision == revisions_.end()) {
         return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
+    const auto lineage =
+        lineages_.find(ToWeightLineageIdentity(request.identity));
+    if (lineage != lineages_.end() &&
+        IsBaseLeaseFenced(lineage->second, request.identity)) {
+        return tl::make_unexpected(WeightManagementError::BUSY);
+    }
     if (revision->second.policy == request.policy) {
         if (!MatchesIdempotentRetryGeneration(
                 revision->second.metadata_generation,
@@ -495,6 +590,293 @@ WeightMetadataStore::PrepareUpdatePolicy(
         .next = std::move(next),
         .operation = std::move(operation),
     };
+}
+
+WeightMetadataStore::Result<WeightLineageMutation>
+WeightMetadataStore::PrepareBeginUpsert(const BeginWeightUpsertRequest& request,
+                                        uint64_t now_ms) const {
+    const auto lineage = ToWeightLineageIdentity(request.base_identity);
+    if (!IsValidWeightComponent(request.request_id) ||
+        (request.mode != WeightUpsertMode::PUT_FIRST &&
+         request.mode != WeightUpsertMode::DELETE_FIRST) ||
+        !ValidateWeightRevisionIdentity(request.base_identity).ok() ||
+        !ValidateWeightRevisionIdentity(request.target_identity).ok() ||
+        lineage != ToWeightLineageIdentity(request.target_identity) ||
+        request.target_identity.weight_generation <=
+            request.base_identity.weight_generation ||
+        request.expected_base_metadata_generation == 0 ||
+        request.import.identity != request.target_identity ||
+        !IsValidWeightComponent(request.import.payload_group_id) ||
+        request.import.expected_payload_count == 0 ||
+        request.import.expected_logical_bytes == 0 ||
+        (request.import.policy.has_value() &&
+         !ValidateWeightStoragePolicy(*request.import.policy).ok()) ||
+        !ValidateWeightAffinitySummary(request.import.affinity_summary).ok() ||
+        (request.import.policy.value_or(WeightStoragePolicy{})
+                 .preferred_residency == WeightResidencyState::MIXED &&
+         request.import.affinity_summary.affinity_count < 2)) {
+        return tl::make_unexpected(
+            request.target_identity.weight_generation <=
+                    request.base_identity.weight_generation
+                ? WeightManagementError::STALE_GENERATION
+                : WeightManagementError::INVALID_ARGUMENT);
+    }
+
+    std::lock_guard lock(mutex_);
+    const auto current = lineages_.find(lineage);
+    if (current != lineages_.end() &&
+        current->second.latest_claim.has_value()) {
+        if (SameUpsertRequest(*current->second.latest_claim, request)) {
+            return WeightLineageMutation{
+                .identity = lineage,
+                .previous = current->second,
+                .next = current->second,
+                .no_op = true,
+            };
+        }
+        if (!IsTerminalWeightUpsertPhase(current->second.latest_claim->phase)) {
+            return tl::make_unexpected(WeightManagementError::BUSY);
+        }
+    }
+    const uint64_t watermark =
+        current == lineages_.end()
+            ? request.base_identity.weight_generation
+            : current->second.committed_weight_generation;
+    if (request.target_identity.weight_generation <= watermark) {
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
+    }
+    if (current != lineages_.end() &&
+        request.base_identity.weight_generation != watermark) {
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
+    }
+    if (current != lineages_.end() &&
+        !CanAdvanceWeightMetadataGeneration(
+            current->second.lineage_metadata_generation)) {
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
+    }
+    WeightLineageMetadata next{
+        .identity = lineage,
+        .lineage_metadata_generation =
+            current == lineages_.end()
+                ? 1
+                : current->second.lineage_metadata_generation + 1,
+        .committed_weight_generation = watermark,
+        .latest_claim =
+            WeightUpsertClaim{
+                .request_id = request.request_id,
+                .base_identity = request.base_identity,
+                .target_identity = request.target_identity,
+                .mode = request.mode,
+                .phase = request.mode == WeightUpsertMode::PUT_FIRST
+                             ? WeightUpsertPhase::PREPARING_TARGET
+                             : WeightUpsertPhase::DELETING_BASE,
+                .expected_base_metadata_generation =
+                    request.expected_base_metadata_generation,
+                .import =
+                    WeightUpsertImportSummary{
+                        .payload_group_id = request.import.payload_group_id,
+                        .expected_payload_count =
+                            request.import.expected_payload_count,
+                        .expected_logical_bytes =
+                            request.import.expected_logical_bytes,
+                        .policy = request.import.policy,
+                        .affinity_summary = request.import.affinity_summary,
+                    },
+                .created_at_ms = now_ms,
+                .updated_at_ms = now_ms,
+                .error = {},
+            },
+    };
+    return WeightLineageMutation{
+        .identity = lineage,
+        .previous = current == lineages_.end()
+                        ? std::nullopt
+                        : std::optional<WeightLineageMetadata>(current->second),
+        .next = std::move(next),
+    };
+}
+
+WeightMetadataStore::Result<WeightLineageMutation>
+WeightMetadataStore::PrepareCommitUpsert(
+    const CommitWeightUpsertRequest& request, uint64_t now_ms) const {
+    const auto lineage = ToWeightLineageIdentity(request.base_identity);
+    if (!IsValidWeightComponent(request.request_id) ||
+        lineage != ToWeightLineageIdentity(request.target_identity)) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    std::lock_guard lock(mutex_);
+    const auto current = lineages_.find(lineage);
+    if (current == lineages_.end() ||
+        !current->second.latest_claim.has_value()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto& claim = *current->second.latest_claim;
+    if (claim.request_id != request.request_id ||
+        claim.base_identity != request.base_identity ||
+        claim.target_identity != request.target_identity) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    if (claim.phase == WeightUpsertPhase::COMPLETED ||
+        (claim.mode == WeightUpsertMode::PUT_FIRST &&
+         claim.phase == WeightUpsertPhase::RETIRING_BASE)) {
+        return WeightLineageMutation{
+            .identity = lineage,
+            .previous = current->second,
+            .next = current->second,
+            .no_op = true,
+        };
+    }
+    const auto target = revisions_.find(claim.target_identity);
+    if (target == revisions_.end() ||
+        target->second.availability != WeightAvailabilityState::READY) {
+        return tl::make_unexpected(WeightManagementError::NOT_READY);
+    }
+    const auto next_phase = claim.mode == WeightUpsertMode::PUT_FIRST
+                                ? WeightUpsertPhase::RETIRING_BASE
+                                : WeightUpsertPhase::COMPLETED;
+    if (!IsValidUpsertPhaseTransition(claim.phase, next_phase, claim.mode) ||
+        !CanAdvanceWeightMetadataGeneration(
+            current->second.lineage_metadata_generation)) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    auto next = current->second;
+    ++next.lineage_metadata_generation;
+    next.committed_weight_generation = claim.target_identity.weight_generation;
+    next.latest_claim->phase = next_phase;
+    next.latest_claim->updated_at_ms = now_ms;
+    next.latest_claim->error.clear();
+    return WeightLineageMutation{
+        .identity = lineage,
+        .previous = current->second,
+        .next = std::move(next),
+    };
+}
+
+WeightMetadataStore::Result<WeightLineageMutation>
+WeightMetadataStore::PrepareAbortUpsert(const AbortWeightUpsertRequest& request,
+                                        uint64_t now_ms) const {
+    const auto lineage = ToWeightLineageIdentity(request.base_identity);
+    std::lock_guard lock(mutex_);
+    const auto current = lineages_.find(lineage);
+    if (current == lineages_.end() ||
+        !current->second.latest_claim.has_value()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto& claim = *current->second.latest_claim;
+    if (claim.request_id != request.request_id ||
+        claim.base_identity != request.base_identity ||
+        claim.target_identity != request.target_identity) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    if (claim.phase == WeightUpsertPhase::ABORTED) {
+        return WeightLineageMutation{
+            .identity = lineage,
+            .previous = current->second,
+            .next = current->second,
+            .no_op = true,
+        };
+    }
+    if (claim.phase == WeightUpsertPhase::COMPLETED ||
+        claim.phase == WeightUpsertPhase::RETIRING_BASE) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    const auto target = revisions_.find(claim.target_identity);
+    if (target != revisions_.end() &&
+        target->second.availability == WeightAvailabilityState::READY) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    auto next = current->second;
+    ++next.lineage_metadata_generation;
+    if (claim.mode == WeightUpsertMode::DELETE_FIRST &&
+        claim.phase == WeightUpsertPhase::TARGET_IMPORTING) {
+        next.latest_claim->phase = WeightUpsertPhase::TARGET_IMPORTING;
+        next.latest_claim->error = "target import interrupted";
+    } else {
+        next.latest_claim->phase = WeightUpsertPhase::ABORTED;
+    }
+    next.latest_claim->updated_at_ms = now_ms;
+    return WeightLineageMutation{
+        .identity = lineage,
+        .previous = current->second,
+        .next = std::move(next),
+    };
+}
+
+WeightMetadataStore::Result<WeightLineageMutation>
+WeightMetadataStore::PrepareAdvanceUpsert(const WeightLineageIdentity& identity,
+                                          std::string_view request_id,
+                                          WeightUpsertPhase phase,
+                                          uint64_t now_ms,
+                                          std::string error) const {
+    std::lock_guard lock(mutex_);
+    const auto current = lineages_.find(identity);
+    if (current == lineages_.end() ||
+        !current->second.latest_claim.has_value()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto& claim = *current->second.latest_claim;
+    if (claim.request_id != request_id) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    if (claim.phase == phase && claim.error == error) {
+        return WeightLineageMutation{
+            .identity = identity,
+            .previous = current->second,
+            .next = current->second,
+            .no_op = true,
+        };
+    }
+    if (!IsValidUpsertPhaseTransition(claim.phase, phase, claim.mode) ||
+        !CanAdvanceWeightMetadataGeneration(
+            current->second.lineage_metadata_generation)) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    auto next = current->second;
+    ++next.lineage_metadata_generation;
+    next.latest_claim->phase = phase;
+    next.latest_claim->updated_at_ms = now_ms;
+    next.latest_claim->error = std::move(error);
+    return WeightLineageMutation{
+        .identity = identity,
+        .previous = current->second,
+        .next = std::move(next),
+    };
+}
+
+WeightMetadataStore::Result<WeightLineageMetadata> WeightMetadataStore::Publish(
+    const WeightLineageMutation& mutation) {
+    std::lock_guard lock(mutex_);
+    const auto current = lineages_.find(mutation.identity);
+    if (mutation.previous.has_value()) {
+        if (current == lineages_.end() ||
+            current->second != *mutation.previous) {
+            return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
+        }
+    } else if (current != lineages_.end()) {
+        return tl::make_unexpected(WeightManagementError::STALE_GENERATION);
+    }
+    if (mutation.no_op) {
+        return current->second;
+    }
+    if (mutation.next.identity != mutation.identity ||
+        !ValidateWeightLineageMetadata(mutation.next).ok()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    lineages_[mutation.identity] = mutation.next;
+    return mutation.next;
+}
+
+WeightMetadataStore::Result<WeightLineageMetadata>
+WeightMetadataStore::GetLineage(const WeightLineageIdentity& identity) const {
+    if (!ValidateWeightLineageIdentity(identity).ok()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    std::lock_guard lock(mutex_);
+    const auto current = lineages_.find(identity);
+    if (current == lineages_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    return current->second;
 }
 
 WeightMetadataStore::Result<WeightRevisionView> WeightMetadataStore::Get(
@@ -587,6 +969,12 @@ WeightMetadataStore::PrepareAcquireLease(
     if (current->second.availability != WeightAvailabilityState::READY) {
         return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
+    const auto lineage =
+        lineages_.find(ToWeightLineageIdentity(request.identity));
+    if (lineage != lineages_.end() &&
+        IsBaseLeaseFenced(lineage->second, request.identity)) {
+        return tl::make_unexpected(WeightManagementError::BUSY);
+    }
     if (current->second.operation_id.has_value()) {
         const auto operation = operations_.find(*current->second.operation_id);
         if (operation == operations_.end() ||
@@ -650,6 +1038,12 @@ WeightMetadataStore::PrepareRenewLease(
     if (current->second.expires_at_ms <= now_ms) {
         return tl::make_unexpected(WeightManagementError::LEASE_EXPIRED);
     }
+    const auto lineage =
+        lineages_.find(ToWeightLineageIdentity(current->second.identity));
+    if (lineage != lineages_.end() &&
+        IsBaseLeaseFenced(lineage->second, current->second.identity)) {
+        return tl::make_unexpected(WeightManagementError::BUSY);
+    }
     auto next = current->second;
     next.expires_at_ms = AddTtl(now_ms, request.ttl_ms);
     return WeightLeaseMutation{
@@ -688,6 +1082,19 @@ WeightMetadataStore::PrepareReleaseLease(
         .next = std::nullopt,
         .no_op = false,
     };
+}
+
+WeightMetadataStore::Result<WeightRevisionLease> WeightMetadataStore::GetLease(
+    uint64_t lease_id) const {
+    if (lease_id == 0) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    std::lock_guard lock(mutex_);
+    const auto lease = leases_.find(lease_id);
+    if (lease == leases_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    return lease->second;
 }
 
 std::vector<WeightLeaseMutation> WeightMetadataStore::PrepareExpireLeases(
@@ -812,6 +1219,12 @@ WeightMetadataStore::PrepareStartOperation(
     const auto current = revisions_.find(request.identity);
     if (current == revisions_.end()) {
         return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto lineage =
+        lineages_.find(ToWeightLineageIdentity(request.identity));
+    if (lineage != lineages_.end() &&
+        IsBaseLeaseFenced(lineage->second, request.identity)) {
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if (current->second.operation_id.has_value()) {
         const auto operation = operations_.find(*current->second.operation_id);
@@ -1192,7 +1605,8 @@ WeightMetadataStore::QueryOperation(uint64_t operation_id) const {
 
 WeightMetadataStore::Result<WeightMetadataMutation>
 WeightMetadataStore::PrepareDelete(const DeleteWeightRevisionRequest& request,
-                                   uint64_t now_ms) const {
+                                   uint64_t now_ms,
+                                   bool allow_active_upsert) const {
     if (!ValidateWeightRevisionIdentity(request.identity).ok() ||
         request.expected_metadata_generation == 0) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
@@ -1201,6 +1615,15 @@ WeightMetadataStore::PrepareDelete(const DeleteWeightRevisionRequest& request,
     const auto revision = revisions_.find(request.identity);
     if (revision == revisions_.end()) {
         return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto lineage =
+        lineages_.find(ToWeightLineageIdentity(request.identity));
+    if (!allow_active_upsert && lineage != lineages_.end() &&
+        lineage->second.latest_claim.has_value() &&
+        !IsTerminalWeightUpsertPhase(lineage->second.latest_claim->phase) &&
+        (lineage->second.latest_claim->base_identity == request.identity ||
+         lineage->second.latest_claim->target_identity == request.identity)) {
+        return tl::make_unexpected(WeightManagementError::BUSY);
     }
     if (revision->second.availability == WeightAvailabilityState::DELETED) {
         return WeightMetadataMutation{
@@ -1318,6 +1741,11 @@ WeightMetadataStore::PrepareReconcile(const WeightRevisionIdentity& identity,
         revision->second.availability == WeightAvailabilityState::DELETED) {
         return tl::make_unexpected(WeightManagementError::BUSY);
     }
+    if (revision->second.availability != availability &&
+        !IsValidWeightAvailabilityTransition(revision->second.availability,
+                                             availability)) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
     if ((availability != WeightAvailabilityState::READY &&
          availability != WeightAvailabilityState::DEGRADED) ||
         residency == WeightResidencyState::UNKNOWN ||
@@ -1344,6 +1772,9 @@ WeightMetadataStore::PrepareReconcile(const WeightRevisionIdentity& identity,
     next.observed_hot_ratio = observed_hot_ratio;
     ++next.metadata_generation;
     next.updated_at_ms = std::max(next.updated_at_ms, now_ms);
+    if (!ValidateWeightRevisionMetadata(next).ok()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
     return WeightMetadataMutation{
         .identity = identity,
         .previous = revision->second,
@@ -1369,6 +1800,25 @@ bool WeightMetadataStore::AllowsGroupMemberMutation(
            revision->second.availability == WeightAvailabilityState::IMPORTING;
 }
 
+bool WeightMetadataStore::HasActiveUpsertClaim(
+    const WeightRevisionIdentity& identity) const {
+    std::lock_guard lock(mutex_);
+    const auto lineage = lineages_.find(ToWeightLineageIdentity(identity));
+    return lineage != lineages_.end() &&
+           lineage->second.latest_claim.has_value() &&
+           !IsTerminalWeightUpsertPhase(lineage->second.latest_claim->phase) &&
+           (lineage->second.latest_claim->base_identity == identity ||
+            lineage->second.latest_claim->target_identity == identity);
+}
+
+bool WeightMetadataStore::IsWeightRevisionMutationFenced(
+    const WeightRevisionIdentity& identity) const {
+    std::lock_guard lock(mutex_);
+    const auto lineage = lineages_.find(ToWeightLineageIdentity(identity));
+    return lineage != lineages_.end() &&
+           IsBaseLeaseFenced(lineage->second, identity);
+}
+
 WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
     std::lock_guard lock(mutex_);
     WeightMetadataSnapshot snapshot{
@@ -1378,6 +1828,7 @@ WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
         .operations = {},
         .next_lease_id = next_lease_id_,
         .next_operation_id = next_operation_id_,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
     snapshot.metadata.reserve(revisions_.size());
     for (const auto& [identity, metadata] : revisions_) {
@@ -1402,14 +1853,19 @@ WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
               [](const auto& lhs, const auto& rhs) {
                   return lhs.operation_id < rhs.operation_id;
               });
+    snapshot.lineages.value().reserve(lineages_.size());
+    for (const auto& [identity, lineage] : lineages_) {
+        static_cast<void>(identity);
+        snapshot.lineages.value().push_back(lineage);
+    }
     return snapshot;
 }
 
 WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
     const WeightMetadataSnapshot& snapshot) {
-    if (snapshot.schema_version != kWeightMetadataSchemaVersion ||
-        snapshot.next_lease_id == 0 ||
-        snapshot.next_operation_id == 0) {
+    if ((snapshot.schema_version != 2 &&
+         snapshot.schema_version != kWeightMetadataSchemaVersion) ||
+        snapshot.next_lease_id == 0 || snapshot.next_operation_id == 0) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
@@ -1512,11 +1968,24 @@ WeightMetadataStore::Result<void> WeightMetadataStore::RestoreSnapshot(
         }
     }
 
+    std::map<WeightLineageIdentity, WeightLineageMetadata> lineages;
+    if (snapshot.schema_version >= 3) {
+        for (const auto& lineage :
+             snapshot.lineages.value_or(std::vector<WeightLineageMetadata>{})) {
+            if (!ValidateWeightLineageMetadata(lineage).ok() ||
+                !lineages.emplace(lineage.identity, lineage).second) {
+                return tl::make_unexpected(
+                    WeightManagementError::INVALID_ARGUMENT);
+            }
+        }
+    }
+
     std::lock_guard lock(mutex_);
     revisions_ = std::move(revisions);
     group_index_ = std::move(group_index);
     leases_ = std::move(leases);
     operations_ = std::move(operations);
+    lineages_ = std::move(lineages);
     next_lease_id_ = snapshot.next_lease_id;
     next_operation_id_ = snapshot.next_operation_id;
     return {};
@@ -1528,6 +1997,7 @@ void WeightMetadataStore::Clear() {
     group_index_.clear();
     leases_.clear();
     operations_.clear();
+    lineages_.clear();
     next_lease_id_ = 1;
     next_operation_id_ = 1;
 }

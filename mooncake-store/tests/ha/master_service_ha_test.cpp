@@ -2532,12 +2532,24 @@ TEST_F(MasterServiceHATest,
         .revision = "step-100",
         .weight_generation = 7,
     };
-    ASSERT_TRUE(service.BeginWeightImport(BeginWeightImportRequest{
+    auto begin = service.BeginWeightImport(BeginWeightImportRequest{
         .identity = identity,
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-    }));
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'a'),
+            },
+    });
+    ASSERT_TRUE(begin.has_value())
+        << "error=" << static_cast<int>(begin.error());
 
     OpLogBatchStorage storage(cluster_id, *backend);
     OpLogBatchRecord batch;
@@ -2587,6 +2599,212 @@ TEST_F(MasterServiceHATest,
     OpLogBatchStorage storage(cluster_id, *backend);
     OpLogBatchRecord batch;
     EXPECT_EQ(ErrorCode::ETCD_KEY_NOT_EXIST, storage.ReadBatch(1, batch));
+}
+
+TEST_F(MasterServiceHATest,
+       WeightLineageMutationRequiresIndependentStandbyCapability) {
+    const std::string cluster_id = "weight_lineage_capability_gate";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .build();
+    MasterService service(config);
+
+    const WeightRevisionIdentity base_identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    WeightMetadataSnapshot snapshot{
+        .metadata = {WeightRevisionMetadata{
+            .identity = base_identity,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key =
+                        "weights/production/llama-70b/step-100/7/manifest",
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(base_identity),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .availability = WeightAvailabilityState::READY,
+            .residency = WeightResidencyState::HOT,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
+            .metadata_generation = 2,
+            .created_at_ms = 100,
+            .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
+        }},
+        .leases = {},
+        .operations = {},
+        .next_lease_id = 1,
+        .next_operation_id = 1,
+    };
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, snapshot));
+    ASSERT_EQ(ErrorCode::OK, service.SetBatchOpLogBackendForTesting(backend));
+
+    const WeightRevisionIdentity independent_identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "mixtral",
+        .revision = "step-1",
+        .weight_generation = 1,
+    };
+    auto old_mutation = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = independent_identity,
+        .expected_payload_count = 1,
+        .expected_logical_bytes = 512,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'd'),
+            },
+    });
+    ASSERT_TRUE(old_mutation.has_value())
+        << "error=" << static_cast<int>(old_mutation.error());
+
+    auto target_identity = base_identity;
+    target_identity.weight_generation = 8;
+    auto rejected = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base_identity,
+        .expected_base_metadata_generation = 2,
+        .target_identity = target_identity,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target_identity,
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'e'),
+                    },
+            },
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
+    EXPECT_FALSE(service
+                     .GetWeightLineage(GetWeightLineageRequest{
+                         .identity = ToWeightLineageIdentity(base_identity),
+                     })
+                     .has_value());
+    EXPECT_FALSE(service
+                     .GetWeightRevision(
+                         GetWeightRevisionRequest{.identity = target_identity})
+                     .has_value());
+
+    OpLogBatchStorage storage(cluster_id, *backend);
+    OpLogBatchRecord batch;
+    ASSERT_EQ(ErrorCode::OK, storage.ReadBatch(1, batch));
+    ASSERT_EQ(1, batch.entries.size());
+    EXPECT_EQ(OpType::WEIGHT_METADATA_UPSERT, batch.entries.front().op_type);
+}
+
+TEST_F(MasterServiceHATest,
+       WeightLineageOnlyCapabilityDoesNotLeaveClaimOnFailedUpsert) {
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_lineage_oplog_capability_confirmed(true)
+                      .set_cluster_id("weight_lineage_only_capability")
+                      .build();
+    MasterService service(config);
+
+    const WeightRevisionIdentity base_identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    WeightMetadataSnapshot snapshot{
+        .metadata = {WeightRevisionMetadata{
+            .identity = base_identity,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key =
+                        "weights/production/llama-70b/step-100/7/manifest",
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(base_identity),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .availability = WeightAvailabilityState::READY,
+            .residency = WeightResidencyState::HOT,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
+            .metadata_generation = 2,
+            .created_at_ms = 100,
+            .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
+        }},
+        .leases = {},
+        .operations = {},
+        .next_lease_id = 1,
+        .next_operation_id = 1,
+    };
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, snapshot));
+    ASSERT_EQ(ErrorCode::OK, service.SetBatchOpLogBackendForTesting(backend));
+
+    auto target_identity = base_identity;
+    target_identity.weight_generation = 8;
+    auto rejected = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base_identity,
+        .expected_base_metadata_generation = 2,
+        .target_identity = target_identity,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target_identity,
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'e'),
+                    },
+            },
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
+    EXPECT_FALSE(service
+                     .GetWeightLineage(GetWeightLineageRequest{
+                         .identity = ToWeightLineageIdentity(base_identity),
+                     })
+                     .has_value());
+    EXPECT_FALSE(service
+                     .GetWeightRevision(
+                         GetWeightRevisionRequest{.identity = target_identity})
+                     .has_value());
 }
 
 TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
@@ -2770,6 +2988,7 @@ TEST_F(MasterServiceHATest, StandbyPromotionRestoresCompleteWeightMetadata) {
         }},
         .next_lease_id = 6,
         .next_operation_id = 4,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
 
     MasterService service;

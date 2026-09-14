@@ -377,6 +377,14 @@ class RealClient : public PyClient {
 
     WeightRpcResult<WeightRevisionMetadata> begin_weight_import(
         const BeginWeightImportRequest &request) override;
+    WeightRpcResult<WeightRevisionMetadata> begin_weight_upsert(
+        const BeginWeightUpsertRequest &request) override;
+    WeightRpcResult<WeightLineageMetadata> commit_weight_upsert(
+        const CommitWeightUpsertRequest &request) override;
+    WeightRpcResult<WeightLineageMetadata> abort_weight_upsert(
+        const AbortWeightUpsertRequest &request) override;
+    WeightRpcResult<WeightLineageMetadata> get_weight_lineage(
+        const GetWeightLineageRequest &request) override;
     WeightRpcResult<WeightRevisionMetadata> commit_weight_import(
         const CommitWeightImportRequest &request) override;
     WeightRpcResult<WeightRevisionMetadata> abort_weight_import(
