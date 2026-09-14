@@ -281,8 +281,7 @@ bool RailMonitor::tryRecoveryProbe(int local_nic, int remote_nic,
         return false;
     }
     if (st.last_probe_generation == metadata_generation_) {
-        if (probe_in_progress)
-            *probe_in_progress = st.active_probe_token != 0;
+        if (probe_in_progress) *probe_in_progress = st.active_probe_token != 0;
         return false;
     }
 
@@ -296,15 +295,20 @@ bool RailMonitor::tryRecoveryProbe(int local_nic, int remote_nic,
     return true;
 }
 
-void RailMonitor::abandonRecoveryProbe(int local_nic, int remote_nic,
-                                       uint64_t token) {
+void RailMonitor::abandonRecoveryProbe(uint64_t token) {
+    std::lock_guard<std::mutex> guard(mutex_);
     if (token == 0) return;
-    auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    auto it = std::find_if(rail_states_.begin(), rail_states_.end(),
+                           [token](const auto& entry) {
+                               return entry.second.active_probe_token == token;
+                           });
     if (it == rail_states_.end()) return;
     auto& st = it->second;
     if (st.active_probe_token != token) return;
 
     st.active_probe_token = 0;
+    st.probe_in_flight = false;
+    st.half_open = false;
     if (st.last_probe_generation == metadata_generation_ &&
         metadata_generation_ > 0) {
         st.last_probe_generation = metadata_generation_ - 1;
@@ -315,6 +319,18 @@ void RailMonitor::markFailed(int local_nic, int remote_nic,
                              uint64_t probe_token) {
     std::lock_guard<std::mutex> guard(mutex_);
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
+    if (probe_token != 0 && (it == rail_states_.end() ||
+                             it->second.active_probe_token != probe_token)) {
+        auto owner = std::find_if(rail_states_.begin(), rail_states_.end(),
+                                  [probe_token](const auto& entry) {
+                                      return entry.second.active_probe_token ==
+                                             probe_token;
+                                  });
+        // A late WC may arrive after the token was already cleared by
+        // cooldown or another success. In that case the reported pair still
+        // receives the real failure, matching the token-free path.
+        if (owner != rail_states_.end()) it = owner;
+    }
     if (it == rail_states_.end()) return;
     auto& st = it->second;
     // A stale probe completion cannot be counted as a new failure cycle or

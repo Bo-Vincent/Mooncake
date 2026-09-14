@@ -595,9 +595,7 @@ void Workers::abandonRecoveryProbe(RdmaSlice* slice) {
     if (!slice) return;
     if (auto* rail = slice->rail_monitor) {
         if (slice->rail_probe_token != 0) {
-            rail->abandonRecoveryProbe(slice->source_dev_id,
-                                       slice->target_dev_id,
-                                       slice->rail_probe_token);
+            rail->abandonRecoveryProbe(slice->rail_probe_token);
         }
         rail->cancelProbe(slice->source_dev_id, slice->target_dev_id);
     }
@@ -937,8 +935,7 @@ void Workers::asyncPostSend() {
                 continue;
             }
             bool recovery_probe_in_progress = false;
-            auto status =
-                generatePostPath(slice, &recovery_probe_in_progress);
+            auto status = generatePostPath(slice, &recovery_probe_in_progress);
             if (!status.ok()) {
                 if (recovery_probe_in_progress) {
                     // One sibling is proving this rail. Keep the remaining
@@ -1063,6 +1060,7 @@ void Workers::asyncPostSend() {
                 allowed == 0) {
                 auto* avoided = slices.front();
                 slices.erase(slices.begin());
+                abandonRecoveryProbe(avoided);
                 releaseSliceQuota(avoided, getCurrentTimeInNano());
                 ++avoided->retry_count;
                 // Admission avoidance is not a new transport failure. No WR
@@ -1124,6 +1122,7 @@ void Workers::asyncPostSend() {
             // Rejected by the hardware: it never went on the wire, so take
             // back what the hook put in place.
             worker.inflight_slice_set.erase(slice);
+            abandonRecoveryProbe(slice);
             releaseSliceQuota(slice, post_ts);
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
             completeCongestionPermit(

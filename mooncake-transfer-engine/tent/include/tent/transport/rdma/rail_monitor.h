@@ -70,8 +70,7 @@ class RailMonitor {
     Status load(std::shared_ptr<const Topology> local,
                 std::shared_ptr<const Topology> remote,
                 const std::string &rail_topo_json = "",
-                const Config *conf = nullptr,
-                uint64_t remote_snapshot_key = 0);
+                const Config *conf = nullptr, uint64_t remote_snapshot_key = 0);
 
     bool ready() const {
         std::lock_guard<std::mutex> guard(mutex_);
@@ -112,7 +111,7 @@ class RailMonitor {
 
     // Return ownership when the admitted slice is cancelled or rejected
     // before post, allowing another slice to use the same fresh snapshot.
-    void abandonRecoveryProbe(int local_nic, int remote_nic, uint64_t token);
+    void abandonRecoveryProbe(uint64_t token);
 
 
     // Uses the same token contract as markFailed().
