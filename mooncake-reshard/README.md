@@ -99,12 +99,46 @@ the plan.
 stored fragments, and its canonical digest. It contains no GPU address or
 runtime allocation owner.
 
-`MooncakeDistributedStore.begin_weight_snapshot()` returns a
-`WeightStoreWriter` for one immutable snapshot. A framework adapter supplies
-complete placement/binding inventories, resolves each `write_tensor()` call to
-canonical fragment IDs, and provides allocation guards for Store I/O. After
-every required fragment succeeds, `commit()` publishes the single
-`StoredWeightManifest`.
+`WeightStore.weight_put()` begins one immutable revision and returns a
+`WeightStoreWriter`. A framework adapter supplies complete placement/binding
+inventories, resolves each `weight_put_tensor()` call to canonical fragment
+IDs, and provides allocation guards for Store I/O. After every required
+fragment succeeds, `commit()` publishes the manifest and revision metadata.
+
+Policy-only changes use
+`weight_update_policy(identity, *, policy, expected_metadata_generation)`.
+There is no compatibility wrapper for the former public name.
+
+`weight_upsert(snapshot, adapter, *, replacing, expected_metadata_generation,
+mode=WeightUpsertMode.PUT_FIRST, tenant_id="default", policy=None,
+request_id=None)` creates a writer for a
+higher generation in the same
+`(tenant_id, namespace, resource_id, revision)` lineage. It replaces one
+immutable generation with another rather than overwriting an ordinary Store
+key in place. The durable lineage claim provides ordering, CAS fencing, and
+recovery; it is not a serving-active pointer.
+
+`PUT_FIRST` is the default. It publishes the target `READY` before fencing the
+base, then drains existing base leases and deletes the base. A target failure
+leaves the base intact, at a peak storage cost approaching two revisions.
+`DELETE_FIRST` requires no active base lease or lifecycle operation, deletes
+the base before allowing target import, and therefore trades lower peak storage
+for an unavailable and non-rollback window.
+
+When `request_id` is omitted, `WeightStore` deterministically hashes the
+canonical base identity, target identity, mode, and
+`expected_metadata_generation`. Repeating the same call after a lost begin
+response derives the same ID. An explicit `request_id` is used unchanged. A
+retry with the same ID and arguments resumes the claim; a competing request
+cannot create another successor, and HA recovery continues from the persisted
+phase without decreasing the generation watermark.
+
+For HA deployments using the etcd batch OpLog,
+`weight_management_oplog_capability_confirmed` continues to gate ordinary
+Weight metadata OpTypes 8–11. `weight_upsert` additionally requires
+`weight_lineage_oplog_capability_confirmed=true` for lineage OpType 12. Upgrade
+all standbys to replay OpType 12 before enabling the lineage flag on the active
+configuration.
 
 ### Public API Migration
 
@@ -114,24 +148,52 @@ change for applications using the former multi-axis tensor API. Weight snapshot
 writers now use the explicit lifecycle:
 
 ```python
-writer = WeightStore(store).begin_weight_snapshot(descriptor, adapter)
-writer.write_tensor(tensor_id, tensor)
+writer = WeightStore(store).weight_put(descriptor, adapter)
+writer.weight_put_tensor(tensor_id, tensor)
+identity = writer.identity
 manifest = writer.commit()
 ```
 
+Generation replacement uses the same writer contract:
+
+```python
+from mooncake.reshard.weight import WeightUpsertMode
+
+weight_store = WeightStore(store)
+base_view = weight_store.weight_get_metadata(identity)
+writer = weight_store.weight_upsert(
+    next_descriptor,
+    adapter,
+    replacing=identity,
+    expected_metadata_generation=base_view.metadata.metadata_generation,
+    mode=WeightUpsertMode.PUT_FIRST,
+    request_id="rollout-2026-09-11-001",
+)
+writer.weight_put_tensor(tensor_id, tensor)
+next_identity = writer.identity
+manifest = writer.commit()
+```
+
+The next descriptor must preserve the base lineage and increase
+`weight_generation`. An adapter may materialize the COO sparse updates in
+[#3747](https://github.com/kvcache-ai/Mooncake/issues/3747) or
+[#3953](https://github.com/kvcache-ai/Mooncake/issues/3953) as a new complete
+generation before calling `weight_upsert`. A target that directly depends on
+base payloads needs a separate delta-retention and compaction design.
+
 The snapshot writer stores manifest-managed payload fragments and publishes one
 `StoredWeightManifest`; it does not produce an ordinary Store tensor object.
-Weight snapshot readers use `WeightStore.load_manifest()`, `plan_load()`, and
-`load()` with target placement and runtime binding manifests. The existing
+Weight snapshot readers use `WeightStore.weight_get()` with the exact revision
+identity, target placement, and runtime binding manifests. The existing
 single-axis TP APIs named `*_with_tp` remain separate compatibility APIs.
 
 If `commit()` reports a manifest publication failure after the Store records
 the commit decision, the writer stays open and preserves its uploaded payloads.
 Retry `commit()` on the same writer to complete publication.
 
-`WeightStore.load_manifest()` and `WeightStore.plan_load()` use the stored
-manifest as the source of truth for restore. The target framework supplies the
-placement, runtime binding, and allocation guards required by `get_into_ranges`.
+`WeightStore.weight_get()` resolves the stored manifest from revision metadata
+and holds a revision lease while the target framework supplies the placement,
+runtime binding, and allocation guards required by `get_into_ranges`.
 
 ## Module Responsibilities
 
