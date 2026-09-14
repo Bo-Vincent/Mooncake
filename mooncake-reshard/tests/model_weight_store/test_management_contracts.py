@@ -142,7 +142,7 @@ def test_backend_maps_domain_errors_without_collapsing_transport_errors() -> Non
             return None, int(WeightManagementErrorCode.STALE_GENERATION), 0
 
     with pytest.raises(WeightManagementError) as error:
-        StoreBackend(Raw()).get_weight_revision(_metadata().identity)
+        StoreBackend(Raw()).weight_get_metadata(_metadata().identity)
     assert error.value.code is WeightManagementErrorCode.STALE_GENERATION
 
 
@@ -158,7 +158,7 @@ def test_backend_converts_bounded_list_page() -> None:
             assert args[-2:] == ("cursor", 17)
             return WeightRevisionPage((view,), "next"), 0, 0
 
-    page = StoreBackend(Raw()).list_weight_revisions(
+    page = StoreBackend(Raw()).weight_list(
         tenant_id="tenant-a",
         namespace="production",
         resource_id="llama-70b",
