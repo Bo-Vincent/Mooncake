@@ -568,9 +568,7 @@ void Workers::rechargeSlice(RdmaSlice* slice, int dev_id) {
 void Workers::abandonRecoveryProbe(RdmaSlice* slice) {
     if (!slice || slice->rail_probe_token == 0) return;
     if (auto* rail = slice->rail_monitor) {
-        rail->abandonRecoveryProbe(slice->source_dev_id,
-                                   slice->target_dev_id,
-                                   slice->rail_probe_token);
+        rail->abandonRecoveryProbe(slice->rail_probe_token);
     }
     slice->rail_probe_token = 0;
 }
@@ -981,6 +979,7 @@ void Workers::asyncPostSend() {
             if (decision == adaptive_cc::Decision::kAvoid && allowed == 0) {
                 auto* avoided = slices.front();
                 slices.erase(slices.begin());
+                abandonRecoveryProbe(avoided);
                 releaseSliceQuota(avoided, getCurrentTimeInNano());
                 ++avoided->retry_count;
                 // Admission avoidance is not a new transport failure. No WR
@@ -1022,6 +1021,7 @@ void Workers::asyncPostSend() {
             // Rejected by the hardware: it never went on the wire, so take
             // back what the hook put in place.
             worker.inflight_slice_set.erase(slice);
+            abandonRecoveryProbe(slice);
             releaseSliceQuota(slice, post_ts);
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CC
             completeCongestionPermit(
@@ -2011,6 +2011,7 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
 
         bool reachable = same_machine ? (sdev == tdev)  // loopback is safe
                                       : rail_mon->available(sdev, tdev);
+        const uint64_t probe_token_before = slice->rail_probe_token;
         if (!same_machine && !reachable) {
             bool pair_probe_in_progress = false;
             reachable = rail_mon->tryRecoveryProbe(
@@ -2021,6 +2022,13 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
         }
 
         if (reachable) {
+            if (probe_token_before != 0 &&
+                (slice->source_dev_id != sdev ||
+                 slice->target_dev_id != tdev)) {
+                // This attempt found another usable rail before returning to
+                // the probe pair. Return that pair's ownership before moving.
+                abandonRecoveryProbe(slice);
+            }
             // A retry gets here after the failure path returned the slice's
             // charge, so charge the device this attempt will actually use:
             // otherwise the NIC's inflight bytes miss it and its completion
