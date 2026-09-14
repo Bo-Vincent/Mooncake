@@ -265,7 +265,8 @@ class Workers {
     // hardware reports as up.
     void resumePausedContexts();
 
-    Status generatePostPath(RdmaSlice* slice);
+    Status generatePostPath(RdmaSlice* slice,
+                            bool* recovery_probe_in_progress);
 
    private:
     struct RouteHint {
@@ -286,10 +287,12 @@ class Workers {
                                   const RouteHint& target);
 
     Status selectOptimalDevice(RouteHint& source, RouteHint& target,
-                               RdmaSlice* slice);
+                               RdmaSlice* slice,
+                               bool* recovery_probe_in_progress);
 
     Status selectFallbackDevice(RouteHint& source, RouteHint& target,
-                                RdmaSlice* slice);
+                                RdmaSlice* slice,
+                                bool* recovery_probe_in_progress);
 
     int getDeviceByFlatIndex(const RouteHint& hint, size_t flat_idx);
 

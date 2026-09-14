@@ -922,8 +922,18 @@ void Workers::asyncPostSend() {
                 slice = slice->next;
                 continue;
             }
-            auto status = generatePostPath(slice);
+            bool recovery_probe_in_progress = false;
+            auto status =
+                generatePostPath(slice, &recovery_probe_in_progress);
             if (!status.ok()) {
+                if (recovery_probe_in_progress) {
+                    // One sibling is proving this rail. Keep the remaining
+                    // slices pending until its WC either recovers the rail or
+                    // consumes this metadata generation on failure.
+                    submitFromTick(worker, slice);
+                    slice = slice->next;
+                    continue;
+                }
                 VLOG(1) << "Failed to generate post path for slice " << slice
                         << ": " << status.ToString();
                 LOG_EVERY_N(ERROR, 10000)
@@ -2070,7 +2080,8 @@ int Workers::getDeviceRank(const RouteHint& hint, int device_id) {
 }
 
 Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
-                                    RdmaSlice* slice) {
+                                    RdmaSlice* slice,
+                                    bool* recovery_probe_in_progress) {
     auto& worker = worker_context_[tl_wid];
     auto rail_monitor =
         getOrCreateRail(worker.rails, target.segment->machine_id);
@@ -2175,7 +2186,7 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
     if (!gdr_excluded && !rail_available) {
         rail_available = rail.tryRecoveryProbe(
             slice->source_dev_id, slice->target_dev_id,
-            probe_token);
+            probe_token, recovery_probe_in_progress);
     }
     if (gdr_excluded || !rail_available) {
         VLOG(1) << "Optimal device pair not available: source_dev_id "
@@ -2185,7 +2196,8 @@ Status Workers::selectOptimalDevice(RouteHint& source, RouteHint& target,
             << "Optimal device pair not available: source_dev_id "
             << slice->source_dev_id << ", target_dev_id "
             << slice->target_dev_id;
-        return selectFallbackDevice(source, target, slice);
+        return selectFallbackDevice(source, target, slice,
+                                    recovery_probe_in_progress);
     }
 
     slice->rail_monitor = std::move(rail_monitor);
@@ -2228,7 +2240,8 @@ bool Workers::gdrPairExcluded(const RouteHint& source, const RouteHint& target,
 }
 
 Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
-                                     RdmaSlice* slice) {
+                                     RdmaSlice* slice,
+                                     bool* recovery_probe_in_progress) {
     // Mirrors selectOptimalDevice: a rare WARNING sample so a sustained
     // fallback storm is visible without flooding; VLOG(1) for debugging.
     VLOG(1) << "fallback device selection for slice " << slice;
@@ -2306,8 +2319,12 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
                              ? (sdev == tdev)  // loopback is safe
                              : rail_mon->admit(sdev, tdev, probe_token);
         if (!same_machine && !reachable) {
+            bool pair_probe_in_progress = false;
             reachable = rail_mon->tryRecoveryProbe(
-                sdev, tdev, probe_token);
+                sdev, tdev, probe_token,
+                &pair_probe_in_progress);
+            if (pair_probe_in_progress && recovery_probe_in_progress)
+                *recovery_probe_in_progress = true;
         }
 
         if (reachable) {
@@ -2330,7 +2347,8 @@ Status Workers::selectFallbackDevice(RouteHint& source, RouteHint& target,
     return Status::DeviceNotFound("No available path" LOC_MARK);
 }
 
-Status Workers::generatePostPath(RdmaSlice* slice) {
+Status Workers::generatePostPath(RdmaSlice* slice,
+                                 bool* recovery_probe_in_progress) {
     // Retries acquire a fresh admission. Do not carry an earlier attempt's
     // ownership token across route resolution or fallback selection.
     slice->rail_monitor.reset();
@@ -2344,9 +2362,11 @@ Status Workers::generatePostPath(RdmaSlice* slice) {
                               slice->length));
 
     if (slice->retry_count == 0)
-        CHECK_STATUS(selectOptimalDevice(source, target, slice));
+        CHECK_STATUS(selectOptimalDevice(source, target, slice,
+                                         recovery_probe_in_progress));
     else
-        CHECK_STATUS(selectFallbackDevice(source, target, slice));
+        CHECK_STATUS(selectFallbackDevice(source, target, slice,
+                                          recovery_probe_in_progress));
     // Cache the RailMonitor pointer as soon as select* succeeds, BEFORE the
     // rkey bounds check below: select* may have armed a probe/trial via
     // admit(), and any later failure (rkey out of bounds, a pre-wire cancel)
