@@ -261,7 +261,7 @@ ErrorCode HotStandbyService::LoadSnapshotBaselineLocked(
         }
     }
     if (!metadata_store_->RestoreWeightMetadata(snapshot.weight_metadata)) {
-        LOG(ERROR) << "Snapshot baseline contains an invalid weight catalog";
+        LOG(ERROR) << "Snapshot baseline contains an invalid weight metadata";
         metadata_store_->Clear();
         return ErrorCode::DESERIALIZE_FAIL;
     }
