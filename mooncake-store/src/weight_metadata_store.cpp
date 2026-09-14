@@ -348,6 +348,16 @@ WeightMetadataStore::Result<WeightRevisionMetadata>
 WeightMetadataStore::Publish(const WeightMetadataMutation& mutation) {
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(mutation.identity);
+    if (current != revisions_.end() && mutation.next.has_value() &&
+        current->second.availability != WeightAvailabilityState::DELETING &&
+        mutation.next->availability == WeightAvailabilityState::DELETING) {
+        std::optional<uint64_t> nearest;
+        if (CountActiveLeasesLocked(current->second,
+                                    mutation.next->updated_at_ms, &nearest) !=
+            0) {
+            return tl::make_unexpected(WeightManagementError::BUSY);
+        }
+    }
     if (mutation.previous.has_value()) {
         if (current == revisions_.end() ||
             current->second != *mutation.previous) {
@@ -374,15 +384,6 @@ WeightMetadataStore::Publish(const WeightMetadataMutation& mutation) {
     const auto& next = *mutation.next;
     if (!ValidateWeightRevisionMetadata(next).ok()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
-    }
-    if (current != revisions_.end() &&
-        current->second.availability != WeightAvailabilityState::DELETING &&
-        next.availability == WeightAvailabilityState::DELETING) {
-        std::optional<uint64_t> nearest;
-        if (CountActiveLeasesLocked(current->second, next.updated_at_ms,
-                                    &nearest) != 0) {
-            return tl::make_unexpected(WeightManagementError::BUSY);
-        }
     }
     const auto group = group_index_.find(next.manifest.payload_group_id);
     if (group != group_index_.end() && group->second != next.identity) {
@@ -1096,6 +1097,16 @@ WeightMetadataStore::Result<WeightResidencyOperation>
 WeightMetadataStore::Publish(const WeightOperationMutation& mutation) {
     std::lock_guard lock(mutex_);
     const auto current = revisions_.find(mutation.metadata.identity);
+    if (!mutation.previous.has_value() &&
+        mutation.metadata.previous.has_value() && current != revisions_.end() &&
+        current->second != *mutation.metadata.previous &&
+        mutation.next.has_value()) {
+        std::optional<uint64_t> nearest;
+        if (CountActiveLeasesLocked(
+                current->second, mutation.next->started_at_ms, &nearest) != 0) {
+            return tl::make_unexpected(WeightManagementError::BUSY);
+        }
+    }
     if (!mutation.metadata.previous.has_value() ||
         current == revisions_.end() ||
         current->second != *mutation.metadata.previous) {
@@ -1109,13 +1120,6 @@ WeightMetadataStore::Publish(const WeightOperationMutation& mutation) {
     }
     if (!mutation.metadata.next.has_value() || !mutation.next.has_value()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
-    }
-    if (!mutation.previous.has_value()) {
-        std::optional<uint64_t> nearest;
-        if (CountActiveLeasesLocked(
-                current->second, mutation.next->started_at_ms, &nearest) != 0) {
-            return tl::make_unexpected(WeightManagementError::BUSY);
-        }
     }
     const auto operation = operations_.find(mutation.next->operation_id);
     if (mutation.previous.has_value()) {
