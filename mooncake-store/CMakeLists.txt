@@ -1,5 +1,7 @@
 project(MooncakeStore VERSION 2.0.0)
 
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 set(MOONCAKE_STORE_INCLUDE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # Extract version components for C++ usage
