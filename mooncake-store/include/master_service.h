@@ -1622,7 +1622,8 @@ class MasterService {
      * GetReplicaList's RO accessor has been released.
      */
     PromotionQueueResult TryPushPromotionQueue(const ObjectIdentity& object_id,
-                                               bool record_candidate = true);
+                                               bool record_candidate = true,
+                                               bool force = false);
     void RecordOrUpdateCandidate(TenantState& tenant_state,
                                  const std::string& key, uint8_t sketch_score,
                                  PromotionCandidateReason reason,
@@ -2206,6 +2207,7 @@ class MasterService {
     static int64_t DynamicReplicationNowMs();
 
     const bool enable_oplog_;
+    const bool weight_management_mutations_enabled_;
     const uint32_t oplog_batch_max_entries_;
 
     // cluster id for persistent sub directory
