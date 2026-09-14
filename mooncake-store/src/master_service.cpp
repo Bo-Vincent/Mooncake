@@ -1672,8 +1672,8 @@ std::shared_ptr<Lease> MasterService::RegisterGroupMember(
     return it->second.lease;
 }
 
-WeightMetadataStore::Result<WeightRevisionMetadata>
-MasterService::BeginWeightImport(const BeginWeightImportRequest& request) {
+WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::BeginWeightImport(
+    const BeginWeightImportRequest& request) {
     auto normalized = request;
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty() ||
@@ -1695,15 +1695,16 @@ MasterService::BeginWeightImport(const BeginWeightImportRequest& request) {
     return PersistAndPublishWeightMutation(*mutation);
 }
 
-WeightMetadataStore::Result<WeightRevisionMetadata>
-MasterService::CommitWeightImport(const CommitWeightImportRequest& request) {
+WeightMetadataStore::Result<WeightRevisionMetadata> MasterService::CommitWeightImport(
+    const CommitWeightImportRequest& request) {
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty() ||
         request.manifest.payload_group_id != canonical_group) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
-    [[maybe_unused]] auto operation_lock = AcquireWeightGroupOperationLock(
-        TenantId(request.identity.tenant_id), canonical_group);
+    [[maybe_unused]] auto group_operation_lock =
+        AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
+                                        canonical_group);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -1747,8 +1748,7 @@ MasterService::AbortWeightImport(const AbortWeightImportRequest& request) {
     return PersistAndPublishWeightMutation(*mutation);
 }
 
-WeightMetadataStore::Result<WeightRevisionView>
-MasterService::GetWeightRevision(
+WeightMetadataStore::Result<WeightRevisionView> MasterService::GetWeightRevision(
     const GetWeightRevisionRequest& request) const {
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1843,8 +1843,226 @@ WeightMetadataStore::Result<void> MasterService::ReleaseWeightRevisionLease(
     return {};
 }
 
-WeightMetadataStore::Result<
-    std::vector<MasterService::WeightGroupMemberSnapshot>>
+WeightMetadataStore::Result<WeightResidencyOperation>
+MasterService::StartWeightResidencyOperation(
+    const StartWeightResidencyOperationRequest& request) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    [[maybe_unused]] auto group_operation_lock =
+        AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
+                                        canonical_group);
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_metadata_.PrepareStartOperation(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    if (!mutation->no_op) {
+        auto members = SnapshotWeightGroup(
+            request.identity,
+            mutation->metadata.next->manifest.payload_group_id);
+        if (!members || members->size() !=
+                            mutation->metadata.next->manifest.payload_count +
+                                1) {
+            return tl::make_unexpected(WeightManagementError::NOT_READY);
+        }
+        mutation->next->total_members = members->size();
+    }
+    return PersistAndPublishWeightOperationMutation(*mutation);
+}
+
+WeightMetadataStore::Result<WeightResidencyOperation>
+MasterService::QueryWeightOperation(
+    const QueryWeightOperationRequest& request) const {
+    return weight_metadata_.QueryOperation(request.operation_id);
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::ReconcileWeightRevision(
+    const ReconcileWeightRevisionRequest& request) {
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto view = weight_metadata_.Get(request.identity, now_ms);
+    if (!view) {
+        return tl::make_unexpected(view.error());
+    }
+    const auto current = view->metadata;
+    if (current.availability == WeightAvailabilityState::DELETED) {
+        return current;
+    }
+    if (current.operation == WeightOperationState::EVICTING) {
+        EvictManagedWeightGroupToCold(current);
+    }
+
+    auto members = SnapshotWeightGroup(request.identity,
+                                       current.manifest.payload_group_id);
+    const bool absent = !members &&
+                        members.error() == WeightManagementError::NOT_FOUND;
+    if (!members && !absent) {
+        return tl::make_unexpected(members.error());
+    }
+
+    if (current.availability == WeightAvailabilityState::DELETING) {
+        if (!absent) {
+            return current;
+        }
+        auto mutation = weight_metadata_.PrepareFinishDelete(
+            current.identity, current.metadata_generation, now_ms);
+        if (!mutation) {
+            return tl::make_unexpected(mutation.error());
+        }
+        return PersistAndPublishWeightMutation(*mutation);
+    }
+
+    bool complete = !absent &&
+                    members->size() == current.manifest.payload_count + 1;
+    bool manifest_found = false;
+    bool all_memory = complete;
+    bool all_cold = complete;
+    bool any_readable = false;
+    uint64_t logical_bytes = 0;
+    std::vector<std::string> payload_keys;
+    if (!absent) {
+        for (const auto& member : *members) {
+            complete = complete && member.readable;
+            any_readable = any_readable || member.readable;
+            all_memory = all_memory && member.has_memory;
+            all_cold = all_cold && member.has_cold && !member.has_memory;
+            if (member.key == current.manifest.manifest_key &&
+                member.data_type == ObjectDataType::METADATA) {
+                manifest_found = true;
+            } else if (member.data_type == ObjectDataType::WEIGHT &&
+                       member.size <= std::numeric_limits<uint64_t>::max() -
+                                          logical_bytes) {
+                logical_bytes += member.size;
+                payload_keys.push_back(member.key);
+            } else {
+                complete = false;
+            }
+        }
+    }
+    complete = complete && manifest_found &&
+               payload_keys.size() == current.manifest.payload_count &&
+               logical_bytes == current.manifest.logical_bytes &&
+               ComputeWeightPayloadKeysSha256(payload_keys) ==
+                   current.manifest.payload_keys_sha256;
+    const auto observed_residency =
+        absent || !any_readable
+            ? WeightResidencyState::ABSENT
+            : (all_memory ? WeightResidencyState::HOT
+                          : (all_cold ? WeightResidencyState::COLD
+                                      : WeightResidencyState::MIXED));
+
+    if (current.operation != WeightOperationState::NONE) {
+        auto operation = weight_metadata_.QueryOperation(current.operation_id);
+        if (!operation) {
+            return tl::make_unexpected(operation.error());
+        }
+        if (complete && observed_residency == operation->target_residency) {
+            auto mutation = weight_metadata_.PrepareFinishOperation(
+                operation->operation_id, observed_residency, now_ms);
+            if (!mutation) {
+                return tl::make_unexpected(mutation.error());
+            }
+            auto finished = PersistAndPublishWeightOperationMutation(*mutation);
+            if (!finished) {
+                return tl::make_unexpected(finished.error());
+            }
+            auto reconciled = weight_metadata_.Get(request.identity, now_ms);
+            if (!reconciled) {
+                return tl::make_unexpected(reconciled.error());
+            }
+            return reconciled->metadata;
+        }
+        uint64_t processed_members = 0;
+        std::string cursor;
+        if (!absent) {
+            for (const auto& member : *members) {
+                const bool satisfied =
+                    operation->target_residency == WeightResidencyState::HOT
+                        ? member.has_memory
+                        : member.has_cold && !member.has_memory;
+                if (satisfied) {
+                    ++processed_members;
+                    cursor = member.key;
+                }
+            }
+        }
+        auto progress = weight_metadata_.PrepareUpdateOperationProgress(
+            operation->operation_id, processed_members,
+            operation->total_members == 0
+                ? current.manifest.payload_count + 1
+                : operation->total_members,
+            std::move(cursor), now_ms);
+        if (!progress) {
+            return tl::make_unexpected(progress.error());
+        }
+        auto published = PersistAndPublishWeightOperationMutation(*progress);
+        if (!published) {
+            return tl::make_unexpected(published.error());
+        }
+        return current;
+    }
+
+    const auto availability = complete ? WeightAvailabilityState::READY
+                                       : WeightAvailabilityState::DEGRADED;
+    auto mutation = weight_metadata_.PrepareReconcile(
+        current.identity, current.metadata_generation, availability,
+        observed_residency, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    return PersistAndPublishWeightMutation(*mutation);
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::DeleteWeightRevision(
+    const DeleteWeightRevisionRequest& request) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    [[maybe_unused]] auto group_operation_lock =
+        AcquireWeightGroupOperationLock(TenantId(request.identity.tenant_id),
+                                        canonical_group);
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    auto mutation = weight_metadata_.PrepareDelete(request, now_ms);
+    if (!mutation) {
+        return tl::make_unexpected(mutation.error());
+    }
+    auto deleting = PersistAndPublishWeightMutation(*mutation);
+    if (!deleting) {
+        return tl::make_unexpected(deleting.error());
+    }
+
+    auto keys = GetGroupMemberKeys(TenantId(request.identity.tenant_id),
+                                   deleting->manifest.payload_group_id);
+    std::stable_sort(keys.begin(), keys.end(), [&](const auto& lhs,
+                                                   const auto& rhs) {
+        return lhs != deleting->manifest.manifest_key &&
+               rhs == deleting->manifest.manifest_key;
+    });
+    for (const auto& key : keys) {
+        auto removed = RemoveObject(key, TenantId(request.identity.tenant_id),
+                                    true, true);
+        if (!removed && removed.error() != ErrorCode::OBJECT_NOT_FOUND) {
+            return tl::make_unexpected(WeightManagementError::BUSY);
+        }
+    }
+    return ReconcileWeightRevision(
+        ReconcileWeightRevisionRequest{.identity = request.identity});
+}
+
+WeightMetadataStore::Result<std::vector<MasterService::WeightGroupMemberSnapshot>>
 MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
                                    const std::string& payload_group_id) const {
     const TenantId tenant_id(identity.tenant_id);
@@ -1871,6 +2089,14 @@ MasterService::SnapshotWeightGroup(const WeightRevisionIdentity& identity,
             .size = metadata.size,
             .data_type = metadata.data_type,
             .readable = HasReadableReplica(metadata),
+            .has_memory = metadata.HasReplica([this](const Replica& replica) {
+                return replica.is_memory_replica() &&
+                       IsReplicaReadable(replica);
+            }),
+            .has_cold = metadata.HasReplica([this](const Replica& replica) {
+                return !replica.is_memory_replica() &&
+                       IsReplicaReadable(replica);
+            }),
         });
     }
     return members;
@@ -1943,7 +2169,10 @@ MasterService::PersistAndPublishWeightMutation(
     if (mutation.kind == WeightMetadataMutationKind::UPSERT &&
         mutation.next.has_value()) {
         type = OpType::WEIGHT_METADATA_UPSERT;
-        const auto encoded = struct_pack::serialize(*mutation.next);
+        const auto encoded = struct_pack::serialize(WeightMetadataUpsertOp{
+            .metadata = *mutation.next,
+            .operation = std::nullopt,
+        });
         payload.assign(encoded.begin(), encoded.end());
     } else if (mutation.previous.has_value()) {
         type = OpType::WEIGHT_METADATA_DELETE;
@@ -1960,8 +2189,7 @@ MasterService::PersistAndPublishWeightMutation(
     struct Completion {
         std::mutex mutex;
         std::condition_variable cv;
-        std::optional<WeightMetadataStore::Result<WeightRevisionMetadata>>
-            result;
+        std::optional<WeightMetadataStore::Result<WeightRevisionMetadata>> result;
     };
     auto completion = std::make_shared<Completion>();
     auto persisted = AppendOpLogWithDurableFinalize(
@@ -1997,6 +2225,65 @@ MasterService::PersistAndPublishWeightMutation(
         LOG(ERROR) << "Timed out waiting for durable weight metadata publish, "
                    << "sequence_id=" << persisted->sequence_id
                    << ", key=" << persisted->object_key;
+        return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
+    }
+    return std::move(*completion->result);
+}
+
+WeightMetadataStore::Result<WeightResidencyOperation>
+MasterService::PersistAndPublishWeightOperationMutation(
+    const WeightOperationMutation& mutation) {
+    if (mutation.no_op || !enable_oplog_) {
+        return weight_metadata_.Publish(mutation);
+    }
+    if (!mutation.metadata.next.has_value() || !mutation.next.has_value()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+
+    const auto encoded = struct_pack::serialize(WeightMetadataUpsertOp{
+        .metadata = *mutation.metadata.next,
+        .operation = *mutation.next,
+    });
+    const std::string payload(encoded.begin(), encoded.end());
+
+    struct Completion {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::optional<WeightMetadataStore::Result<WeightResidencyOperation>> result;
+    };
+    auto completion = std::make_shared<Completion>();
+    auto persisted = AppendOpLogWithDurableFinalize(
+        OpType::WEIGHT_METADATA_UPSERT,
+        mutation.metadata.identity.tenant_id,
+        MakeWeightRevisionMetadataKey(mutation.metadata.identity), payload,
+        [this, mutation, completion](const OpLogEntry& durable_entry) {
+            auto published = weight_metadata_.Publish(mutation);
+            if (!published) {
+                LOG(ERROR) << "Failed to publish durable weight operation, "
+                              "sequence_id="
+                           << durable_entry.sequence_id
+                           << ", operation_id=" << mutation.next->operation_id
+                           << ", error="
+                           << static_cast<int>(published.error());
+            }
+            {
+                std::lock_guard lock(completion->mutex);
+                completion->result = std::move(published);
+            }
+            completion->cv.notify_all();
+        });
+    if (!persisted) {
+        return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
+    }
+
+    constexpr auto kPublishTimeout = std::chrono::seconds(30);
+    std::unique_lock lock(completion->mutex);
+    if (!completion->cv.wait_for(lock, kPublishTimeout, [&] {
+            return completion->result.has_value();
+        })) {
+        LOG(ERROR) << "Timed out waiting for durable weight operation, "
+                      "operation_id="
+                   << mutation.next->operation_id;
         return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
     }
     return std::move(*completion->result);
@@ -2106,14 +2393,46 @@ std::vector<std::string> MasterService::GetGroupMemberKeys(
     return member_keys;
 }
 
+std::unordered_set<std::string>
+MasterService::SnapshotManagedWeightGroups() const {
+    std::unordered_set<std::string> groups;
+    const auto snapshot = weight_metadata_.ExportSnapshot();
+    groups.reserve(snapshot.metadata.size());
+    for (const auto& metadata : snapshot.metadata) {
+        groups.insert(TenantId(metadata.identity.tenant_id)
+                          .MakeScopedKey(metadata.manifest.payload_group_id));
+    }
+    return groups;
+}
+
+bool MasterService::IsManagedWeightObject(const TenantId& tenant_id,
+                                          const std::string& key) const {
+    std::string group_id;
+    {
+        MetadataAccessorRO accessor(this,
+                                    MakeObjectIdentity(key, tenant_id));
+        if (!accessor.Exists()) {
+            return false;
+        }
+        group_id = accessor.Get().group_id;
+    }
+    return !group_id.empty() && weight_metadata_.IsManagedGroup(group_id);
+}
+
 MasterService::GroupEvictionResult MasterService::EvictGroupOrObject(
     const TenantId& tenant_id, const std::string& key,
     const std::string& group_id, bool allow_soft_pinned,
+    bool allow_managed_weight, bool allow_hard_pinned,
     std::chrono::system_clock::time_point now,
     const std::function<MasterService::EvictMemberOutcome(
         const std::string&, ObjectMetadata&, TenantState&,
         MetadataShardAccessorRW&)>& evict_one_member) {
     GroupEvictionResult result;
+
+    if (!allow_managed_weight && !group_id.empty() &&
+        weight_metadata_.IsManagedGroup(group_id)) {
+        return result;
+    }
 
     // Group membership lives in group_domain_, keyed by scoped(tenant,
     // group_id) and read WITHOUT a metadata shard lock.
@@ -2156,7 +2475,7 @@ MasterService::GroupEvictionResult MasterService::EvictGroupOrObject(
             // and pin state may have changed since the caller's snapshot. A
             // surviving shared group lease makes every member's lease not
             // expired, so the whole group is skipped here.
-            if (member_metadata.IsHardPinned() ||
+            if ((!allow_hard_pinned && member_metadata.IsHardPinned()) ||
                 !member_metadata.IsLeaseExpired(now) ||
                 (!allow_soft_pinned && IsSoftPinActive(member_metadata, now)) ||
                 !member_metadata.HasReplica(is_evictable_memory_replica)) {
@@ -2183,6 +2502,108 @@ MasterService::GroupEvictionResult MasterService::EvictGroupOrObject(
         }
     }
     return result;
+}
+
+MasterService::GroupEvictionResult
+MasterService::EvictManagedWeightGroupToCold(
+    const WeightRevisionMetadata& revision) {
+    const TenantId tenant_id(revision.identity.tenant_id);
+    auto member_keys =
+        GetGroupMemberKeys(tenant_id, revision.manifest.payload_group_id);
+    if (member_keys.empty()) {
+        return {};
+    }
+
+    const auto now = std::chrono::system_clock::now();
+    std::vector<std::vector<Replica>> deferred_replicas;
+    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
+    auto is_evictable_memory = [this](const Replica& replica) {
+        return IsEvictableMemoryReplica(replica);
+    };
+    auto evict_one =
+        [&, this](const std::string& member_key,
+                  ObjectMetadata& metadata, TenantState& tenant_state,
+                  MetadataShardAccessorRW&) -> EvictMemberOutcome {
+        const bool has_cold =
+            metadata.HasReplica([this](const Replica& replica) {
+                return !replica.is_memory_replica() &&
+                       IsReplicaReadable(replica);
+            });
+        if (!has_cold) {
+            return {};
+        }
+
+        if (enable_oplog_) {
+            auto reservation = ReserveBatchOpLogSlot();
+            if (!reservation) {
+                return {.stop_scan = true, .error = reservation.error()};
+            }
+            auto remaining = BuildRemainingReplicaDescriptors(
+                metadata, is_evictable_memory);
+            std::vector<ReplicaID> removed_ids;
+            metadata.VisitReplicas(is_evictable_memory,
+                                   [&removed_ids](Replica& replica) {
+                                       removed_ids.push_back(replica.id());
+                                       replica.mark_removed();
+                                   });
+            if (removed_ids.empty()) {
+                return {};
+            }
+            auto persisted = AppendReservedOpLogWithDurableFinalize(
+                std::move(reservation.value()), OpType::PUT_END,
+                tenant_id.value(),
+                member_key,
+                SerializeMetadataForOpLogFromReplicaDescriptors(metadata,
+                                                                 remaining),
+                [this, removed_ids](const OpLogEntry& durable_entry) {
+                    FinalizeRemovedReplicasAfterDurable(
+                        durable_entry, removed_ids, QuotaEraseMode::kFull);
+                });
+            if (!persisted) {
+                for (const auto& id : removed_ids) {
+                    if (auto* replica = metadata.GetReplicaByID(id)) {
+                        replica->cancel_remove();
+                    }
+                }
+                return {.stop_scan = true, .error = persisted.error()};
+            }
+            PublishKvRemovedAfterEvict(member_key, removed_ids.size(), "cpu",
+                                       metadata, tenant_id);
+            return {.freed_bytes = metadata.size * removed_ids.size(),
+                    .evicted_objects = 1};
+        }
+
+        const uint64_t before_charge = CompletedMemoryQuotaCharge(metadata);
+        auto removed = PopReplicasWithCacheTotalAccounting(
+            metadata, is_evictable_memory);
+        const uint64_t removed_count = removed.size();
+        if (removed_count == 0) {
+            return {};
+        }
+        std::vector<ReplicaID> removed_ids;
+        removed_ids.reserve(removed.size());
+        for (const auto& replica : removed) {
+            removed_ids.push_back(replica.id());
+        }
+        RecordDynamicReplicaRemoval(metadata, removed_ids);
+        deferred_replicas.emplace_back(std::move(removed));
+        const uint64_t after_charge = CompletedMemoryQuotaCharge(metadata);
+        if (enable_multi_tenants_ && before_charge > after_charge) {
+            auto released = metadata.quota_ledger.ReleaseCommitted(
+                GetBoundTenantQuotaHandle(tenant_state),
+                before_charge - after_charge);
+            LogTenantQuotaLedgerError(released, "release_committed", tenant_id,
+                                      member_key);
+        }
+        PublishKvRemovedAfterEvict(member_key, removed_count, "cpu", metadata,
+                                   tenant_id);
+        return {.freed_bytes = metadata.size * removed_count,
+                .evicted_objects = 1};
+    };
+
+    return EvictGroupOrObject(
+        tenant_id, member_keys.front(), revision.manifest.payload_group_id,
+        false, true, true, now, evict_one);
 }
 
 bool MasterService::HasCompletedMemoryCacheReplica(
@@ -5408,6 +5829,15 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(group_id_result.error());
     }
     const std::string group_id = group_id_result.value();
+    std::optional<ObjectOperationLock> weight_group_operation_lock;
+    if (!group_id.empty() && weight_metadata_.IsManagedGroup(group_id)) {
+        weight_group_operation_lock.emplace(AcquireWeightGroupOperationLock(
+            object_id.tenant_id, group_id));
+        if (!weight_metadata_.AllowsGroupMemberMutation(group_id)) {
+            return tl::make_unexpected(
+                ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+        }
+    }
 
     [[maybe_unused]] auto object_operation_lock =
         AcquireObjectOperationLock(object_id.tenant_id, object_id.user_key);
@@ -6062,6 +6492,15 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(group_id_result.error());
     }
     const std::string group_id = group_id_result.value();
+    std::optional<ObjectOperationLock> weight_group_operation_lock;
+    if (!group_id.empty() && weight_metadata_.IsManagedGroup(group_id)) {
+        weight_group_operation_lock.emplace(AcquireWeightGroupOperationLock(
+            object_id.tenant_id, group_id));
+        if (!weight_metadata_.AllowsGroupMemberMutation(group_id)) {
+            return tl::make_unexpected(
+                ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+        }
+    }
 
     [[maybe_unused]] auto object_operation_lock =
         AcquireObjectOperationLock(object_id.tenant_id, object_id.user_key);
@@ -6570,6 +7009,9 @@ auto MasterService::EvictDiskReplica(const UUID& client_id,
                                      ReplicaType replica_type)
     -> tl::expected<void, ErrorCode> {
     const auto object_id = MakeObjectIdentityForRequest(key, tenant_id);
+    if (IsManagedWeightObject(object_id.tenant_id, key)) {
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+    }
     MetadataAccessorRW accessor(this, object_id);
     if (!accessor.Exists()) {
         LOG(INFO) << "key=" << key
@@ -7583,8 +8025,19 @@ tl::expected<void, ErrorCode> MasterService::MoveRevoke(
 
 auto MasterService::Remove(const std::string& key, const TenantId& tenant_id,
                            bool force) -> tl::expected<void, ErrorCode> {
-    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
+    return RemoveObject(key, tenant_id, force, false);
+}
+
+auto MasterService::RemoveObject(const std::string& key,
+                                 const TenantId& tenant_id, bool force,
+                                 bool allow_managed_weight)
+    -> tl::expected<void, ErrorCode> {
     const auto object_id = MakeObjectIdentityForRequest(key, tenant_id);
+    if (!allow_managed_weight &&
+        IsManagedWeightObject(object_id.tenant_id, key)) {
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+    }
+    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     MetadataAccessorRW accessor(this, object_id);
     if (!accessor.Exists()) {
         VLOG(1) << "key=" << key << ", error=object_not_found";
@@ -7659,6 +8112,7 @@ auto MasterService::RemoveByRegex(const std::string& regex_pattern,
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
+    const auto managed_weight_groups = SnapshotManagedWeightGroups();
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     const TenantId& normalized_tenant = ResolveRequestTenantId(tenant_id);
     for (size_t i = 0; i < kNumShards; ++i) {
@@ -7672,6 +8126,13 @@ auto MasterService::RemoveByRegex(const std::string& regex_pattern,
         for (auto it = tenant_state.metadata.begin();
              it != tenant_state.metadata.end();) {
             if (std::regex_search(it->first, pattern)) {
+                if (!it->second.group_id.empty() &&
+                    managed_weight_groups.contains(
+                        normalized_tenant.MakeScopedKey(
+                            it->second.group_id))) {
+                    ++it;
+                    continue;
+                }
                 if (!force && !it->second.IsLeaseExpired()) {
                     VLOG(1) << "key=" << it->first
                             << " matched by regex, but has lease. Skipping "
@@ -7756,6 +8217,7 @@ auto MasterService::RemoveByRegex(const std::string& regex_pattern,
 long MasterService::RemoveAll(bool force) {
     long removed_count = 0;
     int64_t total_freed_size = 0;
+    const auto managed_weight_groups = SnapshotManagedWeightGroups();
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     auto now = std::chrono::system_clock::now();
     // Tracking which tenants ended up empty costs a hash insert per visited
@@ -7773,7 +8235,9 @@ long MasterService::RemoveAll(bool force) {
     // Since RemoveAll clears everything, signal ALL clients with a
     // LocalSSD clients to physically clear their SSD immediately.
     // This lets client cleanup overlap with master metadata deletion.
-    local_ssd_manager_.RequestRemoveAll();
+    if (managed_weight_groups.empty()) {
+        local_ssd_manager_.RequestRemoveAll();
+    }
 
     // Delete metadata — runs concurrently with client SSD cleanup.
     for (size_t i = 0; i < kNumShards; i++) {
@@ -7793,6 +8257,17 @@ long MasterService::RemoveAll(bool force) {
                     // `cleared`.
                     if (track_cleared_tenants) {
                         tenants_seen.insert(tenant_it->first.value());
+                    }
+                    if (!it->second.group_id.empty() &&
+                        managed_weight_groups.contains(
+                            tenant_it->first.MakeScopedKey(
+                                it->second.group_id))) {
+                        if (track_cleared_tenants) {
+                            tenants_with_remaining_objects.insert(
+                                tenant_it->first.value());
+                        }
+                        ++it;
+                        continue;
                     }
                     if ((force || it->second.IsLeaseExpired(now)) &&
                         it->second.AllReplicas(&Replica::fn_is_completed) &&
@@ -7898,6 +8373,7 @@ long MasterService::RemoveAll(bool force) {
 long MasterService::RemoveAll(const TenantId& tenant_id, bool force) {
     long removed_count = 0;
     int64_t total_freed_size = 0;
+    const auto managed_weight_groups = SnapshotManagedWeightGroups();
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     auto now = std::chrono::system_clock::now();
     const TenantId& normalized_tenant = ResolveRequestTenantId(tenant_id);
@@ -7930,6 +8406,14 @@ long MasterService::RemoveAll(const TenantId& tenant_id, bool force) {
             auto it = tenant_state.metadata.begin();
             while (it != tenant_state.metadata.end()) {
                 saw_any_object = true;
+                if (!it->second.group_id.empty() &&
+                    managed_weight_groups.contains(
+                        normalized_tenant.MakeScopedKey(
+                            it->second.group_id))) {
+                    skipped_any_object = true;
+                    ++it;
+                    continue;
+                }
                 if ((force || it->second.IsLeaseExpired(now)) &&
                     it->second.AllReplicas(&Replica::fn_is_completed) &&
                     !tenant_state.replication_tasks.contains(it->first)) {
@@ -8022,6 +8506,7 @@ auto MasterService::BatchRemove(const std::vector<std::string>& keys,
     -> std::vector<tl::expected<void, ErrorCode>> {
     std::vector<tl::expected<void, ErrorCode>> results(keys.size());
     const TenantId& normalized_tenant = ResolveRequestTenantId(tenant_id);
+    const auto managed_weight_groups = SnapshotManagedWeightGroups();
 
     // Group keys by shard to reduce lock contention
     std::unordered_map<size_t,
@@ -8061,6 +8546,14 @@ auto MasterService::BatchRemove(const std::vector<std::string>& keys,
                 VLOG(1) << "key=" << key << ", error=object_not_found";
                 results[original_idx] =
                     tl::make_unexpected(ErrorCode::OBJECT_NOT_FOUND);
+                continue;
+            }
+
+            if (!it->second.group_id.empty() &&
+                managed_weight_groups.contains(normalized_tenant.MakeScopedKey(
+                    it->second.group_id))) {
+                results[original_idx] = tl::make_unexpected(
+                    ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
                 continue;
             }
 
@@ -11466,7 +11959,8 @@ MasterService::EvictTenantMemoryForQuota(const TenantId& tenant_id,
 
         GroupEvictionResult group_result =
             EvictGroupOrObject(normalized_tenant, key, group_id,
-                               allow_soft_pinned, now, evict_one_member);
+                               allow_soft_pinned, false, false, now,
+                               evict_one_member);
         TenantQuotaEvictionResult result{
             .freed_bytes = group_result.freed_bytes,
             .evicted_objects =
@@ -11887,7 +12381,8 @@ void MasterService::BatchEvict(double evict_ratio_target,
         };
 
         GroupEvictionResult group_result = EvictGroupOrObject(
-            tenant_id, key, group_id, allow_soft_pinned, now, evict_one_member);
+            tenant_id, key, group_id, allow_soft_pinned, false, false, now,
+            evict_one_member);
         EvictionResult result{.freed_bytes = group_result.freed_bytes,
                               .evicted_objects = group_result.evicted_objects,
                               .stop_scan = group_result.stop_scan};
@@ -12455,6 +12950,7 @@ void MasterService::NoFBatchEvict(double evict_ratio_target,
     }
 
     auto now = std::chrono::system_clock::now();
+    const auto managed_weight_groups = SnapshotManagedWeightGroups();
     long evicted_count = 0;
     long object_count = 0;
     uint64_t total_freed_size = 0;
@@ -12489,6 +12985,12 @@ void MasterService::NoFBatchEvict(double evict_ratio_target,
                  it != tenant_state.metadata.end() &&
                  shard_evicted_count < ideal_evict_num;) {
                 auto& metadata = it->second;
+                if (!metadata.group_id.empty() &&
+                    managed_weight_groups.contains(
+                        tenant_it->first.MakeScopedKey(metadata.group_id))) {
+                    ++it;
+                    continue;
+                }
                 if (metadata.IsHardPinned() || !metadata.IsLeaseExpired(now) ||
                     IsSoftPinActive(metadata, now)) {
                     ++it;
@@ -13092,8 +13594,7 @@ MasterService::MetadataSerializer::Serialize() {
 
     packer.pack("weight_metadata");
     const auto weight_metadata = service_->weight_metadata_.ExportSnapshot();
-    const auto encoded_weight_metadata =
-        struct_pack::serialize(weight_metadata);
+    const auto encoded_weight_metadata = struct_pack::serialize(weight_metadata);
     packer.pack_bin(encoded_weight_metadata.size());
     packer.pack_bin_body(encoded_weight_metadata.data(),
                          encoded_weight_metadata.size());
@@ -13240,9 +13741,9 @@ MasterService::MetadataSerializer::Deserialize(
                 "Invalid MessagePack format: weight_metadata must be binary"));
         }
         WeightMetadataSnapshot weight_metadata;
-        const std::string encoded(weight_metadata_obj->via.bin.ptr,
-                                  weight_metadata_obj->via.bin.ptr +
-                                      weight_metadata_obj->via.bin.size);
+        const std::string encoded(
+            weight_metadata_obj->via.bin.ptr,
+            weight_metadata_obj->via.bin.ptr + weight_metadata_obj->via.bin.size);
         if (struct_pack::deserialize_to(weight_metadata, encoded) !=
             struct_pack::errc::ok) {
             return tl::make_unexpected(SerializationError(
