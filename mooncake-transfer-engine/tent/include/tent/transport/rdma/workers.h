@@ -82,6 +82,12 @@ class Workers {
 
     DeviceSelector* getDeviceSelector() const { return device_selector_.get(); }
 
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
+    bool taskCongestionEnabled() const {
+        return congestion_control_config_.mode != adaptive_congestion_control::Mode::kOff;
+    }
+#endif
+
    private:
     using Task = std::function<void()>;
     struct WorkerContext;
