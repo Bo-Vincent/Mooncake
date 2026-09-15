@@ -313,7 +313,6 @@ void ClassicRdmaCongestionControl::observeUnavailable(
         slice->rdma_congestion_control_observed_blocked.store(
             true, std::memory_order_release);
 }
-
 void ClassicRdmaCongestionControl::complete(Transport::Slice *slice,
                                             ibv_wc_status status,
                                             uint32_t vendor_error) {
