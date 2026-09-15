@@ -45,6 +45,13 @@ python -c "import mooncake._fast_copy"
 python tests/test_fast_copy.py
 python tests/test_import_structure.py
 
+if python -c "import importlib.util; raise SystemExit(importlib.util.find_spec('mooncake.tent') is None)" 2>/dev/null; then
+    echo "Running installed TENT task-state API test..."
+    python tests/test_tent_installed_api.py
+else
+    echo "Skipping TENT task-state API test (TENT is not included in this wheel)"
+fi
+
 echo "Running mooncake config test..."
 python tests/test_mooncake_config.py
 

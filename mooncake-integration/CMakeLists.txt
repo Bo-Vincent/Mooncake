@@ -264,13 +264,25 @@ if(WITH_TE)
   install(TARGETS engine asio_shared
           LIBRARY DESTINATION ${MOONCAKE_PYTHON_INSTALL_DIR} COMPONENT python)
   # Co-locate libtent_metrics.so with the python C extensions so engine.so and
-  # store.so resolve it via $ORIGIN RPATH. The shared TentMetrics singleton
-  # must be loadable wherever the extensions are installed; otherwise
-  # `import mooncake.engine` / `mooncake.store` fails with a missing library.
+  # store.so resolve it via $ORIGIN RPATH. The shared TentMetrics singleton must
+  # be loadable wherever the extensions are installed; otherwise `import
+  # mooncake.engine` / `mooncake.store` fails with a missing library.
   if(TARGET tent_metrics)
     install(TARGETS tent_metrics
-            LIBRARY DESTINATION ${MOONCAKE_PYTHON_INSTALL_DIR}
-            COMPONENT python)
+            LIBRARY DESTINATION ${MOONCAKE_PYTHON_INSTALL_DIR} COMPONENT python)
+  endif()
+  if(TARGET tentpy)
+    install(TARGETS tentpy LIBRARY DESTINATION ${MOONCAKE_PYTHON_INSTALL_DIR}
+                                   COMPONENT python)
+    if(SKBUILD)
+      set(TENT_PYTHON_TOP_LEVEL_DIR ".")
+    else()
+      set(TENT_PYTHON_TOP_LEVEL_DIR "${PYTHON_SYS_PATH}")
+    endif()
+    install(
+      FILES ${CMAKE_SOURCE_DIR}/mooncake-transfer-engine/tent/src/python/tent.py
+      DESTINATION ${TENT_PYTHON_TOP_LEVEL_DIR}
+      COMPONENT python)
   endif()
 endif()
 
