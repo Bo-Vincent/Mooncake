@@ -1,20 +1,36 @@
 configure_file(mooncake_te_build_config.h.in mooncake_te_build_config.h @ONLY)
 
-install(FILES transfer_engine_c.h DESTINATION include)
-install(FILES buffer_range_index.h DESTINATION include)
-install(FILES common.h DESTINATION include)
-install(FILES config.h DESTINATION include)
-install(FILES error.h DESTINATION include)
-install(FILES memory_location.h DESTINATION include)
-install(FILES multi_transport.h DESTINATION include)
-install(FILES topology.h DESTINATION include)
-install(FILES transfer_engine.h DESTINATION include)
-install(FILES transfer_metadata.h DESTINATION include)
-install(FILES ub_allocator.h DESTINATION include)
-install(FILES common/base/status.h DESTINATION include/common/base)
-install(FILES transport/transport.h DESTINATION include/transport)
+set(MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT mooncake_transfer_engine_headers)
+install(FILES transfer_engine_c.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES buffer_range_index.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES common.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES config.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES error.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES memory_location.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES multi_transport.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES topology.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES task_congestion_status.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES transfer_engine.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES transfer_metadata.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES ub_allocator.h DESTINATION include
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES common/base/status.h DESTINATION include/common/base
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
+install(FILES transport/transport.h DESTINATION include/transport
+        COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mooncake_te_build_config.h
-        DESTINATION include)
+        DESTINATION include COMPONENT ${MOONCAKE_TRANSFER_ENGINE_HEADERS_COMPONENT})
 
 if(MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL)
   install(
