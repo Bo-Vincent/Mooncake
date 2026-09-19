@@ -134,6 +134,7 @@ TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
         }},
         .next_lease_id = 6,
         .next_operation_id = 4,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
 
     StandbyMetadataStore store;
@@ -143,7 +144,8 @@ TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
 
 TEST(StandbyMetadataStoreTest, RejectsInvalidWeightMetadataWithoutMutation) {
     StandbyMetadataStore store;
-    const WeightMetadataSnapshot empty;
+    const WeightMetadataSnapshot empty{
+        .lineages = std::vector<WeightLineageMetadata>{}};
     ASSERT_TRUE(store.RestoreWeightMetadata(empty));
 
     WeightMetadataSnapshot invalid;

@@ -73,8 +73,7 @@ struct ObjectMetadata {
                    ObjectDataType data_type_ = ObjectDataType::UNKNOWN,
                    std::string group_id_ = "",
                    std::string residency_affinity_id_ = "",
-                   TenantId tenant_id_ = TenantId(),
-                   std::string user_key_ = {})
+                   TenantId tenant_id_ = TenantId(), std::string user_key_ = {})
         : client_id(client_id_),
           put_start_time(put_start_time_),
           size(value_length),

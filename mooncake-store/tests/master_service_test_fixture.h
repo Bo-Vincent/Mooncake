@@ -152,9 +152,8 @@ class MasterServiceTest : public ::testing::Test {
     std::unique_lock<std::mutex> AcquireWeightGroupOperationLockForTest(
         MasterService& service, const TenantId& tenant_id,
         const std::string& group_id) {
-        auto operation_lock =
-            service.AcquireWeightGroupOperationLock(tenant_id, group_id);
-        return std::move(operation_lock.lock);
+        return MasterServiceTestPeer(service).AcquireWeightGroupOperationLock(
+            tenant_id, group_id);
     }
 
     size_t MetadataShardIndex(MasterService& service, const std::string& key,
@@ -543,7 +542,8 @@ class MasterServiceTest : public ::testing::Test {
     std::vector<std::string> GetWeightGroupAffinityIdsForTest(
         MasterService& service, const WeightRevisionIdentity& identity,
         const std::string& group_id) {
-        auto result = service.SnapshotWeightGroup(identity, group_id);
+        auto result = MasterServiceTestPeer(service).SnapshotWeightGroup(
+            identity, group_id);
         EXPECT_TRUE(result.has_value());
         std::vector<std::string> affinity_ids;
         if (!result) return affinity_ids;
@@ -566,7 +566,8 @@ class MasterServiceTest : public ::testing::Test {
     GetWeightGroupResidencyForTest(MasterService& service,
                                    const WeightRevisionIdentity& identity,
                                    const std::string& group_id) {
-        auto result = service.SnapshotWeightGroup(identity, group_id);
+        auto result = MasterServiceTestPeer(service).SnapshotWeightGroup(
+            identity, group_id);
         EXPECT_TRUE(result.has_value());
         std::vector<WeightGroupMemberResidencyForTest> members;
         if (!result) return members;
@@ -585,10 +586,8 @@ class MasterServiceTest : public ::testing::Test {
 
     bool IsObjectProcessingForTest(MasterService& service,
                                    const std::string& key) {
-        MasterService::MetadataAccessorRO accessor(
-            &service,
-            MasterService::MakeObjectIdentity(key, TenantId::Default()));
-        return accessor.Exists() && accessor.InProcessing();
+        return MasterServiceTestPeer(service).IsObjectProcessing(
+            key, TenantId::Default());
     }
 
     void ClearGroupStateForTest(MasterService& service) {

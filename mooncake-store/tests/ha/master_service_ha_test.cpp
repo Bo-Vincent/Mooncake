@@ -2564,7 +2564,9 @@ TEST_F(MasterServiceHATest,
                       .set_oplog_batch_max_entries(1)
                       .build();
     MasterService service(config);
-    ASSERT_EQ(ErrorCode::OK, service.SetBatchOpLogBackendForTesting(backend));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
 
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
@@ -2611,7 +2613,9 @@ TEST_F(MasterServiceHATest,
                       .set_cluster_id(cluster_id)
                       .build();
     MasterService service(config);
-    ASSERT_EQ(ErrorCode::OK, service.SetBatchOpLogBackendForTesting(backend));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
 
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
@@ -2691,7 +2695,9 @@ TEST_F(MasterServiceHATest,
         .next_operation_id = 1,
     };
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, snapshot));
-    ASSERT_EQ(ErrorCode::OK, service.SetBatchOpLogBackendForTesting(backend));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
 
     const WeightRevisionIdentity independent_identity{
         .tenant_id = "default",
@@ -2809,7 +2815,9 @@ TEST_F(MasterServiceHATest,
         .next_operation_id = 1,
     };
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, snapshot));
-    ASSERT_EQ(ErrorCode::OK, service.SetBatchOpLogBackendForTesting(backend));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
 
     auto target_identity = base_identity;
     target_identity.weight_generation = 8;
@@ -2895,6 +2903,7 @@ TEST_F(MasterServiceHATest,
     auto config = MasterServiceConfig::builder()
                       .set_enable_ha(true)
                       .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
                       .set_cluster_id(cluster_id)
                       .set_oplog_batch_max_entries(1)
                       .build();
@@ -2916,6 +2925,12 @@ TEST_F(MasterServiceHATest,
             .payload_group_id = {},
             .expected_payload_count = payload_count,
             .expected_logical_bytes = logical_bytes,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = payload_count,
+                    .affinity_digest =
+                        std::string(64, payload_count == 2 ? 'c' : 'd'),
+                },
         });
     };
 

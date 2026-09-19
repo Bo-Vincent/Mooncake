@@ -339,6 +339,13 @@ class MasterServiceTestPeer {
             type, tenant_id, key, payload, std::move(callback));
     }
 
+    std::unique_lock<std::mutex> AcquireWeightGroupOperationLock(
+        const TenantId& tenant_id, const std::string& group_id) {
+        auto operation_lock =
+            service_.AcquireWeightGroupOperationLock(tenant_id, group_id);
+        return std::move(operation_lock.lock);
+    }
+
     tl::expected<void, ErrorCode> ChargeTenantQuota(TenantQuotaHandle account,
                                                     uint64_t bytes) {
         return service_.ChargeTenantQuota(std::move(account), bytes);
@@ -436,6 +443,12 @@ class MasterServiceTestPeer {
         return service_.IsReplicaReadable(replica);
     }
 
+    bool IsObjectProcessing(const std::string& key, const TenantId& tenant_id) {
+        MetadataAccessorRO accessor(
+            &service_, MasterService::MakeObjectIdentity(key, tenant_id));
+        return accessor.Exists() && accessor.InProcessing();
+    }
+
     static std::vector<std::string> KvMediaForMetadata(
         const ObjectMetadata& metadata) {
         return MasterService::KvMediaForMetadata(metadata);
@@ -489,6 +502,11 @@ class MasterServiceTestPeer {
 
     const TenantId& ResolveRequestTenantId(const TenantId& tenant_id) const {
         return service_.ResolveRequestTenantId(tenant_id);
+    }
+
+    auto SnapshotWeightGroup(const WeightRevisionIdentity& identity,
+                             const std::string& group_id) const {
+        return service_.SnapshotWeightGroup(identity, group_id);
     }
 
     size_t RunPromotionCandidateRetry(size_t max_shards_to_scan) {
