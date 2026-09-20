@@ -373,4 +373,17 @@ WeightStoreManager::PersistAndPublishWeightLeaseMutation(
         });
 }
 
+std::unordered_set<std::string>
+WeightStoreManager::SnapshotManagedWeightGroups() const {
+    std::unordered_set<std::string> groups;
+    const auto snapshot = weight_metadata_.ExportSnapshot();
+    groups.reserve(snapshot.metadata.size());
+    for (const auto& metadata : snapshot.metadata) {
+        groups.insert(TenantId(metadata.identity.tenant_id)
+                          .MakeScopedKey(metadata.manifest.payload_group_id));
+    }
+    return groups;
+}
+
+
 }  // namespace mooncake
