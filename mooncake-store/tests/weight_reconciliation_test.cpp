@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "master_metric_manager.h"
@@ -38,6 +40,14 @@ class WeightReconciliationTest : public MasterServiceTest {
             .payload_group_id = {},
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
+            .policy = WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+            .affinity_summary = WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
         });
         EXPECT_TRUE(importing.has_value());
         const auto payload_key = identity.revision + "-payload";
@@ -88,6 +98,10 @@ TEST_F(WeightReconciliationTest, ExpiresLeasesAndAbortsAbandonedImports) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     });
     ASSERT_TRUE(importing.has_value());
     const uint64_t now_ms = std::max(
@@ -119,12 +133,20 @@ TEST_F(WeightReconciliationTest, WorkLimitBoundsAbandonedImportTransitions) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     });
     auto second = service.BeginWeightImport(BeginWeightImportRequest{
         .identity = Identity("step-b"),
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     });
     ASSERT_TRUE(first.has_value());
     ASSERT_TRUE(second.has_value());
@@ -149,6 +171,44 @@ TEST_F(WeightReconciliationTest, WorkLimitBoundsAbandonedImportTransitions) {
     EXPECT_EQ(1, importing);
 }
 
+TEST_F(WeightReconciliationTest,
+       PublicManifestReplicaClearReconcilesToDegraded) {
+    auto config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(100).build();
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    const auto ready =
+        PublishReady(service, context.client_id, "step-public-manifest-clear");
+    const auto manifest_key = ManifestKey(ready.identity);
+    const auto payload_key = ready.identity.revision + "-payload";
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool cleared = false;
+    do {
+        const auto result =
+            service.BatchReplicaClear({manifest_key}, context.client_id, "");
+        ASSERT_TRUE(result.has_value());
+        cleared = result->size() == 1 && result->front() == manifest_key;
+        if (!cleared) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    } while (!cleared && std::chrono::steady_clock::now() < deadline);
+    ASSERT_TRUE(cleared);
+    EXPECT_FALSE(
+        service.ExistKey(manifest_key, TenantId::Default()).value_or(true));
+    EXPECT_TRUE(
+        service.ExistKey(payload_key, TenantId::Default()).value_or(false));
+    const auto reconciled = service.ReconcileWeightRevision(
+        ReconcileWeightRevisionRequest{.identity = ready.identity});
+    EXPECT_TRUE(reconciled.has_value());
+    const auto view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = ready.identity});
+    ASSERT_TRUE(view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DEGRADED, view->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::HOT, view->metadata.residency);
+    EXPECT_DOUBLE_EQ(1.0, view->metadata.observed_hot_ratio);
+}
+
 TEST_F(WeightReconciliationTest, MissingPayloadOrManifestBecomesDegraded) {
     MasterService service;
     [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
@@ -160,21 +220,32 @@ TEST_F(WeightReconciliationTest, MissingPayloadOrManifestBecomesDegraded) {
     ASSERT_TRUE(service.DropWeightGroupMemberForTesting(
         manifest_loss.identity, ManifestKey(manifest_loss.identity)));
 
-    service.RunWeightReconciliationForTesting(
-        std::max(payload_loss.updated_at_ms, manifest_loss.updated_at_ms) + 1,
-        32);
-    for (const auto& metadata : {payload_loss, manifest_loss}) {
-        auto view = service.GetWeightRevision(
-            GetWeightRevisionRequest{.identity = metadata.identity});
-        ASSERT_TRUE(view.has_value());
-        EXPECT_EQ(WeightAvailabilityState::DEGRADED,
-                  view->metadata.availability);
-        EXPECT_EQ(WeightResidencyState::MIXED, view->metadata.residency);
-    }
+    EXPECT_EQ(2, service.RunWeightReconciliationForTesting(
+                     std::max(payload_loss.updated_at_ms,
+                              manifest_loss.updated_at_ms) +
+                         1,
+                     32));
+    auto payload_loss_view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = payload_loss.identity});
+    ASSERT_TRUE(payload_loss_view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DEGRADED,
+              payload_loss_view->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::ABSENT,
+              payload_loss_view->metadata.residency);
+
+    auto manifest_loss_view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = manifest_loss.identity});
+    ASSERT_TRUE(manifest_loss_view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DEGRADED,
+              manifest_loss_view->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::HOT,
+              manifest_loss_view->metadata.residency);
     EXPECT_EQ(2, MasterMetricManager::instance().get_weight_revision_count(
                      "degraded"));
+    EXPECT_EQ(1, MasterMetricManager::instance().get_weight_residency_count(
+                     "absent"));
     EXPECT_EQ(
-        2, MasterMetricManager::instance().get_weight_residency_count("mixed"));
+        1, MasterMetricManager::instance().get_weight_residency_count("hot"));
 }
 
 TEST_F(WeightReconciliationTest, ProjectsLeaseAndOperationMetrics) {

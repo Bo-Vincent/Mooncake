@@ -2543,8 +2543,16 @@ TEST_F(MasterServiceHATest,
                     .payload_count = 1,
                     .logical_bytes = 1024,
                 },
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
@@ -2562,6 +2570,16 @@ TEST_F(MasterServiceHATest,
         .identity = new_identity,
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     EXPECT_FALSE(imported.has_value());
     if (!imported) {
@@ -2619,6 +2637,11 @@ TEST_F(MasterServiceHATest,
             .payload_group_id = {},
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 2,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
     });
 
@@ -2675,12 +2698,24 @@ TEST_F(MasterServiceHATest,
         .revision = "step-100",
         .weight_generation = 7,
     };
-    ASSERT_TRUE(service.BeginWeightImport(BeginWeightImportRequest{
+    auto begin = service.BeginWeightImport(BeginWeightImportRequest{
         .identity = identity,
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
-    }));
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'a'),
+            },
+    });
+    ASSERT_TRUE(begin.has_value())
+        << "error=" << static_cast<int>(begin.error());
 
     OpLogBatchStorage storage(cluster_id, *backend);
     OpLogBatchRecord batch;
@@ -2717,6 +2752,11 @@ TEST_F(MasterServiceHATest,
         .payload_group_id = {},
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 2,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
@@ -2755,6 +2795,11 @@ TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
         .payload_group_id = {},
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 2,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
@@ -2790,6 +2835,11 @@ TEST_F(MasterServiceHATest,
             .identity = identity,
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 2,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
     });
     const bool attempted = backend->WaitForTxnCalls(1);
@@ -2834,6 +2884,11 @@ TEST_F(MasterServiceHATest,
             .identity = identity,
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 2,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
     });
     const bool blocked = backend->WaitForBlockedTxn();
@@ -2884,6 +2939,12 @@ TEST_F(MasterServiceHATest,
             .payload_group_id = {},
             .expected_payload_count = payload_count,
             .expected_logical_bytes = logical_bytes,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = payload_count,
+                    .affinity_digest =
+                        std::string(64, payload_count == 2 ? 'c' : 'd'),
+                },
         });
     };
 
@@ -2946,7 +3007,9 @@ TEST_F(MasterServiceHATest,
                 },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
-            .operation = WeightOperationState::NONE,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
@@ -3026,8 +3089,10 @@ TEST_F(MasterServiceHATest,
                 },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
-            .operation = WeightOperationState::EVICTING,
             .operation_id = 3,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 4,
             .created_at_ms = 100,
             .updated_at_ms = 200,
@@ -3042,13 +3107,15 @@ TEST_F(MasterServiceHATest,
         .operations = {WeightResidencyOperation{
             .operation_id = 3,
             .identity = identity,
-            .operation = WeightOperationState::EVICTING,
+            .kind = WeightOperationKind::MIGRATING,
             .target_residency = WeightResidencyState::COLD,
             .fenced_metadata_generation = 4,
             .started_at_ms = 150,
             .updated_at_ms = 200,
-            .processed_members = 0,
-            .total_members = 2,
+            .processed_units = 0,
+            .total_units = 1,
+            .processed_bytes = 0,
+            .total_bytes = 1024,
             .cursor = {},
             .message = {},
         }},
@@ -3075,6 +3142,10 @@ TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadata) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .affinity_summary = WeightAffinitySummary{
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+        },
     }));
 
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}));
@@ -6010,7 +6081,10 @@ TEST_F(MasterServiceHATest, WeightLeaseShorterTtlRenewalReplaysThroughReader) {
                 },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
-            .operation = WeightOperationState::NONE,
+            .operation_id = std::nullopt,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
@@ -6088,7 +6162,10 @@ TEST_F(MasterServiceHATest, WeightLeaseRenewalRechecksExpiryAfterGroupWait) {
                 },
             .availability = WeightAvailabilityState::READY,
             .residency = WeightResidencyState::HOT,
-            .operation = WeightOperationState::NONE,
+            .operation_id = std::nullopt,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,

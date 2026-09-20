@@ -15,8 +15,8 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <chrono>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -558,6 +558,12 @@ TEST_F(SnapshotChildProcessTest,
     weights.metadata.reserve(kRevisionCount);
     for (size_t i = 0; i < kRevisionCount; ++i) {
         WeightRevisionMetadata metadata;
+        metadata.affinity_count = 1;
+        metadata.affinity_digest = std::string(64, 'c');
+        metadata.policy.preferred_residency = WeightResidencyState::HOT;
+        metadata.policy.migration_mode = WeightMigrationMode::MANUAL;
+        metadata.manifest.payload_count = 1;
+        metadata.manifest.logical_bytes = 1024;
         metadata.identity.name_space = "snapshot-concurrency";
         metadata.identity.resource_id = "model";
         metadata.identity.revision = "revision-" + std::to_string(i);

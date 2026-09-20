@@ -1735,6 +1735,11 @@ MasterService::DeleteWeightRevision(
     return weight_manager_.DeleteWeightRevision(request);
 }
 
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
+    return weight_manager_.UpdateWeightPolicy(request);
+}
+
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,
                                           const std::string& key,
                                           const std::string& group_id) {
@@ -1886,6 +1891,9 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
                                ObjectMetadata& metadata,
                                TenantState& tenant_state,
                                MetadataShardAccessorRW&) -> EvictMemberOutcome {
+        if (metadata.data_type != ObjectDataType::WEIGHT) {
+            return {};
+        }
         const bool has_cold =
             metadata.HasReplica([this](const Replica& replica) {
                 return !replica.is_memory_replica() &&
