@@ -1179,16 +1179,23 @@ class MooncakeStorePyWrapper {
                     config.session_ids->at(index));
             }
         }
-        if (!config.group_ids.has_value()) {
-            return indexed_config;
+        if (config.group_ids.has_value()) {
+            std::vector<std::string> group_ids;
+            group_ids.reserve(original_indices.size());
+            for (size_t index : original_indices) {
+                group_ids.push_back(config.group_ids->at(index));
+            }
+            indexed_config.group_ids = std::move(group_ids);
         }
-
-        std::vector<std::string> group_ids;
-        group_ids.reserve(original_indices.size());
-        for (size_t index : original_indices) {
-            group_ids.push_back(config.group_ids->at(index));
+        if (config.residency_affinity_ids.has_value()) {
+            std::vector<std::string> affinity_ids;
+            affinity_ids.reserve(original_indices.size());
+            for (size_t index : original_indices) {
+                affinity_ids.push_back(
+                    config.residency_affinity_ids->at(index));
+            }
+            indexed_config.residency_affinity_ids = std::move(affinity_ids);
         }
-        indexed_config.group_ids = std::move(group_ids);
         return indexed_config;
     }
 
@@ -1205,19 +1212,29 @@ class MooncakeStorePyWrapper {
                 }
             }
         }
-        if (!config.group_ids.has_value()) {
-            return indexed_config;
-        }
-
-        std::vector<std::string> group_ids;
-        group_ids.reserve(original_indices.size() *
-                          static_cast<size_t>(repeat_count));
-        for (size_t index : original_indices) {
-            for (int i = 0; i < repeat_count; ++i) {
-                group_ids.push_back(config.group_ids->at(index));
+        if (config.group_ids.has_value()) {
+            std::vector<std::string> group_ids;
+            group_ids.reserve(original_indices.size() *
+                              static_cast<size_t>(repeat_count));
+            for (size_t index : original_indices) {
+                for (int i = 0; i < repeat_count; ++i) {
+                    group_ids.push_back(config.group_ids->at(index));
+                }
             }
+            indexed_config.group_ids = std::move(group_ids);
         }
-        indexed_config.group_ids = std::move(group_ids);
+        if (config.residency_affinity_ids.has_value()) {
+            std::vector<std::string> affinity_ids;
+            affinity_ids.reserve(original_indices.size() *
+                                 static_cast<size_t>(repeat_count));
+            for (size_t index : original_indices) {
+                for (int i = 0; i < repeat_count; ++i) {
+                    affinity_ids.push_back(
+                        config.residency_affinity_ids->at(index));
+                }
+            }
+            indexed_config.residency_affinity_ids = std::move(affinity_ids);
+        }
         return indexed_config;
     }
 
@@ -1233,6 +1250,13 @@ class MooncakeStorePyWrapper {
             config.group_ids->size() != key_count) {
             LOG(ERROR) << operation_name
                        << ": group_ids size must match keys size";
+            return std::vector<int>(key_count,
+                                    to_py_ret(ErrorCode::INVALID_PARAMS));
+        }
+        if (config.residency_affinity_ids.has_value() &&
+            config.residency_affinity_ids->size() != key_count) {
+            LOG(ERROR) << operation_name
+                       << ": residency_affinity_ids size must match keys size";
             return std::vector<int>(key_count,
                                     to_py_ret(ErrorCode::INVALID_PARAMS));
         }
@@ -2196,6 +2220,8 @@ PYBIND11_MODULE(_store, m) {
                 config.session_ids.reset();
                 if (ids) config.session_ids = std::move(*ids);
             })
+        .def_readwrite("residency_affinity_ids",
+                       &ReplicateConfig::residency_affinity_ids)
         .def("__str__", [](const ReplicateConfig &config) {
             std::ostringstream oss;
             oss << config;

@@ -65,6 +65,7 @@ TEST(BatchOpLogSnapshotCodecTest, ObjectChunkRoundTripsAndChecksEnvelope) {
     metadata.group_id = "group";
     metadata.hard_pinned = true;
     metadata.session_id = "session-snapshot";
+    metadata.residency_affinity_id = "opaque-affinity-id";
     std::vector<StandbyObjectEntry> objects{
         {.tenant_id = "tenant", .key = "key", .metadata = metadata}};
     auto encoded = EncodeBatchOpLogSnapshotObjectChunk(7, std::move(objects));
@@ -82,6 +83,8 @@ TEST(BatchOpLogSnapshotCodecTest, ObjectChunkRoundTripsAndChecksEnvelope) {
     EXPECT_TRUE(decoded->objects[0].metadata.hard_pinned.value_or(false));
     EXPECT_EQ(decoded->objects[0].metadata.session_id.value_or(""),
               "session-snapshot");
+    EXPECT_EQ("opaque-affinity-id",
+              decoded->objects[0].metadata.residency_affinity_id.value_or(""));
 
     EXPECT_FALSE(DecodeBatchOpLogSnapshotObjectChunk(encoded, 8, 1));
     EXPECT_FALSE(DecodeBatchOpLogSnapshotObjectChunk(encoded, 7, 300000000));
