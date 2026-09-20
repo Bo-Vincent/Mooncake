@@ -83,6 +83,30 @@ void BindWeightRequestTenant(Request& request, const TenantId& tenant_id) {
     }
 }
 
+void BindWeightRequestTenant(BeginWeightUpsertRequest& request,
+                             const TenantId& tenant_id) {
+    request.base_identity.tenant_id = tenant_id.value();
+    request.target_identity.tenant_id = tenant_id.value();
+    request.import.identity.tenant_id = tenant_id.value();
+}
+
+void BindWeightRequestTenant(CommitWeightUpsertRequest& request,
+                             const TenantId& tenant_id) {
+    request.base_identity.tenant_id = tenant_id.value();
+    request.target_identity.tenant_id = tenant_id.value();
+}
+
+void BindWeightRequestTenant(AbortWeightUpsertRequest& request,
+                             const TenantId& tenant_id) {
+    request.base_identity.tenant_id = tenant_id.value();
+    request.target_identity.tenant_id = tenant_id.value();
+}
+
+void BindWeightRequestTenant(GetWeightLineageRequest& request,
+                             const TenantId& tenant_id) {
+    request.identity.tenant_id = tenant_id.value();
+}
+
 template <typename Request, typename Fn>
 auto WithWeightRequestTenant(Request request, std::string_view raw,
                              bool enable_multi_tenants, bool write, Fn&& fn) {
@@ -1782,6 +1806,50 @@ WrappedMasterService::BeginWeightImport(const BeginWeightImportRequest& request,
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
+WrappedMasterService::BeginWeightUpsert(const BeginWeightUpsertRequest& request,
+                                        const std::string& tenant_id) {
+    return WithWeightRequestTenant(
+        request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
+        [this](const auto& bound) {
+            return master_service_.GetWeightStoreManager().BeginWeightUpsert(
+                bound);
+        });
+}
+
+WeightMetadataStore::Result<WeightLineageMetadata>
+WrappedMasterService::CommitWeightUpsert(
+    const CommitWeightUpsertRequest& request, const std::string& tenant_id) {
+    return WithWeightRequestTenant(
+        request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
+        [this](const auto& bound) {
+            return master_service_.GetWeightStoreManager().CommitWeightUpsert(
+                bound);
+        });
+}
+
+WeightMetadataStore::Result<WeightLineageMetadata>
+WrappedMasterService::AbortWeightUpsert(const AbortWeightUpsertRequest& request,
+                                        const std::string& tenant_id) {
+    return WithWeightRequestTenant(
+        request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
+        [this](const auto& bound) {
+            return master_service_.GetWeightStoreManager().AbortWeightUpsert(
+                bound);
+        });
+}
+
+WeightMetadataStore::Result<WeightLineageMetadata>
+WrappedMasterService::GetWeightLineage(const GetWeightLineageRequest& request,
+                                       const std::string& tenant_id) {
+    return WithWeightRequestTenant(
+        request, tenant_id, master_service_.IsTenantQuotaEnabled(), false,
+        [this](const auto& bound) {
+            return master_service_.GetWeightStoreManager().GetWeightLineage(
+                bound);
+        });
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
 WrappedMasterService::CommitWeightImport(
     const CommitWeightImportRequest& request, const std::string& tenant_id) {
     return WithWeightRequestTenant(
@@ -2093,6 +2161,15 @@ void RegisterRpcService(
         .register_handler<&mooncake::WrappedMasterService::MarkTaskToComplete>(
             &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::BeginWeightImport>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::BeginWeightUpsert>(
+        &wrapped_master_service);
+    server
+        .register_handler<&mooncake::WrappedMasterService::CommitWeightUpsert>(
+            &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::AbortWeightUpsert>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::GetWeightLineage>(
         &wrapped_master_service);
     server
         .register_handler<&mooncake::WrappedMasterService::CommitWeightImport>(

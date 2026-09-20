@@ -156,5 +156,48 @@ TEST(WeightManagementRpcTest, RejectsUnboundedPaginationExactly) {
     EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, Domain(list).error());
 }
 
+TEST(WeightManagementRpcTest, RegistersUpsertApisAndBindsLineageTenant) {
+    InProcMaster server;
+    ASSERT_TRUE(server.Start(InProcMasterConfigBuilder().build()));
+    MasterClient client(generate_uuid(), nullptr, "default");
+    ASSERT_EQ(ErrorCode::OK, client.Connect(server.master_address()));
+
+    auto base = Identity();
+    auto target = base;
+    target.weight_generation = 8;
+    auto begin = client.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "request-1",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base,
+        .expected_base_metadata_generation = 2,
+        .target_identity = target,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'c'),
+                    },
+            },
+    });
+    ASSERT_FALSE(Domain(begin).has_value());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(begin).error());
+
+    auto lineage = client.GetWeightLineage(GetWeightLineageRequest{
+        .identity = ToWeightLineageIdentity(base),
+    });
+    ASSERT_FALSE(Domain(lineage).has_value());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(lineage).error());
+}
+
 }  // namespace
 }  // namespace mooncake::testing

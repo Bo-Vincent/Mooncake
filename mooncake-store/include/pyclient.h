@@ -522,6 +522,22 @@ class PyClient {
         const BeginWeightImportRequest &) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
+    virtual WeightRpcResult<WeightRevisionMetadata> begin_weight_upsert(
+        const BeginWeightUpsertRequest &) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    virtual WeightRpcResult<WeightLineageMetadata> commit_weight_upsert(
+        const CommitWeightUpsertRequest &) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    virtual WeightRpcResult<WeightLineageMetadata> abort_weight_upsert(
+        const AbortWeightUpsertRequest &) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    virtual WeightRpcResult<WeightLineageMetadata> get_weight_lineage(
+        const GetWeightLineageRequest &) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
     virtual WeightRpcResult<WeightRevisionMetadata> commit_weight_import(
         const CommitWeightImportRequest &) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
