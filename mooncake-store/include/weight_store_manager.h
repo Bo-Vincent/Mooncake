@@ -119,6 +119,9 @@ class WeightStoreManager {
         const WeightRevisionMetadata& revision, size_t* member_budget);
     void ForgetReconciliationCursor(const WeightRevisionIdentity& identity);
     WeightMetadataStore::Result<WeightResidencyOperation>
+    StartWeightResidencyOperationLocked(
+        const StartWeightResidencyOperationRequest& request, uint64_t now_ms);
+    WeightMetadataStore::Result<WeightResidencyOperation>
     PersistAndPublishWeightOperationMutation(
         const WeightOperationMutation& mutation);
     WeightMetadataStore::Result<WeightRevisionLease>
