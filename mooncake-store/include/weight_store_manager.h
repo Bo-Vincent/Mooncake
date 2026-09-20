@@ -28,6 +28,7 @@ class WeightStoreManager {
         return weight_metadata_.RestoreSnapshot(snapshot);
     }
     void Clear() { weight_metadata_.Clear(); }
+    bool RecordOffloadFailures(std::vector<uint64_t> operation_ids);
     bool HasActiveLease(const WeightRevisionIdentity& identity,
                         uint64_t generation, uint64_t now_ms) const {
         return weight_metadata_.HasActiveLease(identity, generation, now_ms);
