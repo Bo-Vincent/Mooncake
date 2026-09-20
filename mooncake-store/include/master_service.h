@@ -175,6 +175,22 @@ class MasterService {
 
     WeightMetadataStore::Result<WeightRevisionMetadata> UpdateWeightPolicy(
         const UpdateWeightPolicyRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request) {
+        return weight_manager_.BeginWeightUpsert(request);
+    }
+    WeightMetadataStore::Result<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request) {
+        return weight_manager_.CommitWeightUpsert(request);
+    }
+    WeightMetadataStore::Result<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request) {
+        return weight_manager_.AbortWeightUpsert(request);
+    }
+    WeightMetadataStore::Result<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request) const {
+        return weight_manager_.GetWeightLineage(request);
+    }
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
     WeightStoreManager& GetWeightStoreManager() { return weight_manager_; }
