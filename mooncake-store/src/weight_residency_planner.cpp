@@ -198,7 +198,9 @@ std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     uint64_t cooldown_ms) {
     if (metadata.availability != WeightAvailabilityState::READY ||
         metadata.policy.migration_mode != WeightMigrationMode::AUTO ||
-        metadata.operation_id.has_value() || active_lease_count != 0 ||
+        metadata.operation_id.has_value() ||
+        (active_lease_count != 0 &&
+         signal != WeightAutoMigrationSignal::ACCESS) ||
         !ValidateWeightStoragePolicy(metadata.policy).ok() ||
         now_ms < metadata.updated_at_ms ||
         now_ms - metadata.updated_at_ms < cooldown_ms) {
