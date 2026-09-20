@@ -175,6 +175,7 @@ class MasterService {
 
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
+    WeightStoreManager& GetWeightStoreManager() { return weight_manager_; }
     size_t RunWeightReconciliationForTesting(uint64_t now_ms,
                                              size_t limit = 32) {
         return weight_manager_.ReconcileWeightMetadataStoreOnce(now_ms, limit);
