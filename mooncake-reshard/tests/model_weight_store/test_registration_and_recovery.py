@@ -25,11 +25,11 @@ from .helpers import (
 def test_register_invalid_params_is_not_treated_as_already_registered() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=1)
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
     store.register_result = -600
 
     with pytest.raises(WeightStoreError, match="register_buffer failed"):
-        weight_store.upload(plan, sources[0].placement, sources[0].binding)
+        weight_store._weight_put_payload(plan, sources[0].placement, sources[0].binding)
 
 
 def test_registration_deduplicates_exact_aliases_with_same_address() -> None:
@@ -95,9 +95,9 @@ def test_registration_deduplicates_exact_aliases_with_same_address() -> None:
         ),
     )
     store, weight_store = make_weight_store()
-    plan = weight_store.plan_upload(source.placement, source.bindings)
+    plan = weight_store._weight_put_plan(source.placement, source.bindings)
 
-    weight_store.upload(plan, source.placement, source.binding)
+    weight_store._weight_put_payload(plan, source.placement, source.binding)
 
     assert store.register_args == [(address, 8)]
 
@@ -105,27 +105,29 @@ def test_registration_deduplicates_exact_aliases_with_same_address() -> None:
 def test_manifest_put_failure_keeps_payloads_for_an_idempotent_retry() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
     receipts = upload_all(weight_store, plan, sources)
     store.fail_key = plan.manifest.manifest_key
 
     with pytest.raises(WeightStoreError, match="manifest put failed"):
-        weight_store.commit_upload(plan, receipts)
+        weight_store._weight_put_commit(plan, receipts)
 
     assert all(receipt.object_key in store.objects for receipt in receipts)
     store.fail_key = None
-    assert weight_store.commit_upload(plan, receipts) == plan.manifest
+    assert weight_store._weight_put_commit(plan, receipts) == plan.manifest
 
 
 def test_commit_recovers_when_manifest_response_is_lost_after_write() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
     receipts = upload_all(weight_store, plan, sources)
     store.fail_after_write_key = plan.manifest.manifest_key
 
-    assert weight_store.commit_upload(plan, receipts) == plan.manifest
-    assert weight_store.load_manifest(plan.manifest.manifest_key) == plan.manifest
+    assert weight_store._weight_put_commit(plan, receipts) == plan.manifest
+    assert (
+        weight_store._weight_get_manifest(plan.manifest.manifest_key) == plan.manifest
+    )
     assert all(receipt.object_key in store.objects for receipt in receipts)
 
 
@@ -136,12 +138,12 @@ def test_upload_unregisters_every_buffer_without_deleting_unowned_payloads() -> 
         sources,
         instance_id="combined-source",
     )
-    plan = weight_store.plan_upload(combined.placement, combined.bindings)
+    plan = weight_store._weight_put_plan(combined.placement, combined.bindings)
     first_address = combined.binding.fragments[0].address
     store.unregister_results[first_address] = -9
 
     with pytest.raises(WeightStoreError, match="unregister_buffer failed"):
-        weight_store.upload(plan, combined.placement, combined.binding)
+        weight_store._weight_put_payload(plan, combined.placement, combined.binding)
 
     assert store.unregister_calls == 2
     assert all(
@@ -157,12 +159,12 @@ def test_unregister_failure_does_not_mask_payload_transfer_failure() -> None:
         sources,
         instance_id="combined-source",
     )
-    plan = weight_store.plan_upload(combined.placement, combined.bindings)
+    plan = weight_store._weight_put_plan(combined.placement, combined.bindings)
     store.fail_key = plan.operations[1].target.object_key
     store.unregister_results[combined.binding.fragments[0].address] = -9
 
     with pytest.raises(WeightStoreError) as error:
-        weight_store.upload(plan, combined.placement, combined.binding)
+        weight_store._weight_put_payload(plan, combined.placement, combined.binding)
 
     assert "batch_put_from failed" in str(error.value)
     assert "unregister_buffer failed" in str(error.value)
@@ -178,14 +180,14 @@ def test_unregister_attempts_every_buffer_when_cleanup_raises() -> None:
         sources,
         instance_id="combined-source",
     )
-    plan = weight_store.plan_upload(combined.placement, combined.bindings)
+    plan = weight_store._weight_put_plan(combined.placement, combined.bindings)
     first, second = combined.binding.fragments
     store.fail_key = plan.operations[1].target.object_key
     store.unregister_exceptions[first.address] = RuntimeError("unregister exploded")
     store.unregister_results[second.address] = -9
 
     with pytest.raises(WeightStoreError) as error:
-        weight_store.upload(plan, combined.placement, combined.binding)
+        weight_store._weight_put_payload(plan, combined.placement, combined.binding)
 
     assert "batch_put_from failed" in str(error.value)
     assert "unregister exploded" in str(error.value)
