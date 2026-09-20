@@ -1858,6 +1858,17 @@ WrappedMasterService::ListWeightRevisions(
         });
 }
 
+WeightMetadataStore::Result<WeightRevisionMetadata>
+WrappedMasterService::UpdateWeightPolicy(
+    const UpdateWeightPolicyRequest& request, const std::string& tenant_id) {
+    return WithWeightRequestTenant(
+        request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
+        [this](const auto& bound) {
+            return master_service_.GetWeightStoreManager().UpdateWeightPolicy(
+                bound);
+        });
+}
+
 WeightMetadataStore::Result<WeightRevisionLease>
 WrappedMasterService::AcquireWeightRevisionLease(
     const AcquireWeightRevisionLeaseRequest& request,
@@ -2129,6 +2140,9 @@ void RegisterRpcService(
         &wrapped_master_service);
     server
         .register_handler<&mooncake::WrappedMasterService::ListWeightRevisions>(
+            &wrapped_master_service);
+    server
+        .register_handler<&mooncake::WrappedMasterService::UpdateWeightPolicy>(
             &wrapped_master_service);
     server.register_handler<
         &mooncake::WrappedMasterService::AcquireWeightRevisionLease>(
