@@ -175,6 +175,15 @@ class MasterService {
 
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
+    size_t RunWeightReconciliationForTesting(uint64_t now_ms,
+                                             size_t limit = 32) {
+        return weight_manager_.ReconcileWeightMetadataStoreOnce(now_ms, limit);
+    }
+    bool DropWeightGroupMemberForTesting(
+        const WeightRevisionIdentity& identity, const std::string& key) {
+        return RemoveObject(key, TenantId(identity.tenant_id), true, true)
+            .has_value();
+    }
     WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
         const CommitWeightImportRequest& request);
     WeightMetadataStore::Result<WeightRevisionMetadata> AbortWeightImport(
