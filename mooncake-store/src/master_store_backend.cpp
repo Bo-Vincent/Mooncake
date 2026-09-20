@@ -6,9 +6,19 @@
 
 namespace mooncake {
 
-void MasterStoreBackend::UnregisterGroupMember(
-    const TenantId& tenant_id, const std::string& key,
-    const std::string& group_id) {
+WeightStoreMemoryPressure MasterStoreBackend::GetMemoryPressure() const {
+    return {
+        .used_ratio = master_.segment_manager_.GetMemoryUsage().used_ratio(),
+        .high_watermark = master_.eviction_high_watermark_ratio_,
+        .eviction_ratio = master_.eviction_ratio_,
+        .eviction_requested =
+            master_.need_mem_eviction_.load(std::memory_order_relaxed),
+    };
+}
+
+void MasterStoreBackend::UnregisterGroupMember(const TenantId& tenant_id,
+                                               const std::string& key,
+                                               const std::string& group_id) {
     master_.UnregisterGroupMember(tenant_id, key, group_id);
 }
 
