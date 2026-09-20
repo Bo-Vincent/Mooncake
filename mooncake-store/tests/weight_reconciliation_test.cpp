@@ -31,23 +31,25 @@ class WeightReconciliationTest : public MasterServiceTest {
                std::to_string(identity.weight_generation) + "/manifest";
     }
 
-    WeightRevisionMetadata PublishReady(MasterService& service,
-                                        const UUID& client_id,
-                                        std::string revision) {
+    WeightRevisionMetadata PublishReady(
+        MasterService& service, const UUID& client_id, std::string revision,
+        WeightStoragePolicy policy = {
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        }) {
         const auto identity = Identity(std::move(revision));
         auto importing = service.BeginWeightImport(BeginWeightImportRequest{
             .identity = identity,
             .payload_group_id = {},
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
-            .policy = WeightStoragePolicy{
-                .preferred_residency = WeightResidencyState::HOT,
-                .migration_mode = WeightMigrationMode::MANUAL,
-            },
-            .affinity_summary = WeightAffinitySummary{
-                .affinity_count = 1,
-                .affinity_digest = std::string(64, 'c'),
-            },
+            .policy = policy,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 1,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
         EXPECT_TRUE(importing.has_value());
         const auto payload_key = identity.revision + "-payload";
@@ -344,6 +346,67 @@ TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsColdResidency) {
 
 TEST_F(WeightReconciliationTest, PublicAllPayloadLossBecomesAbsent) {
     CheckPublicPayloadLoss(2, false, WeightResidencyState::ABSENT, 0.0);
+}
+
+TEST_F(WeightReconciliationTest,
+       AutoPressurePersistsOperationBeforePhysicalMigration) {
+    MasterServiceConfig config;
+    config.eviction_high_watermark_ratio = 0.0;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    auto ready =
+        PublishReady(service, context.client_id, "step-auto-pressure",
+                     WeightStoragePolicy{
+                         .preferred_residency = WeightResidencyState::HOT,
+                         .mixed_hot_ratio = 0.5,
+                         .migration_mode = WeightMigrationMode::AUTO,
+                     });
+
+    EXPECT_EQ(1, service.RunWeightReconciliationForTesting(
+                     ready.updated_at_ms + 30'001, 1));
+
+    auto view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = ready.identity});
+    ASSERT_TRUE(view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::READY, view->metadata.availability);
+    EXPECT_EQ(WeightResidencyState::HOT, view->metadata.residency);
+    ASSERT_TRUE(view->metadata.operation_id.has_value());
+    auto operation = service.QueryWeightOperation(QueryWeightOperationRequest{
+        .operation_id = *view->metadata.operation_id,
+    });
+    ASSERT_TRUE(operation.has_value());
+    EXPECT_EQ(WeightResidencyState::COLD, operation->target_residency);
+    EXPECT_EQ(0, operation->processed_units);
+}
+
+TEST_F(WeightReconciliationTest, AutoPressureSkipsActiveRevisionLease) {
+    MasterServiceConfig config;
+    config.eviction_high_watermark_ratio = 0.0;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    auto ready =
+        PublishReady(service, context.client_id, "step-auto-leased",
+                     WeightStoragePolicy{
+                         .preferred_residency = WeightResidencyState::HOT,
+                         .mixed_hot_ratio = 0.5,
+                         .migration_mode = WeightMigrationMode::AUTO,
+                     });
+    auto lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .holder = "reader",
+            .ttl_ms = 60'000,
+        });
+    ASSERT_TRUE(lease.has_value());
+
+    service.RunWeightReconciliationForTesting(ready.updated_at_ms + 30'001, 1);
+
+    auto view = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = ready.identity});
+    ASSERT_TRUE(view.has_value());
+    EXPECT_EQ(1, view->active_lease_count);
+    EXPECT_FALSE(view->metadata.operation_id.has_value());
 }
 
 TEST_F(WeightReconciliationTest, ExpiresLeasesAndAbortsAbandonedImports) {

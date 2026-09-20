@@ -851,9 +851,8 @@ WeightStoreManager::SnapshotManagedWeightGroups() const {
     return weight_metadata_.SnapshotManagedWeightGroups();
 }
 
-
 size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
-                                                 size_t limit) {
+                                                            size_t limit) {
     if (limit == 0) {
         return 0;
     }
@@ -883,15 +882,40 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
     }
 
-    const auto snapshot = weight_metadata_.ExportSnapshot();
+    constexpr uint64_t kWeightMigrationCooldownMs = 30'000;
+    const auto pressure = backend_.GetMemoryPressure();
+    auto snapshot = weight_metadata_.ExportSnapshot();
+    const double memory_used_ratio =
+        pressure.used_ratio;
+    const bool memory_pressure =
+        memory_used_ratio > pressure.high_watermark ||
+        pressure.eviction_requested;
+    const double memory_low_watermark =
+        std::max(0.0, pressure.high_watermark - pressure.eviction_ratio);
+    const bool capacity_available =
+        !memory_pressure && memory_used_ratio < memory_low_watermark;
+    if (memory_pressure) {
+        std::sort(snapshot.metadata.begin(), snapshot.metadata.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      if (lhs.updated_at_ms != rhs.updated_at_ms) {
+                          return lhs.updated_at_ms < rhs.updated_at_ms;
+                      }
+                      if (lhs.manifest.logical_bytes !=
+                          rhs.manifest.logical_bytes) {
+                          return lhs.manifest.logical_bytes >
+                                 rhs.manifest.logical_bytes;
+                      }
+                      return lhs.identity < rhs.identity;
+                  });
+    }
     const size_t revision_count = snapshot.metadata.size();
     const size_t start = revision_count == 0
                              ? 0
                              : weight_reconciliation_offset_.fetch_add(
                                    std::max<size_t>(limit, 1)) %
                                    revision_count;
-    for (size_t examined = 0;
-         examined < revision_count && actions < limit; ++examined) {
+    for (size_t examined = 0; examined < revision_count && actions < limit;
+         ++examined) {
         const auto& metadata =
             snapshot.metadata[(start + examined) % revision_count];
         if (metadata.availability == WeightAvailabilityState::DELETED) {
@@ -919,6 +943,42 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
             continue;
         }
 
+        std::optional<WeightAutoMigrationSignal> auto_signal;
+        if (memory_pressure) {
+            auto_signal = WeightAutoMigrationSignal::MEMORY_PRESSURE;
+        } else if (capacity_available) {
+            auto_signal = WeightAutoMigrationSignal::CAPACITY_AVAILABLE;
+        }
+        if (auto_signal.has_value() &&
+            metadata.availability == WeightAvailabilityState::READY) {
+            auto current = weight_metadata_.Get(metadata.identity, now_ms);
+            if (current) {
+                auto target = PlanAutomaticWeightMigration(
+                    current->metadata, current->active_lease_count,
+                    *auto_signal, now_ms, kWeightMigrationCooldownMs);
+                if (target.has_value()) {
+                    auto started = StartWeightResidencyOperation(
+                        StartWeightResidencyOperationRequest{
+                            .identity = metadata.identity,
+                            .expected_metadata_generation =
+                                current->metadata.metadata_generation,
+                            .target_residency = target->residency,
+                            .mixed_hot_ratio = target->mixed_hot_ratio,
+                        });
+                    if (started) {
+                        ++actions;
+                        continue;
+                    }
+                    if (started.error() !=
+                            WeightManagementError::STALE_GENERATION &&
+                        started.error() != WeightManagementError::BUSY) {
+                        MasterMetricManager::instance()
+                            .inc_weight_reconciliation_failures();
+                    }
+                }
+            }
+        }
+
         WeightMetadataStore::Result<WeightRevisionMetadata> reconciled =
             metadata.availability == WeightAvailabilityState::DELETING
                 ? DeleteWeightRevision(DeleteWeightRevisionRequest{
@@ -926,13 +986,13 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                       .expected_metadata_generation =
                           metadata.metadata_generation,
                   })
-                : ReconcileWeightRevision(
-                      ReconcileWeightRevisionRequest{
-                          .identity = metadata.identity,
-                      });
+                : ReconcileWeightRevision(ReconcileWeightRevisionRequest{
+                      .identity = metadata.identity,
+                  });
         if (reconciled) {
             ++actions;
-        } else if (reconciled.error() != WeightManagementError::STALE_GENERATION) {
+        } else if (reconciled.error() !=
+                   WeightManagementError::STALE_GENERATION) {
             MasterMetricManager::instance()
                 .inc_weight_reconciliation_failures();
         }
