@@ -787,12 +787,23 @@ WeightStoreManager::DeleteWeightRevision(
                          return lhs != deleting->manifest.manifest_key &&
                                 rhs == deleting->manifest.manifest_key;
                      });
+    constexpr size_t kWeightDeleteBatchSize = 64;
+    size_t processed = 0;
     for (const auto& key : keys) {
-        auto removed =
-            backend_.RemoveObject(key, TenantId(request.identity.tenant_id), true, true);
-        if (!removed && removed.error() != ErrorCode::OBJECT_NOT_FOUND) {
-            return tl::make_unexpected(WeightManagementError::BUSY);
+        if (processed == kWeightDeleteBatchSize) {
+            break;
         }
+        auto removed = backend_.RemoveObject(
+            key, TenantId(request.identity.tenant_id), true, true);
+        if (!removed) {
+            if (removed.error() != ErrorCode::OBJECT_NOT_FOUND) {
+                return tl::make_unexpected(WeightManagementError::BUSY);
+            }
+            backend_.UnregisterGroupMember(TenantId(request.identity.tenant_id),
+                                           key,
+                                           deleting->manifest.payload_group_id);
+        }
+        ++processed;
     }
     group_operation_lock.unlock();
     return ReconcileWeightRevision(
