@@ -17,8 +17,8 @@ class WeightStoreManager {
     friend class test::MasterServiceTestPeer;
 
    public:
-    explicit WeightStoreManager(WeightStoreBackend& backend)
-        : backend_(backend) {}
+    explicit WeightStoreManager(WeightStoreBackend& backend,
+                                WeightStoragePolicy policy = {});
 
     WeightMetadataSnapshot ExportSnapshot() const {
         return weight_metadata_.ExportSnapshot();
@@ -91,6 +91,7 @@ class WeightStoreManager {
         uint64_t expected_affinity_count) const;
 
     WeightStoreBackend& backend_;
+    const WeightStoragePolicy default_weight_storage_policy_;
     WeightMetadataStore weight_metadata_;
     std::array<std::mutex, 4096> group_locks_;
     std::atomic<size_t> weight_reconciliation_offset_{0};
