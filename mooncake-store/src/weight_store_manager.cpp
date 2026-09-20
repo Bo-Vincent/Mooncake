@@ -284,12 +284,38 @@ WeightStoreManager::AcquireWeightRevisionLease(
     if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
-    [[maybe_unused]] auto operation_lock = LockGroup(request.identity);
+    [[maybe_unused]] auto group_operation_lock =
+        LockGroup(request.identity);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
-    auto mutation = weight_metadata_.PrepareAcquireLease(request, now_ms);
+    auto normalized = request;
+    auto current = weight_metadata_.Get(request.identity, now_ms);
+    if (current && current->metadata.metadata_generation ==
+                       request.expected_metadata_generation) {
+        auto target = PlanAutomaticWeightMigration(
+            current->metadata, current->active_lease_count,
+            WeightAutoMigrationSignal::ACCESS, now_ms,
+            weight_migration_cooldown_ms_);
+        if (target.has_value()) {
+            auto started = StartWeightResidencyOperationLocked(
+                StartWeightResidencyOperationRequest{
+                    .identity = request.identity,
+                    .expected_metadata_generation =
+                        current->metadata.metadata_generation,
+                    .target_residency = target->residency,
+                    .mixed_hot_ratio = target->mixed_hot_ratio,
+                },
+                now_ms);
+            if (!started) {
+                return tl::make_unexpected(started.error());
+            }
+            normalized.expected_metadata_generation =
+                started->fenced_metadata_generation;
+        }
+    }
+    auto mutation = weight_metadata_.PrepareAcquireLease(normalized, now_ms);
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
@@ -416,6 +442,12 @@ WeightStoreManager::StartWeightResidencyOperation(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
+    return StartWeightResidencyOperationLocked(request, now_ms);
+}
+
+WeightMetadataStore::Result<WeightResidencyOperation>
+WeightStoreManager::StartWeightResidencyOperationLocked(
+    const StartWeightResidencyOperationRequest& request, uint64_t now_ms) {
     auto mutation = weight_metadata_.PrepareStartOperation(request, now_ms);
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
