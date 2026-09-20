@@ -84,6 +84,9 @@ class StandbyMetadataStore final : public MetadataStore {
     bool PutWeightOperation(const WeightResidencyOperation& operation) override;
     std::optional<WeightResidencyOperation> GetWeightOperation(
         uint64_t operation_id) const override;
+    bool PutWeightLineage(const WeightLineageMetadata& lineage) override;
+    std::optional<WeightLineageMetadata> GetWeightLineage(
+        const WeightLineageIdentity& identity) const override;
     bool RestoreWeightMetadata(const WeightMetadataSnapshot& snapshot);
     WeightMetadataSnapshot SnapshotWeightMetadata() const;
 
@@ -103,6 +106,7 @@ class StandbyMetadataStore final : public MetadataStore {
     std::unordered_map<uint64_t, WeightRevisionLease> weight_leases_;
     std::unordered_map<uint64_t, WeightRevisionLease> weight_lease_tombstones_;
     std::unordered_map<uint64_t, WeightResidencyOperation> weight_operations_;
+    std::map<WeightLineageIdentity, WeightLineageMetadata> weight_lineages_;
     uint64_t next_weight_lease_id_{1};
     uint64_t next_weight_operation_id_{1};
 };
