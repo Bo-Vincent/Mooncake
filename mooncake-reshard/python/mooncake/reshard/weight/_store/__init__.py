@@ -15,8 +15,7 @@ from .snapshot import (
 from .writer import (
     WeightStoreWriter,
 )
-from .entrypoint import begin_weight_snapshot
-from .upload import WeightUploadService, plan_weight_upload
+from .upload import WeightUploadService
 
 __all__ = [
     "PayloadStoreOperations",
@@ -28,10 +27,8 @@ __all__ = [
     "WeightSnapshotAdapter",
     "WeightSnapshotDescriptor",
     "WeightStoreWriter",
-    "begin_weight_snapshot",
     "StoreRegistrationLease",
     "WeightUploadService",
     "WeightUploadTransaction",
     "WeightUploadPlan",
-    "plan_weight_upload",
 ]
