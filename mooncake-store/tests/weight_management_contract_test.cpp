@@ -136,6 +136,7 @@ TEST(WeightManagementContractTest, DefinesGenerationAwareUpsertContract) {
     };
     EXPECT_TRUE(ValidateWeightLineageIdentity(lineage).ok());
     EXPECT_EQ(lineage, ToWeightLineageIdentity(ValidIdentity()));
+    EXPECT_FALSE(MakeWeightLineageMetadataKey(lineage).empty());
 }
 
 TEST(WeightManagementContractTest, ParsesWeightPolicyConfigStrictly) {
