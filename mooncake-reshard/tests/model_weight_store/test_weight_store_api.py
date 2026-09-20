@@ -11,14 +11,17 @@ def test_managed_weight_store_uses_store_aligned_api_names() -> None:
         "weight_get_metadata",
         "weight_get_size",
         "weight_list",
-        "weight_update",
+        "weight_update_policy",
+        "weight_upsert",
         "weight_migrate",
         "weight_get_operation",
         "weight_remove",
     }
 
-    assert public_methods <= set(dir(WeightStore))
-    assert "begin_managed_weight_snapshot" not in dir(WeightStore)
-    assert "get_weight_revision" not in dir(WeightStore)
-    assert "list_weight_revisions" not in dir(WeightStore)
-    assert "load_weight_revision" not in dir(WeightStore)
+    actual_methods = {
+        name
+        for name in dir(WeightStore)
+        if not name.startswith("_") and callable(getattr(WeightStore, name))
+    }
+
+    assert actual_methods == public_methods
