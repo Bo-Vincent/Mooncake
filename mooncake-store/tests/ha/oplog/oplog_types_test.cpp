@@ -30,6 +30,29 @@ TEST(OpLogTypesTest, WeightOperationNumbersAppendWithoutRenumbering) {
     EXPECT_EQ(9, static_cast<int>(OpType::WEIGHT_METADATA_DELETE));
     EXPECT_EQ(10, static_cast<int>(OpType::WEIGHT_LEASE_UPSERT));
     EXPECT_EQ(11, static_cast<int>(OpType::WEIGHT_LEASE_DELETE));
+    EXPECT_EQ(12, static_cast<int>(OpType::WEIGHT_LINEAGE_UPSERT));
+}
+
+TEST(OpLogTypesTest, WeightLineageUpsertRoundTrips) {
+    const WeightLineageUpsertOp upsert{
+        .lineage =
+            WeightLineageMetadata{
+                .identity =
+                    WeightLineageIdentity{
+                        .tenant_id = "tenant-a",
+                        .name_space = "production",
+                        .resource_id = "llama-70b",
+                        .revision = "step-100",
+                    },
+                .lineage_metadata_generation = 1,
+                .committed_weight_generation = 7,
+            },
+    };
+    const auto bytes = struct_pack::serialize(upsert);
+    WeightLineageUpsertOp decoded;
+    ASSERT_EQ(struct_pack::errc::ok,
+              struct_pack::deserialize_to(decoded, bytes));
+    EXPECT_EQ(upsert, decoded);
 }
 
 TEST(OpLogTypesTest, WeightDeleteTombstonesRoundTrip) {
