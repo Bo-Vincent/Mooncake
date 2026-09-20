@@ -162,8 +162,17 @@ TEST_F(MasterServiceWeightManagementTest,
     auto importing = service.BeginWeightImport(request);
 
     ASSERT_FALSE(importing.has_value());
-    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE,
-              importing.error());
+    EXPECT_EQ(WeightManagementError::POLICY_UNSATISFIABLE, importing.error());
+}
+
+TEST_F(MasterServiceWeightManagementTest, RejectsZeroMigrationBatchLimits) {
+    MasterServiceConfig config;
+    config.weight_migration_max_members_per_round = 0;
+    EXPECT_THROW(MasterService service(config), std::invalid_argument);
+
+    config.weight_migration_max_members_per_round = 1;
+    config.weight_migration_max_bytes_per_round = 0;
+    EXPECT_THROW(MasterService service(config), std::invalid_argument);
 }
 
 TEST_F(MasterServiceWeightManagementTest,
