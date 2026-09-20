@@ -108,6 +108,7 @@ TEST(StandbyMetadataStoreTest, WeightMetadataSnapshotRoundTripsCompleteState) {
             .metadata_generation = 4,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
         }},
         .leases = {WeightRevisionLease{
             .lease_id = 5,
