@@ -75,6 +75,14 @@ class WeightStoreManager {
 
     WeightMetadataStore::Result<WeightRevisionMetadata> UpdateWeightPolicy(
         const UpdateWeightPolicyRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
     WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
@@ -87,6 +95,17 @@ class WeightStoreManager {
     ListWeightRevisions(const ListWeightRevisionsRequest& request) const;
 
    private:
+    std::unique_lock<std::mutex> LockLineage(
+        const WeightLineageIdentity& identity);
+    WeightMetadataStore::Result<WeightLineageMetadata>
+    PersistAndPublishWeightLineageMutation(
+        const WeightLineageMutation& mutation);
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    DeleteWeightRevisionInternal(const DeleteWeightRevisionRequest& request,
+                                 bool allow_active_upsert);
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    ReconcileWeightRevisionInternal(
+        const ReconcileWeightRevisionRequest& request);
     WeightMetadataStore::Result<WeightResidencyOperation>
     StartWeightResidencyOperationLocked(
         const StartWeightResidencyOperationRequest& request, uint64_t now_ms);
@@ -111,6 +130,7 @@ class WeightStoreManager {
     WeightMetadataStore weight_metadata_;
     std::shared_mutex mutation_mutex_;
     std::array<std::mutex, 4096> group_locks_;
+    std::array<std::mutex, 4096> lineage_locks_;
     std::atomic<size_t> weight_reconciliation_offset_{0};
 };
 
