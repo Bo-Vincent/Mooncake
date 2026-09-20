@@ -472,7 +472,7 @@ class WeightStore:
         policy: WeightStoragePolicy,
         expected_metadata_generation: int,
     ) -> WeightRevisionMetadata:
-        return self.store.weight_update(
+        return self.store.weight_update_policy(
             identity,
             expected_metadata_generation=expected_metadata_generation,
             policy=policy,
