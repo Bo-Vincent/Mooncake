@@ -178,7 +178,8 @@ bool MasterService::DefaultProbeNofSegment(const std::string& te_endpoint,
 MasterService::MasterService() : MasterService(MasterServiceConfig()) {}
 
 MasterService::MasterService(const MasterServiceConfig& config)
-    : weight_manager_(weight_backend_, config.default_weight_storage_policy),
+    : weight_manager_(weight_backend_, config.default_weight_storage_policy,
+                      config.weight_migration_cooldown_ms),
       graceful_unmount_scheduler_(
           [this](const GracefulUnmountDeadlineRecord& record) {
               auto result =
