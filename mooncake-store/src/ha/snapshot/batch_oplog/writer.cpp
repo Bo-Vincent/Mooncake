@@ -103,8 +103,14 @@ tl::expected<std::string, std::string> BatchOpLogSnapshotWriter::Write(
     }
 
     ha::BatchOpLogSnapshotManifest manifest;
-    const bool has_weight_state =
-        capture.weight_metadata != WeightMetadataSnapshot{};
+    const auto& weight_metadata = capture.weight_metadata;
+    const bool has_weight_state = !weight_metadata.metadata.empty() ||
+                                  !weight_metadata.leases.empty() ||
+                                  !weight_metadata.operations.empty() ||
+                                  weight_metadata.next_lease_id != 1 ||
+                                  weight_metadata.next_operation_id != 1 ||
+                                  (weight_metadata.lineages.has_value() &&
+                                   !weight_metadata.lineages.value().empty());
     if (has_weight_state) {
         manifest.schema_version = ha::kBatchOpLogWeightSnapshotSchemaVersion;
         manifest.snapshot_format = ha::kBatchOpLogWeightSnapshotFormat;
