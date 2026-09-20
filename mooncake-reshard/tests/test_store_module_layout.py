@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import mooncake.reshard.weight as weight
+import mooncake.reshard.weight._store as internal_store
 from mooncake.reshard.weight import store
 from mooncake.reshard.weight._store import (
     PayloadStoreOperations as ExportedPayloadStoreOperations,
@@ -16,7 +18,6 @@ from mooncake.reshard.weight._store import (
 from mooncake.reshard.weight._store import (
     WeightUploadTransaction as ExportedWeightUploadTransaction,
 )
-from mooncake.reshard.weight._store.entrypoint import begin_weight_snapshot
 from mooncake.reshard.weight._store.store import WeightStore, WeightStoreError
 from mooncake.reshard.weight._store.snapshot import (
     WeightSnapshotAdapter,
@@ -24,12 +25,6 @@ from mooncake.reshard.weight._store.snapshot import (
 )
 from mooncake.reshard.weight._store.writer import WeightStoreWriter
 from mooncake.reshard.weight._store.backend import default_config_factory
-from mooncake.reshard.weight._store.contracts import (
-    UploadOperation,
-    UploadReceipt,
-    WeightLoadPlan,
-    WeightUploadPlan,
-)
 from mooncake.reshard.weight._store.payload import PayloadStoreOperations
 from mooncake.reshard.weight._store.transaction import WeightUploadTransaction
 from mooncake.reshard.weight._store.upload import WeightUploadService
@@ -114,10 +109,15 @@ def manifest_pair():
 def test_store_responsibility_modules_preserve_public_identity() -> None:
     assert store.WeightStore is WeightStore
     assert store.WeightStoreError is WeightStoreError
-    assert store.UploadOperation is UploadOperation
-    assert store.UploadReceipt is UploadReceipt
-    assert store.WeightLoadPlan is WeightLoadPlan
-    assert store.WeightUploadPlan is WeightUploadPlan
+    for internal_name in (
+        "UploadOperation",
+        "UploadReceipt",
+        "StoreRegistrationLease",
+        "WeightLoadPlan",
+        "WeightUploadPlan",
+    ):
+        assert not hasattr(store, internal_name)
+        assert not hasattr(weight, internal_name)
 
 
 def test_store_internal_modules_match_their_responsibilities() -> None:
@@ -125,7 +125,6 @@ def test_store_internal_modules_match_their_responsibilities() -> None:
     assert WeightSnapshotDescriptor.__module__.endswith("._store.snapshot")
     assert WeightSnapshotAdapter.__module__.endswith("._store.snapshot")
     assert WeightStoreWriter.__module__.endswith("._store.writer")
-    assert begin_weight_snapshot.__module__.endswith("._store.entrypoint")
 
 
 def test_store_internal_services_have_one_definition() -> None:
@@ -134,25 +133,41 @@ def test_store_internal_services_have_one_definition() -> None:
     assert ExportedWeightUploadService is WeightUploadService
 
 
-def test_store_contract_uses_explicit_placement_and_binding() -> None:
+def test_store_contract_keeps_payload_operations_private() -> None:
     for name in (
-        "plan_upload",
-        "upload",
-        "commit_upload",
-        "abort_upload",
-        "finalize_upload_transaction",
-        "plan_load",
-        "load",
+        "_weight_put_plan",
+        "_weight_put_payload",
+        "_weight_put_commit",
+        "_weight_put_abort",
+        "_weight_put_finalize",
+        "_weight_get_plan",
+        "_weight_get_payload",
     ):
         assert callable(getattr(WeightStore, name))
-    for legacy_name in (
+    for unmanaged_name in (
+        "weight_put_plan",
+        "weight_put_payload",
+        "weight_put_commit",
+        "weight_put_abort",
+        "weight_put_finalize",
+        "weight_get_plan",
+        "weight_get_payload",
+        "plan_upload",
+        "begin_weight_snapshot",
+        "upload",
+        "abort_upload",
+        "finalize_upload_transaction",
+        "commit_upload",
+        "load_manifest",
+        "plan_load",
+        "load",
         "prepare_upload",
         "commit",
         "finalize_upload_session",
     ):
-        assert not hasattr(WeightStore, legacy_name)
+        assert not hasattr(WeightStore, unmanaged_name)
 
-    plan_parameters = tuple(signature(WeightStore.plan_upload).parameters)
+    plan_parameters = tuple(signature(WeightStore._weight_put_plan).parameters)
     assert plan_parameters[:4] == (
         "self",
         "source_placement",
@@ -160,7 +175,7 @@ def test_store_contract_uses_explicit_placement_and_binding() -> None:
         "namespace",
     )
 
-    upload_parameters = tuple(signature(WeightStore.upload).parameters)
+    upload_parameters = tuple(signature(WeightStore._weight_put_payload).parameters)
     assert upload_parameters[:7] == (
         "self",
         "plan",
@@ -171,7 +186,7 @@ def test_store_contract_uses_explicit_placement_and_binding() -> None:
         "registration_lease",
     )
 
-    plan_load_parameters = tuple(signature(WeightStore.plan_load).parameters)
+    plan_load_parameters = tuple(signature(WeightStore._weight_get_plan).parameters)
     assert plan_load_parameters[:4] == (
         "self",
         "manifest",
@@ -179,7 +194,7 @@ def test_store_contract_uses_explicit_placement_and_binding() -> None:
         "target_bindings",
     )
 
-    load_parameters = tuple(signature(WeightStore.load).parameters)
+    load_parameters = tuple(signature(WeightStore._weight_get_payload).parameters)
     assert load_parameters[:7] == (
         "self",
         "plan",
@@ -191,11 +206,38 @@ def test_store_contract_uses_explicit_placement_and_binding() -> None:
     )
 
 
+def test_unmanaged_entrypoints_are_not_exported() -> None:
+    for module in (weight, store, internal_store):
+        assert not hasattr(module, "begin_weight_snapshot")
+        assert not hasattr(module, "plan_weight_upload")
+
+    assert "managed" not in signature(WeightStoreWriter).parameters
+    assert "upsert" not in signature(WeightStoreWriter).parameters
+    assert not hasattr(WeightStoreWriter, "write_tensor")
+    assert not hasattr(WeightStoreWriter, "plan")
+    assert isinstance(WeightStoreWriter.identity, property)
+    assert isinstance(WeightStoreWriter.request_id, property)
+
+
+def test_weight_upsert_public_signature_is_generation_aware() -> None:
+    assert tuple(signature(WeightStore.weight_upsert).parameters) == (
+        "self",
+        "snapshot",
+        "adapter",
+        "replacing",
+        "expected_metadata_generation",
+        "mode",
+        "tenant_id",
+        "policy",
+        "request_id",
+    )
+
+
 def test_store_rejects_binding_for_different_placement_digest() -> None:
     placement, binding = manifest_pair()
 
     with pytest.raises(WeightStoreError, match="placement digest"):
-        WeightStore(object()).plan_upload(
+        WeightStore(object())._weight_put_plan(
             placement,
             (replace(binding, placement_digest="0" * 64),),
         )

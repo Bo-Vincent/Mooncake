@@ -6,6 +6,7 @@ from mooncake.reshard.weight.store import (
     WeightSnapshotDescriptor,
     WeightStoreError,
 )
+from mooncake.reshard.weight.management import WeightAvailabilityState
 from mooncake.reshard.weight.storage_manifest import StoredWeightManifest
 
 from .helpers import (
@@ -14,6 +15,7 @@ from .helpers import (
     make_weight_store,
     source_manifests,
 )
+from .test_managed_revision import ManagedInMemoryStore
 
 
 class _SnapshotAdapter:
@@ -61,17 +63,24 @@ def _snapshot_descriptor(source: RuntimeInputs) -> WeightSnapshotDescriptor:
     )
 
 
+def _managed_weight_store():
+    return make_weight_store(ManagedInMemoryStore())
+
+
 def test_snapshot_writer_commits_one_stored_weight_manifest() -> None:
-    store, weight_store = make_weight_store()
+    store, weight_store = _managed_weight_store()
     source = source_manifests(dp=1, tp=2, weight_generation=7)
-    writer = weight_store.begin_weight_snapshot(
+    writer = weight_store.weight_put(
         _snapshot_descriptor(source),
         _SnapshotAdapter(source),
     )
+    assert writer.identity.namespace == "production"
+    assert writer.identity.resource_id == source.placement.resource_id
+    assert writer.identity.weight_generation == 7
 
     for binding in source.bindings:
         fragment = binding.fragments[0]
-        writer.write_tensor(
+        writer.weight_put_tensor(
             source.placement.tensors[0].tensor_id,
             fragment.placement_fragment_id,
         )
@@ -88,72 +97,72 @@ def test_snapshot_writer_commits_one_stored_weight_manifest() -> None:
 
 
 def test_snapshot_writer_retries_manifest_publish_after_commit_decision() -> None:
-    store, weight_store = make_weight_store()
+    store, weight_store = _managed_weight_store()
     source = source_manifests(dp=1, tp=2)
-    writer = weight_store.begin_weight_snapshot(
+    writer = weight_store.weight_put(
         _snapshot_descriptor(source),
         _SnapshotAdapter(source),
     )
 
     for binding in source.bindings:
         fragment = binding.fragments[0]
-        writer.write_tensor(
+        writer.weight_put_tensor(
             source.placement.tensors[0].tensor_id,
             fragment.placement_fragment_id,
         )
 
-    store.fail_key = writer.plan.manifest.manifest_key
+    store.fail_key = writer._plan.manifest.manifest_key
     with pytest.raises(WeightStoreError, match="manifest put failed"):
         writer.commit()
 
-    assert writer.plan.control_key in store.objects
-    assert writer.plan.manifest.manifest_key not in store.objects
+    assert writer._plan.control_key in store.objects
+    assert writer._plan.manifest.manifest_key not in store.objects
     assert all(
         operation.target.object_key in store.objects
-        for operation in writer.plan.operations
+        for operation in writer._plan.operations
     )
 
     store.fail_key = None
-    assert writer.commit() == writer.plan.manifest
+    assert writer.commit() == writer._plan.manifest
 
 
 def test_snapshot_writer_context_preserves_manifest_publish_retry() -> None:
-    store, weight_store = make_weight_store()
+    store, weight_store = _managed_weight_store()
     source = source_manifests(dp=1, tp=2)
-    writer = weight_store.begin_weight_snapshot(
+    writer = weight_store.weight_put(
         _snapshot_descriptor(source),
         _SnapshotAdapter(source),
     )
 
-    store.fail_key = writer.plan.manifest.manifest_key
+    store.fail_key = writer._plan.manifest.manifest_key
     with pytest.raises(WeightStoreError, match="manifest put failed"):
         with writer:
             for binding in source.bindings:
                 fragment = binding.fragments[0]
-                writer.write_tensor(
+                writer.weight_put_tensor(
                     source.placement.tensors[0].tensor_id,
                     fragment.placement_fragment_id,
                 )
             writer.commit()
 
-    assert writer.plan.control_key in store.objects
-    assert writer.plan.manifest.manifest_key not in store.objects
+    assert writer._plan.control_key in store.objects
+    assert writer._plan.manifest.manifest_key not in store.objects
     with pytest.raises(WeightStoreError, match="retry commit instead"):
         writer.abort()
 
     store.fail_key = None
-    assert writer.commit() == writer.plan.manifest
+    assert writer.commit() == writer._plan.manifest
 
 
 def test_snapshot_writer_rejects_commit_with_missing_fragment() -> None:
-    store, weight_store = make_weight_store()
+    store, weight_store = _managed_weight_store()
     source = source_manifests(dp=1, tp=2)
-    writer = weight_store.begin_weight_snapshot(
+    writer = weight_store.weight_put(
         _snapshot_descriptor(source),
         _SnapshotAdapter(source),
     )
     fragment = source.bindings[0].fragments[0]
-    writer.write_tensor(
+    writer.weight_put_tensor(
         source.placement.tensors[0].tensor_id,
         fragment.placement_fragment_id,
     )
@@ -161,42 +170,44 @@ def test_snapshot_writer_rejects_commit_with_missing_fragment() -> None:
     with pytest.raises(WeightStoreError, match="missing required fragments"):
         writer.commit()
 
-    assert writer.plan.manifest.manifest_key not in store.objects
+    assert writer._plan.manifest.manifest_key not in store.objects
     assert not any(
-        key.startswith(f"{writer.plan.manifest.group_id}/payload/")
+        key.startswith(f"{writer._plan.manifest.group_id}/payload/")
         for key in store.objects
     )
-    assert store.objects[writer.plan.control_key]
+    assert {metadata.availability for metadata in store.catalog.values()} == {
+        WeightAvailabilityState.DELETED
+    }
 
 
 def test_snapshot_writer_rejects_fragment_for_another_tensor() -> None:
-    _, weight_store = make_weight_store()
+    _, weight_store = _managed_weight_store()
     source = source_manifests(dp=1, tp=2)
-    writer = weight_store.begin_weight_snapshot(
+    writer = weight_store.weight_put(
         _snapshot_descriptor(source),
         _MismatchedTensorAdapter(source),
     )
 
     with pytest.raises(WeightStoreError, match="another tensor"):
-        writer.write_tensor("wrong-tensor", object())
+        writer.weight_put_tensor("wrong-tensor", object())
 
 
 def test_snapshot_writer_context_commits() -> None:
-    store, weight_store = make_weight_store()
+    store, weight_store = _managed_weight_store()
     source = source_manifests(dp=1, tp=2, weight_generation=7)
 
-    with weight_store.begin_weight_snapshot(
+    with weight_store.weight_put(
         _snapshot_descriptor(source),
         _SnapshotAdapter(source),
     ) as writer:
         for binding in source.bindings:
             fragment = binding.fragments[0]
-            writer.write_tensor(
+            writer.weight_put_tensor(
                 source.placement.tensors[0].tensor_id,
                 fragment.placement_fragment_id,
             )
 
-    assert writer.plan.manifest.manifest_key in store.objects
+    assert writer._plan.manifest.manifest_key in store.objects
 
 
 def test_native_store_does_not_expose_weight_writer_shortcuts() -> None:
