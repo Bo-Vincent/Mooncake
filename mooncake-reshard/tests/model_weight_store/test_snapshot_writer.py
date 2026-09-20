@@ -199,16 +199,12 @@ def test_snapshot_writer_context_commits() -> None:
     assert writer.plan.manifest.manifest_key in store.objects
 
 
-def test_native_store_exposes_explicit_snapshot_writer_only() -> None:
+def test_native_store_does_not_expose_weight_writer_shortcuts() -> None:
     native_store = pytest.importorskip("mooncake.store")
-    source = source_manifests(dp=1, tp=2, weight_generation=7)
     raw_store = native_store.MooncakeDistributedStore()
-    writer = raw_store.begin_weight_snapshot(
-        _snapshot_descriptor(source),
-        _SnapshotAdapter(source),
-    )
 
-    assert hasattr(writer, "write_tensor")
+    assert not hasattr(raw_store, "begin_weight_snapshot")
+    assert not hasattr(raw_store, "begin_managed_weight_snapshot")
     for name in (
         "get_tensor_with_parallelism",
         "batch_get_tensor_with_parallelism",
