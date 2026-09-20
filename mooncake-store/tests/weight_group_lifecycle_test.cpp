@@ -29,10 +29,6 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
         };
     }
 
-    static std::string ManifestKey() {
-        return "weights/production/llama-70b/step-100/7/manifest";
-    }
-
     struct PayloadSpec {
         std::string key;
         uint64_t size;
@@ -42,11 +38,13 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
     WeightRevisionMetadata PublishReadyWithPayloads(
         MasterService& service, const UUID& client_id,
         const std::vector<PayloadSpec>& payloads,
-        WeightStoragePolicy policy = {
-            .preferred_residency = WeightResidencyState::HOT,
-            .mixed_hot_ratio = 0.5,
-            .migration_mode = WeightMigrationMode::MANUAL,
-        }) {
+        WeightStoragePolicy policy =
+            {
+                .preferred_residency = WeightResidencyState::HOT,
+                .mixed_hot_ratio = 0.5,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        WeightRevisionIdentity identity = Identity()) {
         uint64_t logical_bytes = 0;
         std::vector<std::string> payload_keys;
         std::set<std::string> affinity_ids;
@@ -56,7 +54,7 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
             affinity_ids.insert(payload.affinity_id);
         }
         auto importing = service.BeginWeightImport(BeginWeightImportRequest{
-            .identity = Identity(),
+            .identity = identity,
             .payload_group_id = {},
             .expected_payload_count = payloads.size(),
             .expected_logical_bytes = logical_bytes,
@@ -86,14 +84,15 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
         manifest_config.group_ids =
             std::vector<std::string>{importing->manifest.payload_group_id};
         manifest_config.data_type = ObjectDataType::METADATA;
-        PutCompletedObject(service, client_id, ManifestKey(), manifest_config,
+        const auto manifest_key = MakeWeightManifestKey(identity);
+        PutCompletedObject(service, client_id, manifest_key, manifest_config,
                            128);
         auto ready = service.CommitWeightImport(CommitWeightImportRequest{
-            .identity = Identity(),
+            .identity = identity,
             .expected_metadata_generation = importing->metadata_generation,
             .manifest =
                 WeightManifestReference{
-                    .manifest_key = ManifestKey(),
+                    .manifest_key = manifest_key,
                     .manifest_sha256 = std::string(64, 'a'),
                     .payload_group_id = importing->manifest.payload_group_id,
                     .payload_keys_sha256 =
@@ -170,6 +169,449 @@ TEST_F(WeightGroupLifecycleTest, LeaseBlocksOperationAndDelete) {
     });
     ASSERT_FALSE(deleted.has_value());
     EXPECT_EQ(WeightManagementError::BUSY, deleted.error());
+}
+
+TEST_F(WeightGroupLifecycleTest, NewLineageClaimRevalidatesCurrentBase) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    auto base = PublishReady(service, context.client_id);
+    auto retirement_lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = base.identity,
+            .expected_metadata_generation = base.metadata_generation,
+            .holder = "retiring-reader",
+            .ttl_ms = 60'000,
+        });
+    ASSERT_TRUE(retirement_lease.has_value());
+    auto target_identity = base.identity;
+    target_identity.weight_generation = 8;
+    auto begin = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base.identity,
+        .expected_base_metadata_generation = base.metadata_generation,
+        .target_identity = target_identity,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target_identity,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 2048,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'd'),
+                    },
+            },
+    });
+    ASSERT_TRUE(begin.has_value());
+
+    ReplicateConfig payload_config;
+    payload_config.replica_num = 1;
+    payload_config.with_hard_pin = true;
+    payload_config.group_ids =
+        std::vector<std::string>{begin->manifest.payload_group_id};
+    payload_config.residency_affinity_ids =
+        std::vector<std::string>{"affinity-b"};
+    payload_config.data_type = ObjectDataType::WEIGHT;
+    PutCompletedObject(service, context.client_id, "payload-b", payload_config,
+                       2048);
+    ReplicateConfig manifest_config;
+    manifest_config.replica_num = 1;
+    manifest_config.with_hard_pin = true;
+    manifest_config.group_ids =
+        std::vector<std::string>{begin->manifest.payload_group_id};
+    manifest_config.data_type = ObjectDataType::METADATA;
+    PutCompletedObject(service, context.client_id,
+                       MakeWeightManifestKey(target_identity), manifest_config,
+                       128);
+    auto target = service.CommitWeightImport(CommitWeightImportRequest{
+        .identity = target_identity,
+        .expected_metadata_generation = begin->metadata_generation,
+        .manifest =
+            WeightManifestReference{
+                .manifest_key = MakeWeightManifestKey(target_identity),
+                .manifest_sha256 = std::string(64, 'a'),
+                .payload_group_id = begin->manifest.payload_group_id,
+                .payload_keys_sha256 =
+                    ComputeWeightPayloadKeysSha256({"payload-b"}),
+                .payload_count = 1,
+                .logical_bytes = 2048,
+            },
+    });
+    ASSERT_TRUE(target.has_value());
+    auto committed = service.CommitWeightUpsert(CommitWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .base_identity = base.identity,
+        .target_identity = target_identity,
+    });
+    ASSERT_TRUE(committed.has_value());
+    EXPECT_EQ(8, committed->committed_weight_generation);
+    ASSERT_TRUE(committed->latest_claim.has_value());
+    EXPECT_EQ(WeightUpsertPhase::RETIRING_BASE, committed->latest_claim->phase);
+
+    auto fenced_policy = service.UpdateWeightPolicy(UpdateWeightPolicyRequest{
+        .identity = base.identity,
+        .expected_metadata_generation = base.metadata_generation,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::COLD,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+    });
+    ASSERT_FALSE(fenced_policy.has_value());
+    EXPECT_EQ(WeightManagementError::BUSY, fenced_policy.error());
+    auto fenced_migration = service.StartWeightResidencyOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = base.identity,
+            .expected_metadata_generation = base.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        });
+    ASSERT_FALSE(fenced_migration.has_value());
+    EXPECT_EQ(WeightManagementError::BUSY, fenced_migration.error());
+    ASSERT_TRUE(
+        service
+            .ReleaseWeightRevisionLease(ReleaseWeightRevisionLeaseRequest{
+                .lease_id = retirement_lease->lease_id,
+            })
+            .has_value());
+    committed = service.CommitWeightUpsert(CommitWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .base_identity = base.identity,
+        .target_identity = target_identity,
+    });
+    ASSERT_TRUE(committed.has_value());
+    ASSERT_TRUE(committed->latest_claim.has_value());
+    EXPECT_EQ(WeightUpsertPhase::COMPLETED, committed->latest_claim->phase);
+
+    auto successor = target_identity;
+    successor.weight_generation = 9;
+    auto next_request = BeginWeightUpsertRequest{
+        .request_id = "replace-8-with-9",
+        .mode = WeightUpsertMode::DELETE_FIRST,
+        .base_identity = target_identity,
+        .expected_base_metadata_generation = target->metadata_generation + 1,
+        .target_identity = successor,
+        .import =
+            BeginWeightImportRequest{
+                .identity = successor,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 2048,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'e'),
+                    },
+            },
+    };
+    auto stale = service.BeginWeightUpsert(next_request);
+    ASSERT_FALSE(stale.has_value());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, stale.error());
+
+    next_request.expected_base_metadata_generation =
+        target->metadata_generation;
+    auto lease =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = target_identity,
+            .expected_metadata_generation = target->metadata_generation,
+            .holder = "worker-0",
+            .ttl_ms = 60'000,
+        });
+    ASSERT_TRUE(lease.has_value());
+    auto busy = service.BeginWeightUpsert(next_request);
+    ASSERT_FALSE(busy.has_value());
+    EXPECT_EQ(WeightManagementError::BUSY, busy.error());
+
+    ASSERT_TRUE(
+        service
+            .ReleaseWeightRevisionLease(ReleaseWeightRevisionLeaseRequest{
+                .lease_id = lease->lease_id,
+            })
+            .has_value());
+    auto deleted = service.DeleteWeightRevision(DeleteWeightRevisionRequest{
+        .identity = target_identity,
+        .expected_metadata_generation = target->metadata_generation,
+    });
+    ASSERT_TRUE(deleted.has_value());
+    ASSERT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+    next_request.mode = WeightUpsertMode::PUT_FIRST;
+    next_request.expected_base_metadata_generation =
+        deleted->metadata_generation;
+    auto not_ready = service.BeginWeightUpsert(next_request);
+    ASSERT_FALSE(not_ready.has_value());
+    EXPECT_EQ(WeightManagementError::NOT_READY, not_ready.error());
+}
+
+TEST_F(WeightGroupLifecycleTest,
+       ConflictingTargetDoesNotLeaveBlockingLineageClaim) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    auto base = PublishReady(service, context.client_id);
+    auto occupied_identity = base.identity;
+    occupied_identity.weight_generation = 8;
+    PublishReadyWithPayloads(
+        service, context.client_id,
+        {{.key = "occupied-payload",
+          .size = 512,
+          .affinity_id = "occupied-affinity"}},
+        WeightStoragePolicy{
+            .preferred_residency = WeightResidencyState::HOT,
+            .mixed_hot_ratio = 0.5,
+            .migration_mode = WeightMigrationMode::MANUAL,
+        },
+        occupied_identity);
+
+    auto request = BeginWeightUpsertRequest{
+        .request_id = "conflicting-target",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base.identity,
+        .expected_base_metadata_generation = base.metadata_generation,
+        .target_identity = occupied_identity,
+        .import =
+            BeginWeightImportRequest{
+                .identity = occupied_identity,
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .mixed_hot_ratio = 0.5,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'd'),
+                    },
+            },
+    };
+    auto conflicting = service.BeginWeightUpsert(request);
+    ASSERT_FALSE(conflicting.has_value());
+    EXPECT_EQ(WeightManagementError::CONFLICT, conflicting.error());
+    EXPECT_FALSE(service
+                     .GetWeightLineage(GetWeightLineageRequest{
+                         .identity = ToWeightLineageIdentity(base.identity),
+                     })
+                     .has_value());
+
+    request.request_id = "valid-target";
+    request.target_identity.weight_generation = 9;
+    request.import.identity = request.target_identity;
+    auto valid = service.BeginWeightUpsert(request);
+    ASSERT_TRUE(valid.has_value())
+        << "error=" << static_cast<int>(valid.error());
+    EXPECT_EQ(9, valid->identity.weight_generation);
+}
+
+TEST_F(WeightGroupLifecycleTest,
+       ReconciliationFinishesPutFirstAbortAfterLineagePublishGap) {
+    for (const bool finish_target_delete_before_recovery : {false, true}) {
+        MasterService service;
+        const auto context = PrepareSimpleSegment(service);
+        auto base = PublishReady(service, context.client_id);
+        auto target_identity = base.identity;
+        target_identity.weight_generation = 8;
+        auto target = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+            .request_id = "interrupted-abort",
+            .mode = WeightUpsertMode::PUT_FIRST,
+            .base_identity = base.identity,
+            .expected_base_metadata_generation = base.metadata_generation,
+            .target_identity = target_identity,
+            .import =
+                BeginWeightImportRequest{
+                    .identity = target_identity,
+                    .expected_payload_count = 1,
+                    .expected_logical_bytes = 1024,
+                    .policy =
+                        WeightStoragePolicy{
+                            .preferred_residency = WeightResidencyState::HOT,
+                            .mixed_hot_ratio = 0.5,
+                            .migration_mode = WeightMigrationMode::MANUAL,
+                        },
+                    .affinity_summary =
+                        WeightAffinitySummary{
+                            .affinity_count = 1,
+                            .affinity_digest = std::string(64, 'd'),
+                        },
+                },
+        });
+        ASSERT_TRUE(target.has_value());
+        auto deleting = service.AbortWeightImport(AbortWeightImportRequest{
+            .identity = target_identity,
+            .expected_metadata_generation = target->metadata_generation,
+        });
+        ASSERT_TRUE(deleting.has_value());
+        ASSERT_EQ(WeightAvailabilityState::DELETING, deleting->availability);
+        if (finish_target_delete_before_recovery) {
+            auto deleted = service.ReconcileWeightRevision(
+                ReconcileWeightRevisionRequest{.identity = target_identity});
+            ASSERT_TRUE(deleted.has_value());
+            ASSERT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+        }
+
+        EXPECT_GT(service.RunWeightReconciliationForTesting(
+                      deleting->updated_at_ms + 1, 8),
+                  0);
+        auto deleted = service.GetWeightRevision(
+            GetWeightRevisionRequest{.identity = target_identity});
+        ASSERT_TRUE(deleted.has_value());
+        EXPECT_EQ(WeightAvailabilityState::DELETED,
+                  deleted->metadata.availability);
+        auto lineage = service.GetWeightLineage(GetWeightLineageRequest{
+            .identity = ToWeightLineageIdentity(base.identity),
+        });
+        ASSERT_TRUE(lineage.has_value());
+        ASSERT_TRUE(lineage->latest_claim.has_value());
+        EXPECT_EQ(WeightUpsertPhase::ABORTED, lineage->latest_claim->phase);
+    }
+}
+
+TEST_F(WeightGroupLifecycleTest, InvalidAbortCannotMutateTargetImport) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    auto base = PublishReady(service, context.client_id);
+    auto target = base.identity;
+    target.weight_generation = 8;
+    auto importing = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base.identity,
+        .expected_base_metadata_generation = base.metadata_generation,
+        .target_identity = target,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'd'),
+                    },
+            },
+    });
+    ASSERT_TRUE(importing.has_value());
+
+    auto rejected = service.AbortWeightUpsert(AbortWeightUpsertRequest{
+        .request_id = "wrong-request",
+        .base_identity = base.identity,
+        .target_identity = target,
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::CONFLICT, rejected.error());
+    auto target_view =
+        service.GetWeightRevision(GetWeightRevisionRequest{.identity = target});
+    ASSERT_TRUE(target_view.has_value());
+    EXPECT_EQ(WeightAvailabilityState::IMPORTING,
+              target_view->metadata.availability);
+}
+
+TEST_F(WeightGroupLifecycleTest, ReconciliationRecreatesMissingUpsertTarget) {
+    for (const auto phase : {WeightUpsertPhase::PREPARING_TARGET,
+                             WeightUpsertPhase::TARGET_IMPORTING}) {
+        MasterService service;
+        auto base = Identity();
+        auto target = base;
+        target.weight_generation = 8;
+        WeightMetadataSnapshot snapshot;
+        snapshot.metadata.push_back(WeightRevisionMetadata{
+            .identity = base,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key = MakeWeightManifestKey(base),
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(base),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
+            .availability = phase == WeightUpsertPhase::PREPARING_TARGET
+                                ? WeightAvailabilityState::READY
+                                : WeightAvailabilityState::DELETED,
+            .residency = phase == WeightUpsertPhase::PREPARING_TARGET
+                             ? WeightResidencyState::HOT
+                             : WeightResidencyState::ABSENT,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio =
+                phase == WeightUpsertPhase::PREPARING_TARGET ? 1.0 : 0.0,
+            .metadata_generation =
+                phase == WeightUpsertPhase::PREPARING_TARGET ? 2ULL : 4ULL,
+            .created_at_ms = 100,
+            .updated_at_ms = 100,
+            .last_accessed_at_ms = 100,
+        });
+        snapshot.lineages = std::vector<WeightLineageMetadata>{
+            WeightLineageMetadata{
+                .identity = ToWeightLineageIdentity(base),
+                .lineage_metadata_generation = 1,
+                .committed_weight_generation = base.weight_generation,
+                .latest_claim =
+                    WeightUpsertClaim{
+                        .request_id = "replace-7-with-8",
+                        .base_identity = base,
+                        .target_identity = target,
+                        .mode = phase == WeightUpsertPhase::PREPARING_TARGET
+                                    ? WeightUpsertMode::PUT_FIRST
+                                    : WeightUpsertMode::DELETE_FIRST,
+                        .phase = phase,
+                        .expected_base_metadata_generation = 2,
+                        .import =
+                            WeightUpsertImportSummary{
+                                .payload_group_id =
+                                    MakeWeightPayloadGroupId(target),
+                                .expected_payload_count = 1,
+                                .expected_logical_bytes = 1024,
+                                .policy =
+                                    WeightStoragePolicy{
+                                        .preferred_residency =
+                                            WeightResidencyState::HOT,
+                                        .migration_mode =
+                                            WeightMigrationMode::MANUAL,
+                                    },
+                                .affinity_summary =
+                                    WeightAffinitySummary{
+                                        .affinity_count = 1,
+                                        .affinity_digest = std::string(64, 'd'),
+                                    },
+                            },
+                        .created_at_ms = 100,
+                        .updated_at_ms = 100,
+                    },
+            },
+        };
+        ASSERT_TRUE(service.GetWeightStoreManager()
+                        .RestoreSnapshot(snapshot)
+                        .has_value());
+        EXPECT_EQ(1, service.RunWeightReconciliationForTesting(200, 1));
+        auto recreated = service.GetWeightRevision(
+            GetWeightRevisionRequest{.identity = target});
+        ASSERT_TRUE(recreated.has_value());
+        EXPECT_EQ(WeightAvailabilityState::IMPORTING,
+                  recreated->metadata.availability);
+    }
 }
 
 TEST_F(WeightGroupLifecycleTest, SnapshotExposesOpaqueResidencyAffinityId) {
@@ -802,8 +1244,10 @@ TEST_F(WeightGroupLifecycleTest,
     EXPECT_EQ(WeightResidencyState::ABSENT, deleted->residency);
     EXPECT_FALSE(
         service.ExistKey("payload-a", TenantId::Default()).value_or(false));
-    EXPECT_FALSE(
-        service.ExistKey(ManifestKey(), TenantId::Default()).value_or(false));
+    EXPECT_FALSE(service
+                     .ExistKey(MakeWeightManifestKey(ready.identity),
+                               TenantId::Default())
+                     .value_or(false));
 }
 
 TEST_F(WeightGroupLifecycleTest,
