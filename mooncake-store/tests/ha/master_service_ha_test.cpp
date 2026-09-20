@@ -306,7 +306,7 @@ class MasterServiceHATest : public ::testing::Test {
         MasterServiceTestPeer::EnableDfs(service) = true;
     }
 
-    static WeightMetadataSnapshot ExportWeightMetadataStore(
+    static WeightMetadataSnapshot ExportWeightMetadata(
         const MasterService& service) {
         return MasterServiceTestPeer::WeightMetadata(service).ExportSnapshot();
     }
@@ -2586,7 +2586,7 @@ TEST_F(MasterServiceHATest,
         GetWeightRevisionRequest{.identity = identity});
     ASSERT_TRUE(restored.has_value());
     EXPECT_EQ(snapshot.metadata.front(), restored->metadata);
-    const auto after = ExportWeightMetadataStore(service);
+    const auto after = ExportWeightMetadata(service);
     EXPECT_EQ(snapshot.metadata, after.metadata);
     EXPECT_TRUE(after.leases.empty());
     EXPECT_TRUE(after.operations.empty());
@@ -2721,7 +2721,8 @@ TEST_F(MasterServiceHATest,
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
     EXPECT_FALSE(
-        service.GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
+        service
+            .GetWeightRevision(GetWeightRevisionRequest{.identity = identity})
             .has_value());
 
     OpLogBatchStorage storage(cluster_id, *backend);
@@ -3057,10 +3058,10 @@ TEST_F(MasterServiceHATest,
 
     MasterService service;
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 7, {}, snapshot));
-    EXPECT_EQ(snapshot, ExportWeightMetadataStore(service));
+    EXPECT_EQ(snapshot, ExportWeightMetadata(service));
 }
 
-TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadataStore) {
+TEST_F(MasterServiceHATest, OldStandbyPromotionClearsWeightMetadata) {
     MasterService service;
     const WeightRevisionIdentity identity{
         .tenant_id = "default",

@@ -1773,8 +1773,7 @@ bool MasterService::IsManagedWeightObject(const TenantId& tenant_id,
                                           const std::string& key) const {
     std::string group_id;
     {
-        MetadataAccessorRO accessor(this,
-                                    MakeObjectIdentity(key, tenant_id));
+        MetadataAccessorRO accessor(this, MakeObjectIdentity(key, tenant_id));
         if (!accessor.Exists()) {
             return false;
         }
@@ -1868,8 +1867,7 @@ MasterService::GroupEvictionResult MasterService::EvictGroupOrObject(
     return result;
 }
 
-MasterService::GroupEvictionResult
-MasterService::EvictManagedWeightGroupToCold(
+MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
     const WeightRevisionMetadata& revision) {
     const TenantId tenant_id(revision.identity.tenant_id);
     auto member_keys =
@@ -1884,10 +1882,10 @@ MasterService::EvictManagedWeightGroupToCold(
     auto is_evictable_memory = [this](const Replica& replica) {
         return IsEvictableMemoryReplica(replica);
     };
-    auto evict_one =
-        [&, this](const std::string& member_key,
-                  ObjectMetadata& metadata, TenantState& tenant_state,
-                  MetadataShardAccessorRW&) -> EvictMemberOutcome {
+    auto evict_one = [&, this](const std::string& member_key,
+                               ObjectMetadata& metadata,
+                               TenantState& tenant_state,
+                               MetadataShardAccessorRW&) -> EvictMemberOutcome {
         const bool has_cold =
             metadata.HasReplica([this](const Replica& replica) {
                 return !replica.is_memory_replica() &&
@@ -1902,8 +1900,8 @@ MasterService::EvictManagedWeightGroupToCold(
             if (!reservation) {
                 return {.stop_scan = true, .error = reservation.error()};
             }
-            auto remaining = BuildRemainingReplicaDescriptors(
-                metadata, is_evictable_memory);
+            auto remaining =
+                BuildRemainingReplicaDescriptors(metadata, is_evictable_memory);
             std::vector<ReplicaID> removed_ids;
             metadata.VisitReplicas(is_evictable_memory,
                                    [&removed_ids](Replica& replica) {
@@ -1915,10 +1913,9 @@ MasterService::EvictManagedWeightGroupToCold(
             }
             auto persisted = AppendReservedOpLogWithDurableFinalize(
                 std::move(reservation.value()), OpType::PUT_END,
-                tenant_id.value(),
-                member_key,
+                tenant_id.value(), member_key,
                 SerializeMetadataForOpLogFromReplicaDescriptors(metadata,
-                                                                 remaining),
+                                                                remaining),
                 [this, removed_ids](const OpLogEntry& durable_entry) {
                     FinalizeRemovedReplicasAfterDurable(
                         durable_entry, removed_ids, QuotaEraseMode::kFull);
@@ -1938,8 +1935,8 @@ MasterService::EvictManagedWeightGroupToCold(
         }
 
         const uint64_t before_charge = CompletedMemoryQuotaCharge(metadata);
-        auto removed = PopReplicasWithCacheTotalAccounting(
-            metadata, is_evictable_memory);
+        auto removed =
+            PopReplicasWithCacheTotalAccounting(metadata, is_evictable_memory);
         const uint64_t removed_count = removed.size();
         if (removed_count == 0) {
             return {};
@@ -1965,9 +1962,9 @@ MasterService::EvictManagedWeightGroupToCold(
                 .evicted_objects = 1};
     };
 
-    return EvictGroupOrObject(
-        tenant_id, member_keys.front(), revision.manifest.payload_group_id,
-        false, true, true, now, evict_one);
+    return EvictGroupOrObject(tenant_id, member_keys.front(),
+                              revision.manifest.payload_group_id, false, true,
+                              true, now, evict_one);
 }
 
 bool MasterService::HasCompletedMemoryCacheReplica(
@@ -7497,8 +7494,7 @@ auto MasterService::RemoveByRegex(const std::string& regex_pattern,
             if (std::regex_search(it->first, pattern)) {
                 if (!it->second.group_id.empty() &&
                     managed_weight_groups.contains(
-                        normalized_tenant.MakeScopedKey(
-                            it->second.group_id))) {
+                        normalized_tenant.MakeScopedKey(it->second.group_id))) {
                     ++it;
                     continue;
                 }
@@ -7777,8 +7773,7 @@ long MasterService::RemoveAll(const TenantId& tenant_id, bool force) {
                 saw_any_object = true;
                 if (!it->second.group_id.empty() &&
                     managed_weight_groups.contains(
-                        normalized_tenant.MakeScopedKey(
-                            it->second.group_id))) {
+                        normalized_tenant.MakeScopedKey(it->second.group_id))) {
                     skipped_any_object = true;
                     ++it;
                     continue;
@@ -7919,8 +7914,8 @@ auto MasterService::BatchRemove(const std::vector<std::string>& keys,
             }
 
             if (!it->second.group_id.empty() &&
-                managed_weight_groups.contains(normalized_tenant.MakeScopedKey(
-                    it->second.group_id))) {
+                managed_weight_groups.contains(
+                    normalized_tenant.MakeScopedKey(it->second.group_id))) {
                 results[original_idx] = tl::make_unexpected(
                     ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
                 continue;
@@ -9787,9 +9782,8 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
     // is clamped into [1, 255] at config parse time (see master.cpp), so
     // direct comparison is well-defined and threshold=0 (which would
     // bypass the gate entirely since freq is uint8_t) cannot reach here.
-    const uint8_t freq =
-        force ? std::numeric_limits<uint8_t>::max()
-              : promotion_sketch_->increment(admission_key);
+    const uint8_t freq = force ? std::numeric_limits<uint8_t>::max()
+                               : promotion_sketch_->increment(admission_key);
     if (!force && freq < promotion_admission_threshold_) {
         MasterMetricManager::instance().inc_promotion_rejected_frequency();
         return PromotionQueueResult::kFrequencyRejected;
@@ -11337,10 +11331,9 @@ MasterService::EvictTenantMemoryForQuota(const TenantId& tenant_id,
             return outcome;
         };
 
-        GroupEvictionResult group_result =
-            EvictGroupOrObject(normalized_tenant, key, group_id,
-                               allow_soft_pinned, false, false, now,
-                               evict_one_member);
+        GroupEvictionResult group_result = EvictGroupOrObject(
+            normalized_tenant, key, group_id, allow_soft_pinned, false, false,
+            now, evict_one_member);
         TenantQuotaEvictionResult result{
             .freed_bytes = group_result.freed_bytes,
             .evicted_objects =
@@ -11760,9 +11753,9 @@ void MasterService::BatchEvict(double evict_ratio_target,
             return outcome;
         };
 
-        GroupEvictionResult group_result = EvictGroupOrObject(
-            tenant_id, key, group_id, allow_soft_pinned, false, false, now,
-            evict_one_member);
+        GroupEvictionResult group_result =
+            EvictGroupOrObject(tenant_id, key, group_id, allow_soft_pinned,
+                               false, false, now, evict_one_member);
         EvictionResult result{.freed_bytes = group_result.freed_bytes,
                               .evicted_objects = group_result.evicted_objects,
                               .stop_scan = group_result.stop_scan};
