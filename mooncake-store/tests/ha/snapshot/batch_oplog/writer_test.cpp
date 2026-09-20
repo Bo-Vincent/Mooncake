@@ -416,6 +416,7 @@ TEST_F(BatchOpLogSnapshotWriterTest,
         .metadata = {metadata},
         .leases = {lease},
         .next_lease_id = 43,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
     auto capture = StartCapture(1, &expected);
     ASSERT_TRUE(capture);
