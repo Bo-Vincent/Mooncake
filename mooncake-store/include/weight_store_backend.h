@@ -43,6 +43,7 @@ class WeightStoreBackend {
         const WeightRevisionMetadata& revision,
         const std::vector<std::string>& keys) = 0;
     virtual bool CanPublishWeightMutations() const = 0;
+    virtual bool CanPublishWeightLineageMutations() const = 0;
     virtual PromotionQueueResult PromoteWeightObject(
         const TenantId& tenant_id, const std::string& key) = 0;
     virtual std::vector<std::string> GetGroupMemberKeys(
@@ -75,8 +76,9 @@ class MasterStoreBackend final : public WeightStoreBackend {
         const WeightRevisionMetadata& revision,
         const std::vector<std::string>& keys) override;
     bool CanPublishWeightMutations() const override;
-    PromotionQueueResult PromoteWeightObject(
-        const TenantId& tenant_id, const std::string& key) override;
+    bool CanPublishWeightLineageMutations() const override;
+    PromotionQueueResult PromoteWeightObject(const TenantId& tenant_id,
+                                             const std::string& key) override;
     std::vector<std::string> GetGroupMemberKeys(
         const TenantId& tenant_id, const std::string& group_id) const override;
     tl::expected<void, ErrorCode> RemoveObject(

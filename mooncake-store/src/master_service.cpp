@@ -239,6 +239,10 @@ MasterService::MasterService(const MasterServiceConfig& config)
       weight_management_mutations_enabled_(
           !enable_oplog_ ||
           config.weight_management_oplog_capability_confirmed),
+      weight_lineage_mutations_enabled_(
+          !(config.enable_ha && config.enable_oplog &&
+            config.ha_backend_type == "etcd") ||
+          config.weight_lineage_oplog_capability_confirmed),
       oplog_batch_max_entries_(config.oplog_batch_max_entries),
       cluster_id_(config.cluster_id),
       root_fs_dir_(config.root_fs_dir),

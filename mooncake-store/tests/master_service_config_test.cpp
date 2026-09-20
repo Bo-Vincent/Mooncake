@@ -75,23 +75,30 @@ TEST(MasterServiceConfigTest, OplogEnablementPropagatesToServingConfig) {
     EXPECT_TRUE(service_config.enable_oplog);
 }
 
-TEST(MasterServiceConfigTest, WeightCapabilityConfirmationPropagates) {
+TEST(MasterServiceConfigTest, WeightOpLogCapabilitiesPropagateIndependently) {
     MasterConfig master_config{};
     EXPECT_FALSE(master_config.weight_management_oplog_capability_confirmed);
-    EXPECT_FALSE(
-        MasterServiceConfig{}.weight_management_oplog_capability_confirmed);
+    EXPECT_FALSE(master_config.weight_lineage_oplog_capability_confirmed);
+
     master_config.weight_management_oplog_capability_confirmed = true;
+    master_config.weight_lineage_oplog_capability_confirmed = true;
     MasterServiceSupervisorConfig supervisor_config(master_config);
     WrappedMasterServiceConfig wrapped_config(supervisor_config, 1);
     MasterServiceConfig service_config(wrapped_config);
+
     EXPECT_TRUE(supervisor_config.weight_management_oplog_capability_confirmed);
+    EXPECT_TRUE(supervisor_config.weight_lineage_oplog_capability_confirmed);
     EXPECT_TRUE(wrapped_config.weight_management_oplog_capability_confirmed);
+    EXPECT_TRUE(wrapped_config.weight_lineage_oplog_capability_confirmed);
     EXPECT_TRUE(service_config.weight_management_oplog_capability_confirmed);
-    const auto built =
-        MasterServiceConfig::builder()
-            .set_weight_management_oplog_capability_confirmed(true)
-            .build();
+    EXPECT_TRUE(service_config.weight_lineage_oplog_capability_confirmed);
+
+    auto built = MasterServiceConfig::builder()
+                     .set_weight_management_oplog_capability_confirmed(true)
+                     .set_weight_lineage_oplog_capability_confirmed(true)
+                     .build();
     EXPECT_TRUE(built.weight_management_oplog_capability_confirmed);
+    EXPECT_TRUE(built.weight_lineage_oplog_capability_confirmed);
 }
 
 TEST(MasterServiceConfigTest, OplogBatchMaxEntriesBuilderOverrideRespected) {

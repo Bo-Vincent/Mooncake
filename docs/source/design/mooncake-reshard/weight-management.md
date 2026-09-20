@@ -180,10 +180,9 @@ lease OpLog entries. This is an explicit rolling-upgrade capability assertion,
 not automatic standby discovery. Reads and ordinary KV operations are not
 gated by it.
 
-The capability flag admits new mutations; it is not a rollback switch.
-Disabling it does not remove existing weight state, including state loaded
-through snapshot restore or standby promotion. Such a cluster still requires
-readers that support its weight OpLog and snapshot formats.
+These flags admit new mutations; they are not rollback switches. Disabling
+them does not remove weight or lineage state already written or restored from
+a snapshot. Such state still requires compatible OpLog and snapshot readers.
 
 ## Serving-System Boundary
 

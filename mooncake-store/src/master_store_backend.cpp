@@ -37,6 +37,10 @@ bool MasterStoreBackend::CanPublishWeightMutations() const {
     return master_.weight_management_mutations_enabled_;
 }
 
+bool MasterStoreBackend::CanPublishWeightLineageMutations() const {
+    return master_.weight_lineage_mutations_enabled_;
+}
+
 PromotionQueueResult MasterStoreBackend::PromoteWeightObject(
     const TenantId& tenant_id, const std::string& key) {
     return master_.TryPushPromotionQueue(
