@@ -195,7 +195,9 @@ MasterService::MasterService() : MasterService(MasterServiceConfig()) {}
 
 MasterService::MasterService(const MasterServiceConfig& config)
     : weight_manager_(weight_backend_, config.default_weight_storage_policy,
-                      config.weight_migration_cooldown_ms),
+                      config.weight_migration_cooldown_ms,
+                      config.weight_migration_max_members_per_round,
+                      config.weight_migration_max_bytes_per_round),
       graceful_unmount_scheduler_(
           [this](const GracefulUnmountDeadlineRecord& record) {
               auto result =

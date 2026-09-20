@@ -61,9 +61,19 @@ WeightMetadataStore::Result<T> PersistAndPublish(
 
 WeightStoreManager::WeightStoreManager(WeightStoreBackend& backend,
                                        WeightStoragePolicy policy,
-                                       uint64_t migration_cooldown_ms)
-    : backend_(backend), default_weight_storage_policy_(std::move(policy)),
-      weight_migration_cooldown_ms_(migration_cooldown_ms) {
+                                       uint64_t migration_cooldown_ms,
+                                       uint64_t migration_max_members_per_round,
+                                       uint64_t migration_max_bytes_per_round)
+    : backend_(backend),
+      default_weight_storage_policy_(std::move(policy)),
+      weight_migration_cooldown_ms_(migration_cooldown_ms),
+      weight_migration_max_members_per_round_(migration_max_members_per_round),
+      weight_migration_max_bytes_per_round_(migration_max_bytes_per_round) {
+    if (weight_migration_max_members_per_round_ == 0 ||
+        weight_migration_max_bytes_per_round_ == 0) {
+        throw std::invalid_argument(
+            "Weight migration batch limits must be positive");
+    }
     const auto validation =
         ValidateWeightStoragePolicy(default_weight_storage_policy_);
     if (!validation.ok()) {
@@ -557,12 +567,12 @@ WeightStoreManager::ReconcileWeightRevision(
     }
 
     struct AffinityObservation {
-        std::string affinity_id;
         uint64_t logical_bytes{0};
         bool all_memory{true};
+        bool all_have_cold{true};
         bool all_cold{true};
-        bool any_readable{false};
         std::vector<std::string> keys;
+        std::vector<std::string> keys_without_cold;
     };
     auto aggregate_affinities = [](const auto& member_snapshots) {
         std::map<std::string, AffinityObservation> affinities;
@@ -571,13 +581,15 @@ WeightStoreManager::ReconcileWeightRevision(
                 continue;
             }
             auto& affinity = affinities[member.residency_affinity_id];
-            affinity.affinity_id = member.residency_affinity_id;
             affinity.logical_bytes += member.size;
             affinity.all_memory = affinity.all_memory && member.has_memory;
+            affinity.all_have_cold = affinity.all_have_cold && member.has_cold;
             affinity.all_cold =
                 affinity.all_cold && member.has_cold && !member.has_memory;
-            affinity.any_readable = affinity.any_readable || member.readable;
             affinity.keys.push_back(member.key);
+            if (!member.has_cold) {
+                affinity.keys_without_cold.push_back(member.key);
+            }
         }
         return affinities;
     };
@@ -624,29 +636,64 @@ WeightStoreManager::ReconcileWeightRevision(
                     << " result=" << static_cast<int>(result);
         }
 
+        uint64_t scheduled_affinities = 0;
+        uint64_t scheduled_members = 0;
+        uint64_t scheduled_bytes = 0;
+        auto reserve_affinity = [&](const AffinityObservation& affinity) {
+            const auto member_count =
+                static_cast<uint64_t>(affinity.keys.size());
+            if (scheduled_affinities != 0 &&
+                (scheduled_members >= weight_migration_max_members_per_round_ ||
+                 member_count > weight_migration_max_members_per_round_ -
+                                    scheduled_members ||
+                 scheduled_bytes >= weight_migration_max_bytes_per_round_ ||
+                 affinity.logical_bytes >
+                     weight_migration_max_bytes_per_round_ - scheduled_bytes)) {
+                return false;
+            }
+            if (scheduled_affinities == 0) {
+                scheduled_members = std::min(
+                    weight_migration_max_members_per_round_, member_count);
+                scheduled_bytes =
+                    std::min(weight_migration_max_bytes_per_round_,
+                             affinity.logical_bytes);
+            } else {
+                scheduled_members += member_count;
+                scheduled_bytes += affinity.logical_bytes;
+            }
+            ++scheduled_affinities;
+            return true;
+        };
+
         for (const auto& [affinity_id, affinity] : affinities) {
-            if (hot_affinities.contains(affinity_id)) {
+            const bool should_be_hot = hot_affinities.contains(affinity_id);
+            const bool needs_action =
+                should_be_hot
+                    ? !affinity.all_memory
+                    : (!affinity.all_have_cold ||
+                       (view->active_lease_count == 0 && !affinity.all_cold));
+            if (!needs_action) {
+                continue;
+            }
+            if (!reserve_affinity(affinity)) {
+                break;
+            }
+            if (should_be_hot) {
                 for (const auto& key : affinity.keys) {
-                    const auto result = backend_.PromoteWeightObject(tenant_id, key);
+                    const auto result =
+                        backend_.PromoteWeightObject(tenant_id, key);
                     VLOG(1) << "weight_rehydrate_promotion key=" << key
                             << " result=" << static_cast<int>(result);
                 }
                 continue;
             }
 
-            bool has_complete_cold_unit = true;
-            for (const auto& key : affinity.keys) {
-                const auto member = std::find_if(
-                    members->begin(), members->end(),
-                    [&](const auto& item) { return item.key == key; });
-                if (member == members->end() || !member->has_cold) {
-                    has_complete_cold_unit = false;
-                    offload_failed = !backend_.QueueManagedWeightMemberOffload(
-                                         current, key) ||
-                                     offload_failed;
-                }
+            for (const auto& key : affinity.keys_without_cold) {
+                offload_failed =
+                    !backend_.QueueManagedWeightMemberOffload(current, key) ||
+                    offload_failed;
             }
-            if (has_complete_cold_unit && view->active_lease_count == 0) {
+            if (affinity.all_have_cold && view->active_lease_count == 0) {
                 backend_.EvictManagedWeightMembersToCold(current,
                                                          affinity.keys);
             }
