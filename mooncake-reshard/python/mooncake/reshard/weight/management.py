@@ -53,6 +53,11 @@ class WeightMigrationMode(IntEnum):
     AUTO = 2
 
 
+class WeightUpsertMode(IntEnum):
+    PUT_FIRST = 0
+    DELETE_FIRST = 1
+
+
 class WeightOperationKind(IntEnum):
     MIGRATING = 0
     REPAIRING = 1
@@ -410,4 +415,5 @@ __all__ = [
     "WeightRevisionPage",
     "WeightRevisionView",
     "WeightStoragePolicy",
+    "WeightUpsertMode",
 ]
