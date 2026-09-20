@@ -1323,7 +1323,7 @@ class MasterService {
     void EvictManagedWeightMembersToCold(
         const WeightRevisionMetadata& metadata,
         const std::vector<std::string>& member_keys);
-    void QueueManagedWeightMemberOffload(const WeightRevisionMetadata& metadata,
+    bool QueueManagedWeightMemberOffload(const WeightRevisionMetadata& metadata,
                                          const std::string& member_key);
 
     void ReleaseLocalDiskUsage(std::span<const Replica> replicas);
