@@ -364,3 +364,393 @@ def test_delete_first_busy_fails_before_target_import() -> None:
     assert raw.catalog[base_identity].availability is WeightAvailabilityState.READY
     assert all(identity.weight_generation != 2 for identity in raw.catalog)
     assert raw.upsert_events == []
+
+
+@pytest.mark.parametrize("invalid_mode", [True, 0, 1])
+def test_upsert_rejects_non_enum_mode_before_mutation(invalid_mode) -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    raw.upsert_events.clear()
+
+    with pytest.raises(WeightStoreError, match="WeightUpsertMode"):
+        store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=base_identity,
+            expected_metadata_generation=2,
+            mode=invalid_mode,
+            tenant_id="tenant-a",
+        )
+
+    assert raw.catalog[base_identity].availability is WeightAvailabilityState.READY
+    assert raw.upsert_events == []
+
+
+def test_upsert_abort_keeps_put_first_base_and_releases_claim() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    raw.upsert_events.clear()
+
+    with pytest.raises(RuntimeError, match="cancel replacement"):
+        with store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=base_identity,
+            expected_metadata_generation=2,
+            tenant_id="tenant-a",
+            request_id="abort-replacement",
+        ):
+            raise RuntimeError("cancel replacement")
+
+    assert raw.catalog[base_identity].availability is WeightAvailabilityState.READY
+    assert raw.upsert_events[-1] == "claim_aborted"
+
+
+def test_put_first_abort_retries_after_claim_abort_was_not_delivered() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    writer = store.weight_upsert(
+        _descriptor(target),
+        _SnapshotAdapter(target),
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        tenant_id="tenant-a",
+        request_id="retry-put-first-abort",
+    )
+    raw.fail_abort_upsert_response_once = True
+
+    with pytest.raises(WeightStoreError, match="abort request not delivered"):
+        writer.abort()
+
+    assert raw.catalog[writer.identity].availability is WeightAvailabilityState.DELETED
+    assert writer.request_id not in raw.released_upserts
+    writer.abort()
+
+    assert writer.request_id in raw.released_upserts
+    assert raw.catalog[base_identity].availability is WeightAvailabilityState.READY
+
+
+def test_weight_put_abort_still_deletes_importing_revision() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    source = source_manifests(dp=1, tp=1, weight_generation=1)
+    writer = store.weight_put(
+        _descriptor(source),
+        _SnapshotAdapter(source),
+        tenant_id="tenant-a",
+    )
+
+    writer.abort()
+
+    assert raw.catalog[writer.identity].availability is WeightAvailabilityState.DELETED
+
+
+def test_put_first_payload_failure_keeps_base_ready() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    writer = store.weight_upsert(
+        _descriptor(target),
+        _SnapshotAdapter(target),
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        tenant_id="tenant-a",
+        request_id="failed-payload",
+    )
+    raw.fail_key = writer._plan.operations[0].target.object_key
+    fragment = target.bindings[0].fragments[0]
+
+    with pytest.raises(WeightStoreError, match="batch_put_from failed"):
+        writer.weight_put_tensor(
+            target.placement.tensors[0].tensor_id,
+            fragment.placement_fragment_id,
+        )
+
+    assert raw.catalog[base_identity].availability is WeightAvailabilityState.READY
+    assert raw.upsert_events[-1] == "claim_aborted"
+
+
+def test_delete_first_payload_failure_recovers_with_same_request() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=2, weight_generation=1)
+    target = source_manifests(dp=1, tp=2, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    request_id = "recover-delete-first"
+    writer = store.weight_upsert(
+        _descriptor(target),
+        _SnapshotAdapter(target),
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        mode=weight.WeightUpsertMode.DELETE_FIRST,
+        tenant_id="tenant-a",
+        request_id=request_id,
+    )
+    first_fragment = target.bindings[0].fragments[0]
+    writer.weight_put_tensor(
+        target.placement.tensors[0].tensor_id,
+        first_fragment.placement_fragment_id,
+    )
+    first_payload_key = writer._plan.operations[0].target.object_key
+    assert first_payload_key in raw.objects
+    raw.fail_key = writer._plan.operations[1].target.object_key
+
+    with pytest.raises(WeightStoreError, match="batch_put_from failed"):
+        writer.weight_put_tensor(
+            target.placement.tensors[0].tensor_id,
+            target.bindings[1].fragments[0].placement_fragment_id,
+        )
+
+    assert first_payload_key not in raw.objects
+    assert raw.catalog[writer.identity].availability is WeightAvailabilityState.DELETED
+    with pytest.raises(weight.WeightManagementError) as error:
+        store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=base_identity,
+            expected_metadata_generation=2,
+            mode=weight.WeightUpsertMode.DELETE_FIRST,
+            tenant_id="tenant-a",
+            request_id="competing-delete-first",
+        )
+    assert error.value.code is weight.WeightManagementErrorCode.BUSY
+
+    raw.fail_key = None
+    retry = store.weight_upsert(
+        _descriptor(target),
+        _SnapshotAdapter(target),
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        mode=weight.WeightUpsertMode.DELETE_FIRST,
+        tenant_id="tenant-a",
+        request_id=request_id,
+    )
+    assert retry.request_id == request_id
+    assert raw.catalog[retry.identity].availability is WeightAvailabilityState.IMPORTING
+
+    _commit_writer(retry, target)
+
+    assert raw.catalog[retry.identity].availability is WeightAvailabilityState.READY
+
+
+def test_delete_first_begin_response_loss_retries_with_derived_request_id() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    raw.fail_begin_response_once = True
+
+    with pytest.raises(WeightStoreError, match="begin response lost"):
+        store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=base_identity,
+            expected_metadata_generation=2,
+            mode=weight.WeightUpsertMode.DELETE_FIRST,
+            tenant_id="tenant-a",
+        )
+
+    persisted_request_id = next(iter(raw.upsert_requests))
+    assert raw.catalog[base_identity].availability is WeightAvailabilityState.DELETED
+    retry = store.weight_upsert(
+        _descriptor(target),
+        _SnapshotAdapter(target),
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        mode=weight.WeightUpsertMode.DELETE_FIRST,
+        tenant_id="tenant-a",
+    )
+
+    assert retry.request_id == persisted_request_id
+    _commit_writer(retry, target)
+    assert raw.catalog[retry.identity].availability is WeightAvailabilityState.READY
+
+
+def test_upsert_requires_same_lineage_and_increasing_generation() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    base_identity, _ = _commit_source(store, base)
+    raw.upsert_events.clear()
+
+    with pytest.raises(WeightStoreError, match="generation must increase"):
+        store.weight_upsert(
+            _descriptor(base),
+            _SnapshotAdapter(base),
+            replacing=base_identity,
+            expected_metadata_generation=2,
+            tenant_id="tenant-a",
+        )
+
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    wrong_tenant = replace(base_identity, tenant_id="tenant-b")
+    with pytest.raises(WeightStoreError, match="same lineage"):
+        store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=wrong_tenant,
+            expected_metadata_generation=2,
+            tenant_id="tenant-a",
+        )
+    assert raw.upsert_events == []
+
+
+def test_upsert_derives_stable_request_id_from_immutable_arguments() -> None:
+    def derive(
+        *,
+        mode=weight.WeightUpsertMode.PUT_FIRST,
+        target_generation=2,
+        expected_metadata_generation=2,
+    ) -> str:
+        raw = UpsertInMemoryStore()
+        _, store = make_weight_store(raw)
+        base = source_manifests(dp=1, tp=1, weight_generation=1)
+        target = source_manifests(
+            dp=1,
+            tp=1,
+            weight_generation=target_generation,
+        )
+        base_identity, _ = _commit_source(store, base)
+        if expected_metadata_generation != 2:
+            raw.catalog[base_identity] = replace(
+                raw.catalog[base_identity],
+                metadata_generation=expected_metadata_generation,
+            )
+        return store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=base_identity,
+            expected_metadata_generation=expected_metadata_generation,
+            mode=mode,
+            tenant_id="tenant-a",
+        ).request_id
+
+    first = derive()
+    assert first == derive()
+    assert len(first) == 64
+    int(first, 16)
+    assert first != derive(mode=weight.WeightUpsertMode.DELETE_FIRST)
+    assert first != derive(target_generation=3)
+    assert first != derive(expected_metadata_generation=3)
+
+
+def test_upsert_rejects_explicit_empty_request_id() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+
+    with pytest.raises(WeightStoreError, match="request_id"):
+        store.weight_upsert(
+            _descriptor(target),
+            _SnapshotAdapter(target),
+            replacing=base_identity,
+            expected_metadata_generation=2,
+            tenant_id="tenant-a",
+            request_id="",
+        )
+
+
+def test_put_first_commit_retry_reuses_request_after_uncertain_response() -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=1, weight_generation=1)
+    target = source_manifests(dp=1, tp=1, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    writer = store.weight_upsert(
+        _descriptor(target),
+        _SnapshotAdapter(target),
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        tenant_id="tenant-a",
+        request_id="stable-retry-id",
+    )
+    for binding in target.bindings:
+        fragment = binding.fragments[0]
+        writer.weight_put_tensor(
+            target.placement.tensors[0].tensor_id,
+            fragment.placement_fragment_id,
+        )
+    raw.fail_commit_response_once = True
+
+    with pytest.raises(WeightStoreError, match="response lost"):
+        writer.commit()
+
+    assert writer.request_id == "stable-retry-id"
+    assert raw.catalog[base_identity].availability is WeightAvailabilityState.DELETED
+    assert writer.commit() == writer._plan.manifest
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("changed_source", [False, True])
+def test_upsert_reconstructed_writer_resumes_upload(
+    published, changed_source, monkeypatch
+) -> None:
+    raw = UpsertInMemoryStore()
+    _, store = make_weight_store(raw)
+    base = source_manifests(dp=1, tp=2, weight_generation=1)
+    target = source_manifests(dp=1, tp=2, weight_generation=2)
+    base_identity, _ = _commit_source(store, base)
+    args = dict(
+        replacing=base_identity,
+        expected_metadata_generation=2,
+        tenant_id="tenant-a",
+        request_id="reconstructed-writer",
+    )
+    writer = store.weight_upsert(_descriptor(target), _SnapshotAdapter(target), **args)
+    assert writer._plan.manifest.created_at == "1970-01-01T00:00:00.001Z"
+    writer.weight_put_tensor(
+        target.placement.tensors[0].tensor_id,
+        target.bindings[0].fragments[0].placement_fragment_id,
+    )
+    if published:
+        writer.weight_put_tensor(
+            target.placement.tensors[0].tensor_id,
+            target.bindings[1].fragments[0].placement_fragment_id,
+        )
+        original_commit = raw.commit_weight_import
+
+        def cut_commit(*args):
+            raise RuntimeError("interrupted after manifest publication")
+
+        monkeypatch.setattr(raw, "commit_weight_import", cut_commit)
+        with pytest.raises(WeightStoreError, match="interrupted"):
+            writer.commit()
+        monkeypatch.setattr(raw, "commit_weight_import", original_commit)
+
+    _, rebuilt_store = make_weight_store(raw)
+    target = source_manifests(dp=1, tp=2, weight_generation=2)
+    if changed_source:
+        target = with_empty_participant(
+            target, participant_id="extra-stage", rank=ParallelRank(pp=1)
+        )
+    retry = rebuilt_store.weight_upsert(
+        _descriptor(target), _SnapshotAdapter(target), **args
+    )
+    if changed_source:
+        with pytest.raises(
+            (WeightStoreError, weight.WeightManagementError), match="(?i)conflict"
+        ):
+            _commit_writer(retry, target)
+        assert (
+            raw.catalog[retry.identity].availability
+            is WeightAvailabilityState.IMPORTING
+        )
+        return
+    assert retry._plan.manifest == writer._plan.manifest
+    assert retry._plan.control_key == writer._plan.control_key
+    _commit_writer(retry, target)
+    assert raw.catalog[retry.identity].availability is WeightAvailabilityState.READY
