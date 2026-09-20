@@ -395,6 +395,7 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
                 importing.residency = WeightResidencyState::UNKNOWN;
                 importing.operation = WeightOperationState::NONE;
                 importing.operation_id = 0;
+                importing.observed_hot_ratio = 0.0;
                 importing.manifest.manifest_key.clear();
                 importing.manifest.manifest_sha256.clear();
                 importing.manifest.payload_keys_sha256.clear();
@@ -1067,7 +1068,9 @@ TEST_F(BatchOpLogSnapshotWriterTest,
             },
         .availability = WeightAvailabilityState::READY,
         .residency = WeightResidencyState::HOT,
-        .operation = WeightOperationState::NONE,
+        .affinity_count = 2,
+        .affinity_digest = std::string(64, 'c'),
+        .observed_hot_ratio = 1.0,
         .metadata_generation = 2,
         .created_at_ms = 100,
         .updated_at_ms = 102,

@@ -1589,6 +1589,10 @@ MasterService::DeleteWeightRevision(
     return weight_manager_.DeleteWeightRevision(request);
 }
 
+WeightMetadataStore::Result<WeightRevisionMetadata>
+MasterService::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
+    return weight_manager_.UpdateWeightPolicy(request);
+}
 std::vector<std::string> MasterService::GetGroupMemberKeys(
     const TenantId& tenant_id, const std::string& group_id) const {
     const metadata::Namespace* ns = namespaces_.Lookup(tenant_id);
@@ -1630,6 +1634,10 @@ void MasterService::EvictManagedWeightMembersToCold(
             continue;
         }
         ObjectMetadata& metadata = hold->metadata();
+        if (metadata.group_id != revision.manifest.payload_group_id ||
+            metadata.data_type != ObjectDataType::WEIGHT) {
+            continue;
+        }
         const bool has_cold =
             metadata.HasReplica([this](const Replica& replica) {
                 return !replica.is_memory_replica() &&
