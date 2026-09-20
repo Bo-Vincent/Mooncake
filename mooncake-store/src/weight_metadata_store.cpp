@@ -1,4 +1,5 @@
 #include "weight_metadata_store.h"
+#include "tenant_id.h"
 
 #include <algorithm>
 #include <charconv>
@@ -540,11 +541,13 @@ WeightMetadataStore::PrepareReleaseLease(
 }
 
 std::vector<WeightLeaseMutation> WeightMetadataStore::PrepareExpireLeases(
-    uint64_t now_ms) const {
+    uint64_t now_ms,
+    const std::optional<WeightRevisionIdentity>& identity) const {
     std::lock_guard lock(mutex_);
     std::vector<WeightLeaseMutation> expired;
     for (const auto& [lease_id, lease] : leases_) {
-        if (lease.expires_at_ms <= now_ms) {
+        if (lease.expires_at_ms <= now_ms &&
+            (!identity.has_value() || lease.identity == *identity)) {
             expired.push_back(WeightLeaseMutation{
                 .kind = WeightMetadataMutationKind::ERASE,
                 .lease_id = lease_id,
@@ -1094,6 +1097,18 @@ bool WeightMetadataStore::AllowsGroupMemberMutation(
     const auto revision = revisions_.find(group->second);
     return revision != revisions_.end() &&
            revision->second.availability == WeightAvailabilityState::IMPORTING;
+}
+
+std::unordered_set<std::string>
+WeightMetadataStore::SnapshotManagedWeightGroups() const {
+    std::lock_guard lock(mutex_);
+    std::unordered_set<std::string> groups;
+    groups.reserve(revisions_.size());
+    for (const auto& [identity, metadata] : revisions_) {
+        groups.insert(TenantId(identity.tenant_id)
+                          .MakeScopedKey(metadata.manifest.payload_group_id));
+    }
+    return groups;
 }
 
 WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {

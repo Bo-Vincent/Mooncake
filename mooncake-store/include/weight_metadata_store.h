@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <ylt/util/tl/expected.hpp>
@@ -83,7 +84,9 @@ class WeightMetadataStore {
         const RenewWeightRevisionLeaseRequest& request, uint64_t now_ms) const;
     Result<WeightLeaseMutation> PrepareReleaseLease(
         const ReleaseWeightRevisionLeaseRequest& request) const;
-    std::vector<WeightLeaseMutation> PrepareExpireLeases(uint64_t now_ms) const;
+    std::vector<WeightLeaseMutation> PrepareExpireLeases(
+        uint64_t now_ms, const std::optional<WeightRevisionIdentity>& identity =
+                             std::nullopt) const;
     Result<WeightRevisionLease> Publish(const WeightLeaseMutation& mutation);
     bool HasActiveLease(const WeightRevisionIdentity& identity,
                         uint64_t metadata_generation, uint64_t now_ms) const;
@@ -115,6 +118,7 @@ class WeightMetadataStore {
     bool IsManagedGroup(const std::string& payload_group_id) const;
     bool AllowsGroupMemberMutation(const std::string& payload_group_id) const;
     WeightMetadataSnapshot ExportSnapshot() const;
+    std::unordered_set<std::string> SnapshotManagedWeightGroups() const;
     Result<void> RestoreSnapshot(const WeightMetadataSnapshot& snapshot);
     void Clear();
 
