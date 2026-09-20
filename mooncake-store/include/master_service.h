@@ -1147,7 +1147,7 @@ class MasterService {
                                                const TenantId& tenant_id,
                                                bool force,
                                                bool allow_managed_weight);
-    WeightStoreManager weight_manager_{weight_backend_};
+    WeightStoreManager weight_manager_;
 
     class SoftPinDeadlineIndex {
         friend class test::MasterServiceTestPeer;
