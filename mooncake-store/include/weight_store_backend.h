@@ -9,6 +9,13 @@
 
 namespace mooncake {
 
+struct WeightStoreMemoryPressure {
+    double used_ratio;
+    double high_watermark;
+    double eviction_ratio;
+    bool eviction_requested;
+};
+
 struct WeightGroupMemberSnapshot {
     std::string key;
     std::string residency_affinity_id;
@@ -26,8 +33,10 @@ class WeightStoreBackend {
     // The consumer must arbitrate completion before publishing metadata.
     using DurableFinalize = std::function<void(const DurableResult&)>;
     virtual ~WeightStoreBackend() = default;
+    virtual WeightStoreMemoryPressure GetMemoryPressure() const = 0;
     virtual void UnregisterGroupMember(const TenantId& tenant_id,
-        const std::string& key, const std::string& group_id) = 0;
+                                       const std::string& key,
+                                       const std::string& group_id) = 0;
     virtual bool QueueManagedWeightMemberOffload(
         const WeightRevisionMetadata& revision, const std::string& key) = 0;
     virtual void EvictManagedWeightMembersToCold(
@@ -56,10 +65,12 @@ class MasterService;
 class MasterStoreBackend final : public WeightStoreBackend {
    public:
     explicit MasterStoreBackend(MasterService& master) : master_(master) {}
+    WeightStoreMemoryPressure GetMemoryPressure() const override;
     void UnregisterGroupMember(const TenantId& tenant_id,
-        const std::string& key, const std::string& group_id) override;
-    bool QueueManagedWeightMemberOffload(
-        const WeightRevisionMetadata& revision, const std::string& key) override;
+                               const std::string& key,
+                               const std::string& group_id) override;
+    bool QueueManagedWeightMemberOffload(const WeightRevisionMetadata& revision,
+                                         const std::string& key) override;
     void EvictManagedWeightMembersToCold(
         const WeightRevisionMetadata& revision,
         const std::vector<std::string>& keys) override;
