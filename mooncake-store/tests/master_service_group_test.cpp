@@ -134,10 +134,13 @@ TEST_F(MasterServiceTest,
     payload_config.data_type = ObjectDataType::WEIGHT;
     payload_config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
+    payload_config.residency_affinity_ids =
+        std::vector<std::string>{payload_key};
     PutCompletedObject(service, client_id, payload_key, payload_config,
                        kObjectSize);
     auto manifest_config = payload_config;
     manifest_config.data_type = ObjectDataType::METADATA;
+    manifest_config.residency_affinity_ids.reset();
     PutCompletedObject(service, client_id, manifest_key, manifest_config,
                        kObjectSize);
     auto ready = service.CommitWeightImport(CommitWeightImportRequest{

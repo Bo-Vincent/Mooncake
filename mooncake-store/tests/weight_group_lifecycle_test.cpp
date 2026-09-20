@@ -48,9 +48,11 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
         config.with_hard_pin = true;
         config.group_ids =
             std::vector<std::string>{importing->manifest.payload_group_id};
+        config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
         config.data_type = ObjectDataType::WEIGHT;
         PutCompletedObject(service, client_id, "payload-a", config, 1024);
         config.data_type = ObjectDataType::METADATA;
+        config.residency_affinity_ids.reset();
         PutCompletedObject(service, client_id, ManifestKey(), config, 128);
         auto ready = service.CommitWeightImport(CommitWeightImportRequest{
             .identity = Identity(),
@@ -111,6 +113,39 @@ TEST_F(WeightGroupLifecycleTest, LeaseBlocksOperationAndDelete) {
     });
     ASSERT_FALSE(deleted.has_value());
     EXPECT_EQ(WeightManagementError::BUSY, deleted.error());
+}
+
+TEST_F(WeightGroupLifecycleTest, SnapshotExposesOpaqueResidencyAffinityId) {
+    MasterService service;
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
+    const UUID client_id = generate_uuid();
+    auto importing = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = Identity(),
+        .payload_group_id = {},
+        .expected_payload_count = 1,
+        .expected_logical_bytes = 1024,
+        .policy = std::nullopt,
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
+    });
+    ASSERT_TRUE(importing.has_value());
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.group_ids =
+        std::vector<std::string>{importing->manifest.payload_group_id};
+    config.residency_affinity_ids =
+        std::vector<std::string>{"opaque-affinity-id"};
+    config.data_type = ObjectDataType::WEIGHT;
+    PutCompletedObject(service, client_id, "payload-a", config, 1024);
+
+    auto affinity_ids = GetWeightGroupAffinityIdsForTest(
+        service, Identity(), importing->manifest.payload_group_id);
+    ASSERT_EQ(1u, affinity_ids.size());
+    EXPECT_EQ("opaque-affinity-id", affinity_ids.front());
 }
 
 TEST_F(WeightGroupLifecycleTest, OperationRemainsPendingUntilTargetObserved) {

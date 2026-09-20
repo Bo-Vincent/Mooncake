@@ -56,6 +56,8 @@ class WeightReconciliationTest : public MasterServiceTest {
         config.with_hard_pin = true;
         config.group_ids =
             std::vector<std::string>{importing->manifest.payload_group_id};
+        config.residency_affinity_ids =
+            std::vector<std::string>{"affinity-" + identity.revision};
         config.data_type = ObjectDataType::WEIGHT;
         PutCompletedObject(service, client_id, payload_key, config, 1024);
         config.data_type = ObjectDataType::METADATA;
@@ -98,6 +100,7 @@ TEST_F(WeightReconciliationTest, ExpiresLeasesAndAbortsAbandonedImports) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy = std::nullopt,
         .affinity_summary = WeightAffinitySummary{
             .affinity_count = 1,
             .affinity_digest = std::string(64, 'c'),
@@ -133,6 +136,7 @@ TEST_F(WeightReconciliationTest, WorkLimitBoundsAbandonedImportTransitions) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy = std::nullopt,
         .affinity_summary = WeightAffinitySummary{
             .affinity_count = 1,
             .affinity_digest = std::string(64, 'c'),
@@ -143,6 +147,7 @@ TEST_F(WeightReconciliationTest, WorkLimitBoundsAbandonedImportTransitions) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy = std::nullopt,
         .affinity_summary = WeightAffinitySummary{
             .affinity_count = 1,
             .affinity_digest = std::string(64, 'c'),
@@ -267,6 +272,7 @@ TEST_F(WeightReconciliationTest, ProjectsLeaseAndOperationMetrics) {
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
             .target_residency = WeightResidencyState::COLD,
+            .mixed_hot_ratio = std::nullopt,
         });
     ASSERT_TRUE(operation.has_value());
     const auto now_ms = operation->started_at_ms + 100;

@@ -58,6 +58,9 @@ class MasterServiceWeightManagementTest : public MasterServiceTest {
         config.with_hard_pin = true;
         config.data_type = data_type;
         config.group_ids = std::vector<std::string>{group_id};
+        if (data_type == ObjectDataType::WEIGHT) {
+            config.residency_affinity_ids = std::vector<std::string>{key};
+        }
         PutCompletedObject(service, client_id, key, config, size);
     }
 

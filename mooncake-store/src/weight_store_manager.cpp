@@ -107,7 +107,8 @@ WeightStoreManager::CommitWeightImport(
     if (mutation->no_op) {
         return PersistAndPublishWeightMutation(*mutation);
     }
-    auto validation = ValidateWeightGroupForCommit(request);
+    auto validation =
+        ValidateWeightGroupForCommit(request, mutation->next->affinity_count);
     if (!validation) {
         return tl::make_unexpected(validation.error());
     }
@@ -151,7 +152,8 @@ WeightStoreManager::ListWeightRevisions(
 
 WeightMetadataStore::Result<void>
 WeightStoreManager::ValidateWeightGroupForCommit(
-    const CommitWeightImportRequest& request) const {
+    const CommitWeightImportRequest& request,
+    uint64_t expected_affinity_count) const {
     const auto expected_manifest_key = MakeWeightManifestKey(request.identity);
     if (request.manifest.manifest_key != expected_manifest_key) {
         return tl::make_unexpected(WeightManagementError::CONFLICT);
@@ -168,6 +170,7 @@ WeightStoreManager::ValidateWeightGroupForCommit(
 
     bool found_manifest = false;
     uint64_t logical_bytes = 0;
+    std::unordered_set<std::string> affinity_ids;
     std::vector<std::string> payload_keys;
     payload_keys.reserve(request.manifest.payload_count);
     for (const auto& member : *members) {
@@ -183,17 +186,20 @@ WeightStoreManager::ValidateWeightGroupForCommit(
             continue;
         }
         if (member.data_type != ObjectDataType::WEIGHT ||
+            member.residency_affinity_id.empty() ||
             member.size >
                 std::numeric_limits<uint64_t>::max() - logical_bytes) {
             return tl::make_unexpected(WeightManagementError::CONFLICT);
         }
         logical_bytes += member.size;
+        affinity_ids.insert(member.residency_affinity_id);
         payload_keys.push_back(member.key);
     }
     if (!found_manifest) {
         return tl::make_unexpected(WeightManagementError::NOT_FOUND);
     }
     if (logical_bytes != request.manifest.logical_bytes ||
+        affinity_ids.size() != expected_affinity_count ||
         payload_keys.size() != request.manifest.payload_count ||
         ComputeWeightPayloadKeysSha256(payload_keys) !=
             request.manifest.payload_keys_sha256) {

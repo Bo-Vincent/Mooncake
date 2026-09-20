@@ -83,7 +83,8 @@ class WeightStoreManager {
     std::unique_lock<std::mutex> LockGroup(
         const WeightRevisionIdentity& identity);
     WeightMetadataStore::Result<void> ValidateWeightGroupForCommit(
-        const CommitWeightImportRequest& request) const;
+        const CommitWeightImportRequest& request,
+        uint64_t expected_affinity_count) const;
 
     WeightStoreBackend& backend_;
     WeightMetadataStore weight_metadata_;

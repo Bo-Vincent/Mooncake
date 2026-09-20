@@ -1515,7 +1515,9 @@ class MasterService {
     auto InsertMetadata(MetadataShardAccessorRW& shard, const UUID& client_id,
                         const std::string& key, uint64_t value_length,
                         const ReplicateConfig& config,
-                        const std::string& group_id, const TenantId& tenant_id,
+                        const std::string& group_id,
+                        const std::string& residency_affinity_id,
+                        const TenantId& tenant_id,
                         const std::chrono::system_clock::time_point& now,
                         const ResolvedSoftPinRequest& soft_pin_request,
                         std::vector<Replica>&& replicas,
@@ -1530,7 +1532,8 @@ class MasterService {
         MetadataShardAccessorRW& shard, const UUID& client_id,
         const std::string& key, uint64_t value_length,
         const ReplicateConfig& config, const std::string& writer_host_id,
-        const std::string& group_id, const TenantId& tenant_id,
+        const std::string& group_id, const std::string& residency_affinity_id,
+        const TenantId& tenant_id,
         const std::chrono::system_clock::time_point& now,
         const ResolvedSoftPinRequest& soft_pin_request,
         std::optional<std::chrono::system_clock::time_point>
@@ -1854,7 +1857,7 @@ class MasterService {
                 std::forward_as_tuple(
                     client_id, now, total_length, std::move(replicas),
                     std::nullopt, enable_hard_pin, data_type, group_id,
-                    object_id_.tenant_id, object_id_.user_key));
+                    std::string{}, object_id_.tenant_id, object_id_.user_key));
             it_ = result.first;
         }
 
