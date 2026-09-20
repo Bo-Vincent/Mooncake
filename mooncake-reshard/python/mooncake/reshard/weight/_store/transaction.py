@@ -290,7 +290,7 @@ class WeightUploadTransaction:
             raise WeightStoreError(
                 f"manifest existence check failed: {manifest_key}: {exists}"
             )
-        return self.client.load_manifest(manifest_key)
+        return self.client._weight_get_manifest(manifest_key)
 
     def _resolve_manifest_commit(
         self,
