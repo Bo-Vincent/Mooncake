@@ -8213,8 +8213,11 @@ void MasterService::RunDfsEviction() {
                         return matches_candidate(replica, candidate) &&
                                replica.is_processing();
                     });
+                const bool managed_weight =
+                    !metadata.group_id.empty() &&
+                    weight_manager_.IsManagedGroup(metadata.group_id);
                 accepted[i] =
-                    !candidate_is_processing &&
+                    !managed_weight && !candidate_is_processing &&
                     !tenant_state.processing_keys.contains(candidate.key) &&
                     !metadata.IsHardPinned() && metadata.IsLeaseExpired(now) &&
                     (!IsSoftPinActive(metadata, now) ||
@@ -9772,8 +9775,8 @@ tl::expected<UUID, ErrorCode> MasterService::SubmitDynamicReplicaCopyTask(
 }
 
 PromotionQueueResult MasterService::TryPushPromotionQueue(
-    const ObjectIdentity& object_id, bool record_candidate) {
-    if (!promotion_on_hit_ || !promotion_sketch_) {
+    const ObjectIdentity& object_id, bool record_candidate, bool force) {
+    if (!force && (!promotion_on_hit_ || !promotion_sketch_)) {
         return PromotionQueueResult::kDisabled;
     }
     const auto& key = object_id.user_key;
@@ -9784,8 +9787,10 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
     // is clamped into [1, 255] at config parse time (see master.cpp), so
     // direct comparison is well-defined and threshold=0 (which would
     // bypass the gate entirely since freq is uint8_t) cannot reach here.
-    const uint8_t freq = promotion_sketch_->increment(admission_key);
-    if (freq < promotion_admission_threshold_) {
+    const uint8_t freq =
+        force ? std::numeric_limits<uint8_t>::max()
+              : promotion_sketch_->increment(admission_key);
+    if (!force && freq < promotion_admission_threshold_) {
         MasterMetricManager::instance().inc_promotion_rejected_frequency();
         return PromotionQueueResult::kFrequencyRejected;
     }
@@ -9796,7 +9801,7 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
     const double used_ratio = segment_manager_.GetMemoryUsage().used_ratio();
     if (used_ratio >= eviction_high_watermark_ratio_) {
         MasterMetricManager::instance().inc_promotion_rejected_watermark();
-        if (record_candidate) {
+        if (record_candidate && !force) {
             MetadataAccessorRW accessor(this, object_id);
             if (accessor.Exists()) {
                 RecordOrUpdateCandidate(accessor.GetTenantState(), key, freq,
@@ -9812,6 +9817,8 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
     // its RO accessor.
     MetadataAccessorRW accessor(this, object_id);
     if (!accessor.Exists()) {
+        VLOG(1) << "promotion_rejected key=" << key
+                << " reason=not_found force=" << force;
         return PromotionQueueResult::kNotFound;
     }
     auto& metadata = accessor.Get();
@@ -9821,6 +9828,8 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
     // processing_keys. Promotion must not establish a second owner.
     if (accessor.InProcessing()) {
         EraseCandidate(tenant_state, key);
+        VLOG(1) << "promotion_rejected key=" << key
+                << " reason=primary_write_in_flight force=" << force;
         return PromotionQueueResult::kAlreadyInFlight;
     }
 
@@ -9835,6 +9844,8 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
             tenant_state.promotion_tasks.at(key).holder_id, object_id.tenant_id,
             key);
         EraseCandidate(tenant_state, key);
+        VLOG(1) << "promotion_rejected key=" << key
+                << " reason=promotion_in_flight force=" << force;
         return PromotionQueueResult::kAlreadyInFlight;
     }
     if (metadata.HasReplica(&Replica::fn_is_memory_replica)) {
@@ -9863,7 +9874,7 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
     if (promotion_in_flight_.load(std::memory_order_relaxed) >=
         promotion_queue_limit_) {
         MasterMetricManager::instance().inc_promotion_rejected_cap();
-        if (record_candidate) {
+        if (record_candidate && !force) {
             RecordOrUpdateCandidate(tenant_state, key, freq,
                                     PromotionCandidateReason::kQueueCap,
                                     ErrorCode::OK);
@@ -9891,7 +9902,7 @@ PromotionQueueResult MasterService::TryPushPromotionQueue(
             EraseCandidate(tenant_state, key);
             return PromotionQueueResult::kNoLocalDiskSource;
         }
-        if (record_candidate) {
+        if (record_candidate && !force) {
             RecordOrUpdateCandidate(tenant_state, key, freq,
                                     PromotionCandidateReason::kPushFailed,
                                     push_result.error());
