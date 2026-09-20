@@ -60,8 +60,10 @@ WeightMetadataStore::Result<T> PersistAndPublish(
 }  // namespace
 
 WeightStoreManager::WeightStoreManager(WeightStoreBackend& backend,
-                                       WeightStoragePolicy policy)
-    : backend_(backend), default_weight_storage_policy_(std::move(policy)) {
+                                       WeightStoragePolicy policy,
+                                       uint64_t migration_cooldown_ms)
+    : backend_(backend), default_weight_storage_policy_(std::move(policy)),
+      weight_migration_cooldown_ms_(migration_cooldown_ms) {
     const auto validation =
         ValidateWeightStoragePolicy(default_weight_storage_policy_);
     if (!validation.ok()) {
@@ -882,7 +884,6 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
     }
 
-    constexpr uint64_t kWeightMigrationCooldownMs = 30'000;
     const auto pressure = backend_.GetMemoryPressure();
     auto snapshot = weight_metadata_.ExportSnapshot();
     const double memory_used_ratio =
@@ -955,7 +956,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
             if (current) {
                 auto target = PlanAutomaticWeightMigration(
                     current->metadata, current->active_lease_count,
-                    *auto_signal, now_ms, kWeightMigrationCooldownMs);
+                    *auto_signal, now_ms, weight_migration_cooldown_ms_);
                 if (target.has_value()) {
                     auto started = StartWeightResidencyOperation(
                         StartWeightResidencyOperationRequest{

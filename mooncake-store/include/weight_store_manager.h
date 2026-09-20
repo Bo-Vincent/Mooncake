@@ -18,7 +18,8 @@ class WeightStoreManager {
 
    public:
     explicit WeightStoreManager(WeightStoreBackend& backend,
-                                WeightStoragePolicy policy = {});
+                                WeightStoragePolicy policy = {},
+                                uint64_t migration_cooldown_ms = 30'000);
 
     WeightMetadataSnapshot ExportSnapshot() const {
         return weight_metadata_.ExportSnapshot();
@@ -93,6 +94,7 @@ class WeightStoreManager {
 
     WeightStoreBackend& backend_;
     const WeightStoragePolicy default_weight_storage_policy_;
+    const uint64_t weight_migration_cooldown_ms_;
     WeightMetadataStore weight_metadata_;
     std::array<std::mutex, 4096> group_locks_;
     std::atomic<size_t> weight_reconciliation_offset_{0};
