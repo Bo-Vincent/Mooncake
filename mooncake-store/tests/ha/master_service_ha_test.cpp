@@ -1433,6 +1433,88 @@ TEST_F(MasterServiceHATest,
     EXPECT_TRUE(NeedMemoryEvictionForTesting(service));
 }
 
+TEST_F(MasterServiceHATest, LegacyStandbyRestorePreservesWeightAffinities) {
+    const WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "restore-affinities",
+        .revision = "step-1",
+        .weight_generation = 1,
+    };
+    MasterService source;
+    auto importing = source.BeginWeightImport(BeginWeightImportRequest{
+        .identity = identity,
+        .expected_payload_count = 2,
+        .expected_logical_bytes = 2048,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 2,
+                .affinity_digest = std::string(64, 'c'),
+            },
+    });
+    ASSERT_TRUE(importing.has_value());
+    const auto group_id = importing->manifest.payload_group_id;
+    const auto manifest_key = MakeWeightManifestKey(identity);
+    const std::string endpoint = "standby_weight_affinities";
+    auto first = MakeStandbyObject("affinity-payload-a", endpoint);
+    auto second = MakeStandbyObject("affinity-payload-b", endpoint);
+    auto manifest = MakeStandbyObject(manifest_key, endpoint, 128);
+    first.metadata.data_type = ObjectDataType::WEIGHT;
+    second.metadata.data_type = ObjectDataType::WEIGHT;
+    manifest.metadata.data_type = ObjectDataType::METADATA;
+    first.metadata.residency_affinity_id = "affinity-a";
+    second.metadata.residency_affinity_id = "affinity-b";
+    std::vector<StandbyObjectEntry> objects{first, second, manifest};
+    for (size_t index = 0; index < objects.size(); ++index) {
+        auto& metadata = objects[index].metadata;
+        metadata.group_id = group_id;
+        metadata.replicas.front().id = index + 1;
+        metadata.replicas.front()
+            .get_memory_descriptor()
+            .buffer_descriptor.buffer_address_ =
+            kDefaultSegmentBase + index * 1024;
+    }
+    WeightMetadataSnapshot snapshot;
+    snapshot.metadata.push_back(*importing);
+    MasterService restored;
+    ASSERT_TRUE(restored.RestoreFromStandbySnapshot(
+        objects, 7, {MakeStandbyMemorySegment(endpoint)}, snapshot));
+    auto before_remount =
+        restored.GetReplicaList("affinity-payload-a", kDefaultTenant);
+    ASSERT_FALSE(before_remount.has_value());
+    EXPECT_EQ(ErrorCode::REPLICA_IS_NOT_READY, before_remount.error());
+    ASSERT_TRUE(
+        restored.ReMountSegment({MakeSegment(endpoint)}, generate_uuid())
+            .has_value());
+    for (const auto& key : std::vector<std::string>{
+             "affinity-payload-a", "affinity-payload-b", manifest_key}) {
+        auto replicas = restored.GetReplicaList(key, kDefaultTenant);
+        ASSERT_TRUE(replicas.has_value()) << toString(replicas.error());
+    }
+    auto ready = restored.CommitWeightImport(CommitWeightImportRequest{
+        .identity = identity,
+        .expected_metadata_generation = importing->metadata_generation,
+        .manifest =
+            WeightManifestReference{
+                .manifest_key = manifest_key,
+                .manifest_sha256 = std::string(64, 'a'),
+                .payload_group_id = group_id,
+                .payload_keys_sha256 = ComputeWeightPayloadKeysSha256(
+                    {"affinity-payload-a", "affinity-payload-b"}),
+                .payload_count = 2,
+                .logical_bytes = 2048,
+            },
+    });
+    ASSERT_TRUE(ready.has_value()) << static_cast<int>(ready.error());
+    EXPECT_EQ(WeightAvailabilityState::READY, ready->availability);
+    EXPECT_EQ(2u, ready->affinity_count);
+}
+
 TEST_F(MasterServiceHATest, RestoreFromStandbyPreservesMemoryBufferDescriptor) {
     MasterService service(
         MasterServiceConfig::builder().set_enable_ha(false).build());
