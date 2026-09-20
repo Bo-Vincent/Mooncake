@@ -507,13 +507,20 @@ WeightStoreManager::PersistAndPublishWeightLeaseMutation(
     OpType type;
     std::string tenant_id;
     std::string payload;
-    if (mutation.kind == WeightMetadataMutationKind::UPSERT &&
-        mutation.next.has_value()) {
+    if (mutation.kind == WeightMetadataMutationKind::UPSERT) {
+        if (!mutation.next.has_value() ||
+            !mutation.last_accessed_at_ms.has_value()) {
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+        }
         type = OpType::WEIGHT_LEASE_UPSERT;
         tenant_id = mutation.next->identity.tenant_id;
-        const auto encoded = struct_pack::serialize(*mutation.next);
+        const auto encoded = struct_pack::serialize(WeightLeaseUpsertOp{
+            .lease = *mutation.next,
+            .last_accessed_at_ms = *mutation.last_accessed_at_ms,
+        });
         payload.assign(encoded.begin(), encoded.end());
-    } else if (mutation.previous.has_value()) {
+    } else if (mutation.kind == WeightMetadataMutationKind::ERASE &&
+               mutation.previous.has_value()) {
         type = OpType::WEIGHT_LEASE_DELETE;
         tenant_id = mutation.previous->identity.tenant_id;
         WeightLeaseDeleteOp deletion{
@@ -1154,20 +1161,10 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         !memory_pressure && memory_used_ratio < memory_low_watermark;
     if (memory_pressure) {
         std::sort(snapshot.metadata.begin(), snapshot.metadata.end(),
-                  [](const auto& lhs, const auto& rhs) {
-                      if (lhs.updated_at_ms != rhs.updated_at_ms) {
-                          return lhs.updated_at_ms < rhs.updated_at_ms;
-                      }
-                      if (lhs.manifest.logical_bytes !=
-                          rhs.manifest.logical_bytes) {
-                          return lhs.manifest.logical_bytes >
-                                 rhs.manifest.logical_bytes;
-                      }
-                      return lhs.identity < rhs.identity;
-                  });
+                  WeightAutoMigrationCandidateLess);
     }
     const size_t revision_count = snapshot.metadata.size();
-    const size_t start = revision_count == 0
+    const size_t start = revision_count == 0 || memory_pressure
                              ? 0
                              : weight_reconciliation_offset_ % revision_count;
     size_t examined = 0;
@@ -1269,7 +1266,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
     }
 
-    if (examined != 0) {
+    if (!memory_pressure && examined != 0) {
         weight_reconciliation_offset_ = (start + examined) % revision_count;
     }
     MasterMetricManager::instance().project_weight_metadata(
