@@ -305,7 +305,9 @@ TEST_F(MasterSnapshotCodecTest,
     ASSERT_TRUE(codec.Decode(target.get(), *encoded_live).has_value());
     EXPECT_EQ(live, WeightMetadata(*target).ExportSnapshot());
 
-    const WeightMetadataSnapshot empty;
+    const WeightMetadataSnapshot empty{
+        .lineages = std::vector<WeightLineageMetadata>{},
+    };
     auto encoded_empty = codec.Encode(state_view, &empty);
     ASSERT_TRUE(encoded_empty.has_value());
     ASSERT_TRUE(codec.Decode(target.get(), *encoded_empty).has_value());
