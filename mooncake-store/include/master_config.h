@@ -142,6 +142,7 @@ struct MasterConfig {
     uint64_t weight_import_idle_timeout_ms = 5 * 60 * 1000;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_lineage_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     uint32_t batch_oplog_retry_timeout_sec = 180;
@@ -285,6 +286,7 @@ class MasterServiceSupervisorConfig {
     uint64_t weight_import_idle_timeout_ms = 5 * 60 * 1000;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_lineage_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     uint32_t batch_oplog_retry_timeout_sec = 180;
@@ -430,6 +432,8 @@ class MasterServiceSupervisorConfig {
         weight_import_idle_timeout_ms = config.weight_import_idle_timeout_ms;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_lineage_oplog_capability_confirmed =
+            config.weight_lineage_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         batch_oplog_retry_timeout_sec = config.batch_oplog_retry_timeout_sec;
@@ -620,6 +624,7 @@ class WrappedMasterServiceConfig {
     uint64_t weight_import_idle_timeout_ms = 5 * 60 * 1000;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_lineage_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     std::string cluster_id = DEFAULT_CLUSTER_ID;
@@ -724,6 +729,8 @@ class WrappedMasterServiceConfig {
         weight_import_idle_timeout_ms = config.weight_import_idle_timeout_ms;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_lineage_oplog_capability_confirmed =
+            config.weight_lineage_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         cluster_id = config.cluster_id;
@@ -856,6 +863,8 @@ class WrappedMasterServiceConfig {
         weight_import_idle_timeout_ms = config.weight_import_idle_timeout_ms;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_lineage_oplog_capability_confirmed =
+            config.weight_lineage_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         cluster_id = config.cluster_id;
@@ -931,6 +940,7 @@ class MasterServiceConfigBuilder {
     uint64_t weight_import_idle_timeout_ms_ = 5 * 60 * 1000;
     bool enable_oplog_snapshot_ = false;
     uint64_t snapshot_chunk_object_count_ = 1000000;
+    bool weight_lineage_oplog_capability_confirmed_ = false;
     int oplog_poll_interval_ms_ = 1000;
     uint32_t oplog_batch_max_entries_ = 1024;
     uint64_t restore_repair_durable_timeout_ms_ =
@@ -1126,6 +1136,11 @@ class MasterServiceConfigBuilder {
         return *this;
     }
 
+    MasterServiceConfigBuilder& set_weight_lineage_oplog_capability_confirmed(
+        bool confirmed) {
+        weight_lineage_oplog_capability_confirmed_ = confirmed;
+        return *this;
+    }
     MasterServiceConfigBuilder& set_oplog_poll_interval_ms(int interval_ms) {
         oplog_poll_interval_ms_ = interval_ms;
         return *this;
@@ -1339,6 +1354,7 @@ class MasterServiceConfig {
     uint64_t weight_import_idle_timeout_ms = 5 * 60 * 1000;
     bool enable_oplog_snapshot = false;
     uint64_t snapshot_chunk_object_count = 1000000;
+    bool weight_lineage_oplog_capability_confirmed = false;
     int oplog_poll_interval_ms = 1000;
     uint32_t oplog_batch_max_entries = 1024;
     uint64_t restore_repair_durable_timeout_ms =
@@ -1439,6 +1455,8 @@ class MasterServiceConfig {
         weight_import_idle_timeout_ms = config.weight_import_idle_timeout_ms;
         enable_oplog_snapshot = config.enable_oplog_snapshot;
         snapshot_chunk_object_count = config.snapshot_chunk_object_count;
+        weight_lineage_oplog_capability_confirmed =
+            config.weight_lineage_oplog_capability_confirmed;
         oplog_poll_interval_ms = config.oplog_poll_interval_ms;
         oplog_batch_max_entries = config.oplog_batch_max_entries;
         cluster_id = config.cluster_id;
@@ -1521,6 +1539,8 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.weight_import_idle_timeout_ms = weight_import_idle_timeout_ms_;
     config.enable_oplog_snapshot = enable_oplog_snapshot_;
     config.snapshot_chunk_object_count = snapshot_chunk_object_count_;
+    config.weight_lineage_oplog_capability_confirmed =
+        weight_lineage_oplog_capability_confirmed_;
     config.oplog_poll_interval_ms = oplog_poll_interval_ms_;
     config.oplog_batch_max_entries = oplog_batch_max_entries_;
     config.restore_repair_durable_timeout_ms =

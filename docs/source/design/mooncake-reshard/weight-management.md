@@ -258,8 +258,8 @@ explicit rolling-upgrade capability assertion,
 not automatic standby discovery. Reads and ordinary KV operations are not
 gated by it.
 
-The capability flag admits new mutations; it is not a rollback switch.
-Disabling it does not remove existing weight state loaded through batch
+These capability flags admit new mutations; they are not rollback switches.
+Disabling them does not remove existing weight or lineage state loaded through batch
 snapshot restore or standby promotion. Such a cluster still requires readers
 that support its weight OpLog and batch snapshot formats.
 
