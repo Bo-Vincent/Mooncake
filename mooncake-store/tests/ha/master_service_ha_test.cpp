@@ -3749,6 +3749,7 @@ TEST_F(MasterServiceHATest,
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 200,
         }},
         .next_lease_id = 1,
         .next_operation_id = 1,
@@ -4277,6 +4278,7 @@ TEST_F(MasterServiceHATest,
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
         }},
         .leases = {},
         .operations = {},
@@ -4306,11 +4308,17 @@ TEST_F(MasterServiceHATest,
         FAIL() << "Expected one durable weight lease entry";
     }
     EXPECT_EQ(OpType::WEIGHT_LEASE_UPSERT, batch.entries.front().op_type);
+    WeightLeaseUpsertOp lease_upsert;
+    ASSERT_EQ(struct_pack::errc::ok,
+              struct_pack::deserialize_to(lease_upsert,
+                                          batch.entries.front().payload));
+    EXPECT_GT(lease_upsert.last_accessed_at_ms, 150);
     auto before = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = identity});
     EXPECT_TRUE(before.has_value());
     if (before) {
         EXPECT_EQ(0u, before->active_lease_count);
+        EXPECT_EQ(150, before->metadata.last_accessed_at_ms);
     }
     const auto pending = acquiring.wait_for(std::chrono::seconds(31));
 
@@ -4320,6 +4328,9 @@ TEST_F(MasterServiceHATest,
         writer->Stop();
     }
     auto acquired = acquiring.get();
+    // Release later reconciliation callbacks before service teardown joins
+    // the cleanup worker; this fixture restores metadata without payloads.
+    writer->Stop();
     EXPECT_TRUE(callbacks_completed);
     EXPECT_EQ(std::future_status::timeout, pending);
     ASSERT_TRUE(acquired.has_value());
@@ -4327,6 +4338,8 @@ TEST_F(MasterServiceHATest,
         GetWeightRevisionRequest{.identity = identity});
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(1u, after->active_lease_count);
+    EXPECT_EQ(lease_upsert.last_accessed_at_ms,
+              after->metadata.last_accessed_at_ms);
 }
 
 TEST_F(MasterServiceHATest,
@@ -4360,6 +4373,7 @@ TEST_F(MasterServiceHATest,
             .metadata_generation = 4,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
         }},
         .leases = {WeightRevisionLease{
             .lease_id = 5,
@@ -7368,6 +7382,7 @@ TEST_F(MasterServiceHATest, WeightLeaseShorterTtlRenewalReplaysThroughReader) {
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
         }},
         .leases = {},
         .operations = {},
@@ -7449,6 +7464,7 @@ TEST_F(MasterServiceHATest, WeightLeaseRenewalRechecksExpiryAfterGroupWait) {
             .metadata_generation = 2,
             .created_at_ms = 100,
             .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
         }},
         .leases = {},
         .operations = {},

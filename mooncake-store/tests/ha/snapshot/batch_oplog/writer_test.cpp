@@ -416,7 +416,9 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
                     if (lease.identity == metadata.identity) {
                         append(OpType::WEIGHT_LEASE_UPSERT,
                                MakeWeightLeaseMetadataKey(lease.lease_id),
-                               lease);
+                               WeightLeaseUpsertOp{
+                                   .lease = lease,
+                                   .last_accessed_at_ms = metadata.last_accessed_at_ms});
                     }
                 }
                 if (metadata.operation != WeightOperationState::NONE) {
@@ -1074,6 +1076,7 @@ TEST_F(BatchOpLogSnapshotWriterTest,
         .metadata_generation = 2,
         .created_at_ms = 100,
         .updated_at_ms = 102,
+        .last_accessed_at_ms = 100,
     };
     const WeightRevisionLease lease{
         .lease_id = 42,
@@ -1127,7 +1130,8 @@ TEST_F(BatchOpLogSnapshotWriterTest,
 
     auto renewed = lease;
     renewed.expires_at_ms = 2000;
-    const auto encoded_lease = struct_pack::serialize(renewed);
+    const auto encoded_lease = struct_pack::serialize(
+        WeightLeaseUpsertOp{.lease = renewed, .last_accessed_at_ms = 100});
     OpLogEntry renewal;
     renewal.sequence_id = 5;
     renewal.op_type = OpType::WEIGHT_LEASE_UPSERT;
