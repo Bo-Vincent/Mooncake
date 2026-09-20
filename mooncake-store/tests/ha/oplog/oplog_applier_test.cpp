@@ -846,6 +846,60 @@ TEST_F(OpLogApplierTest, TestApplySegmentOperations_Mixed) {
     EXPECT_EQ(8192u, info3->capacity);
 }
 
+TEST_F(OpLogApplierTest, AppliesWeightLineageWithCasOrdering) {
+    const auto base = MakeWeightIdentity();
+    auto target = base;
+    target.weight_generation = 8;
+    const WeightLineageMetadata lineage{
+        .identity = ToWeightLineageIdentity(base),
+        .lineage_metadata_generation = 1,
+        .committed_weight_generation = base.weight_generation,
+        .latest_claim =
+            WeightUpsertClaim{
+                .request_id = "request-1",
+                .base_identity = base,
+                .target_identity = target,
+                .mode = WeightUpsertMode::PUT_FIRST,
+                .phase = WeightUpsertPhase::PREPARING_TARGET,
+                .expected_base_metadata_generation = 2,
+                .import =
+                    WeightUpsertImportSummary{
+                        .payload_group_id = MakeWeightPayloadGroupId(target),
+                        .expected_payload_count = 1,
+                        .expected_logical_bytes = 1024,
+                        .policy =
+                            WeightStoragePolicy{
+                                .preferred_residency =
+                                    WeightResidencyState::HOT,
+                                .migration_mode = WeightMigrationMode::MANUAL,
+                            },
+                        .affinity_summary =
+                            WeightAffinitySummary{
+                                .affinity_count = 1,
+                                .affinity_digest = std::string(64, 'c'),
+                            },
+                    },
+                .created_at_ms = 100,
+                .updated_at_ms = 100,
+            },
+    };
+    auto entry =
+        MakeEntry(1, OpType::WEIGHT_LINEAGE_UPSERT,
+                  MakeWeightLineageMetadataKey(lineage.identity),
+                  SerializePayload(WeightLineageUpsertOp{.lineage = lineage}));
+    ASSERT_TRUE(applier_->ApplyOpLogEntry(entry));
+    EXPECT_EQ(lineage,
+              mock_metadata_store_->GetWeightLineage(lineage.identity));
+
+    auto stale = lineage;
+    stale.committed_weight_generation = target.weight_generation;
+    entry =
+        MakeEntry(2, OpType::WEIGHT_LINEAGE_UPSERT,
+                  MakeWeightLineageMetadataKey(lineage.identity),
+                  SerializePayload(WeightLineageUpsertOp{.lineage = stale}));
+    EXPECT_FALSE(applier_->ApplyOpLogEntry(entry));
+}
+
 }  // namespace mooncake::test
 
 int main(int argc, char** argv) {

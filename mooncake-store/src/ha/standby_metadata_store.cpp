@@ -85,6 +85,7 @@ void StandbyMetadataStore::Clear() {
     weight_leases_.clear();
     weight_lease_tombstones_.clear();
     weight_operations_.clear();
+    weight_lineages_.clear();
     next_weight_lease_id_ = 1;
     next_weight_operation_id_ = 1;
 }
@@ -191,6 +192,22 @@ StandbyMetadataStore::GetWeightOperation(uint64_t operation_id) const {
                : std::optional<WeightResidencyOperation>(it->second);
 }
 
+bool StandbyMetadataStore::PutWeightLineage(
+    const WeightLineageMetadata& lineage) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    weight_lineages_[lineage.identity] = lineage;
+    return true;
+}
+
+std::optional<WeightLineageMetadata> StandbyMetadataStore::GetWeightLineage(
+    const WeightLineageIdentity& identity) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto lineage = weight_lineages_.find(identity);
+    return lineage == weight_lineages_.end()
+               ? std::nullopt
+               : std::optional<WeightLineageMetadata>(lineage->second);
+}
+
 bool StandbyMetadataStore::RestoreWeightMetadata(
     const WeightMetadataSnapshot& snapshot) {
     if (!ValidateWeightMetadataSnapshot(snapshot)) {
@@ -200,6 +217,7 @@ bool StandbyMetadataStore::RestoreWeightMetadata(
     std::map<WeightRevisionIdentity, WeightRevisionMetadata> metadata;
     std::unordered_map<uint64_t, WeightRevisionLease> leases;
     std::unordered_map<uint64_t, WeightResidencyOperation> operations;
+    std::map<WeightLineageIdentity, WeightLineageMetadata> lineages;
     for (const auto& record : snapshot.metadata) {
         metadata.emplace(record.identity, record);
     }
@@ -209,6 +227,11 @@ bool StandbyMetadataStore::RestoreWeightMetadata(
     for (const auto& operation : snapshot.operations) {
         operations.emplace(operation.operation_id, operation);
     }
+    if (snapshot.schema_version >= 3 && snapshot.lineages.has_value()) {
+        for (const auto& lineage : snapshot.lineages.value()) {
+            lineages.emplace(lineage.identity, lineage);
+        }
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     weight_metadata_ = std::move(metadata);
@@ -216,6 +239,7 @@ bool StandbyMetadataStore::RestoreWeightMetadata(
     weight_leases_ = std::move(leases);
     weight_lease_tombstones_.clear();
     weight_operations_ = std::move(operations);
+    weight_lineages_ = std::move(lineages);
     next_weight_lease_id_ = snapshot.next_lease_id;
     next_weight_operation_id_ = snapshot.next_operation_id;
     return true;
@@ -230,6 +254,7 @@ WeightMetadataSnapshot StandbyMetadataStore::SnapshotWeightMetadata() const {
         .operations = {},
         .next_lease_id = next_weight_lease_id_,
         .next_operation_id = next_weight_operation_id_,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
     snapshot.metadata.reserve(weight_metadata_.size());
     for (const auto& [identity, metadata] : weight_metadata_) {
@@ -245,6 +270,11 @@ WeightMetadataSnapshot StandbyMetadataStore::SnapshotWeightMetadata() const {
     for (const auto& [operation_id, operation] : weight_operations_) {
         (void)operation_id;
         snapshot.operations.push_back(operation);
+    }
+    snapshot.lineages.value().reserve(weight_lineages_.size());
+    for (const auto& [identity, lineage] : weight_lineages_) {
+        (void)identity;
+        snapshot.lineages.value().push_back(lineage);
     }
     std::sort(snapshot.leases.begin(), snapshot.leases.end(),
               [](const auto& lhs, const auto& rhs) {
