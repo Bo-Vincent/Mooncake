@@ -14,6 +14,9 @@
 namespace mooncake {
 
 inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS = 30'000;
+inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND = 64;
+inline constexpr uint64_t DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND = 1ULL
+                                                                         << 30;
 
 struct ClientLivenessConfigSource {
     std::optional<int64_t> active_ttl_sec;
@@ -110,6 +113,10 @@ struct MasterConfig {
     WeightStoragePolicy default_weight_storage_policy{};
     uint64_t weight_migration_cooldown_ms =
         DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
+    uint64_t weight_migration_max_members_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND;
+    uint64_t weight_migration_max_bytes_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND;
     bool allow_evict_soft_pinned_objects;
     double eviction_ratio;
     double eviction_high_watermark_ratio;
@@ -270,6 +277,10 @@ class MasterServiceSupervisorConfig {
     WeightStoragePolicy default_weight_storage_policy{};
     uint64_t weight_migration_cooldown_ms =
         DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
+    uint64_t weight_migration_max_members_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND;
+    uint64_t weight_migration_max_bytes_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND;
     std::string rpc_address = "0.0.0.0";
     std::chrono::steady_clock::duration rpc_conn_timeout = std::chrono::seconds(
         0);  // Client connection timeout. 0 = no timeout (infinite)
@@ -369,6 +380,10 @@ class MasterServiceSupervisorConfig {
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
         weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
+        weight_migration_max_members_per_round =
+            config.weight_migration_max_members_per_round;
+        weight_migration_max_bytes_per_round =
+            config.weight_migration_max_bytes_per_round;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         eviction_ratio = config.eviction_ratio;
@@ -569,6 +584,10 @@ class WrappedMasterServiceConfig {
     WeightStoragePolicy default_weight_storage_policy{};
     uint64_t weight_migration_cooldown_ms =
         DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
+    uint64_t weight_migration_max_members_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND;
+    uint64_t weight_migration_max_bytes_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     bool enable_metric_reporting = true;
@@ -673,6 +692,10 @@ class WrappedMasterServiceConfig {
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
         weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
+        weight_migration_max_members_per_round =
+            config.weight_migration_max_members_per_round;
+        weight_migration_max_bytes_per_round =
+            config.weight_migration_max_bytes_per_round;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         enable_metric_reporting = config.metrics.enabled;
@@ -807,6 +830,10 @@ class WrappedMasterServiceConfig {
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
         weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
+        weight_migration_max_members_per_round =
+            config.weight_migration_max_members_per_round;
+        weight_migration_max_bytes_per_round =
+            config.weight_migration_max_bytes_per_round;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         enable_metric_reporting = metrics.enabled;
@@ -914,6 +941,10 @@ class MasterServiceConfigBuilder {
     WeightStoragePolicy default_weight_storage_policy_{};
     uint64_t weight_migration_cooldown_ms_ =
         DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
+    uint64_t weight_migration_max_members_per_round_ =
+        DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND;
+    uint64_t weight_migration_max_bytes_per_round_ =
+        DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND;
     bool allow_evict_soft_pinned_objects_ =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     double eviction_ratio_ = DEFAULT_EVICTION_RATIO;
@@ -1005,6 +1036,18 @@ class MasterServiceConfigBuilder {
     MasterServiceConfigBuilder& set_weight_migration_cooldown_ms(
         uint64_t cooldown_ms) {
         weight_migration_cooldown_ms_ = cooldown_ms;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_weight_migration_max_members_per_round(
+        uint64_t max_members) {
+        weight_migration_max_members_per_round_ = max_members;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_weight_migration_max_bytes_per_round(
+        uint64_t max_bytes) {
+        weight_migration_max_bytes_per_round_ = max_bytes;
         return *this;
     }
 
@@ -1334,6 +1377,10 @@ class MasterServiceConfig {
     WeightStoragePolicy default_weight_storage_policy{};
     uint64_t weight_migration_cooldown_ms =
         DEFAULT_WEIGHT_MIGRATION_COOLDOWN_MS;
+    uint64_t weight_migration_max_members_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_MEMBERS_PER_ROUND;
+    uint64_t weight_migration_max_bytes_per_round =
+        DEFAULT_WEIGHT_MIGRATION_MAX_BYTES_PER_ROUND;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     double eviction_ratio = DEFAULT_EVICTION_RATIO;
@@ -1436,6 +1483,10 @@ class MasterServiceConfig {
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
         default_weight_storage_policy = config.default_weight_storage_policy;
         weight_migration_cooldown_ms = config.weight_migration_cooldown_ms;
+        weight_migration_max_members_per_round =
+            config.weight_migration_max_members_per_round;
+        weight_migration_max_bytes_per_round =
+            config.weight_migration_max_bytes_per_round;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         eviction_ratio = config.eviction_ratio;
@@ -1550,6 +1601,10 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.max_kv_soft_pin_ttl = max_kv_soft_pin_ttl_;
     config.default_weight_storage_policy = default_weight_storage_policy_;
     config.weight_migration_cooldown_ms = weight_migration_cooldown_ms_;
+    config.weight_migration_max_members_per_round =
+        weight_migration_max_members_per_round_;
+    config.weight_migration_max_bytes_per_round =
+        weight_migration_max_bytes_per_round_;
     config.allow_evict_soft_pinned_objects = allow_evict_soft_pinned_objects_;
     config.eviction_ratio = eviction_ratio_;
     config.eviction_high_watermark_ratio = eviction_high_watermark_ratio_;
