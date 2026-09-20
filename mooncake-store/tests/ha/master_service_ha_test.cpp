@@ -3135,6 +3135,7 @@ TEST_F(MasterServiceHATest,
         }},
         .next_lease_id = 6,
         .next_operation_id = 4,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
 
     MasterService service;
