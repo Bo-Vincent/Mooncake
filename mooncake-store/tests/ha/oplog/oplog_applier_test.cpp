@@ -250,6 +250,58 @@ TEST_F(OpLogApplierTest, RejectsWeightOperationWithoutRecord) {
         ValidateWeightMetadataSnapshot(standby.SnapshotWeightMetadata()));
 }
 
+TEST_F(OpLogApplierTest, RestoresDegradedRevisionWithActiveOperation) {
+    const auto ready = MakeWeightMetadata(1);
+    WeightMetadataStore primary;
+    ASSERT_TRUE(
+        primary.RestoreSnapshot(WeightMetadataSnapshot{.metadata = {ready}}));
+    StandbyMetadataStore standby;
+    OpLogApplier applier(&standby, cluster_id_);
+    const auto key = MakeWeightRevisionMetadataKey(ready.identity);
+    ASSERT_TRUE(applier.ApplyOpLogEntry(MakeEntry(
+        1, OpType::WEIGHT_METADATA_UPSERT, key, SerializeWeightUpsert(ready))));
+    const auto start = primary.PrepareStartOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        },
+        200);
+    ASSERT_TRUE(start.has_value());
+    ASSERT_TRUE(start->next.has_value());
+    ASSERT_TRUE(start->metadata.next.has_value());
+    ASSERT_TRUE(primary.Publish(*start));
+    ASSERT_TRUE(applier.ApplyOpLogEntry(
+        MakeEntry(2, OpType::WEIGHT_METADATA_UPSERT, key,
+                  SerializeWeightUpsert(*start->metadata.next, start->next))));
+    uint64_t sequence = 3;
+    for (const auto residency :
+         {WeightResidencyState::HOT, WeightResidencyState::ABSENT}) {
+        SCOPED_TRACE(static_cast<int>(residency));
+        const auto progress = primary.PrepareUpdateOperationProgress(
+            start->next->operation_id, 0, start->next->total_units, 0,
+            start->next->total_bytes, {}, {}, WeightAvailabilityState::DEGRADED,
+            residency, residency == WeightResidencyState::HOT ? 1.0 : 0.0,
+            300 + sequence);
+        ASSERT_TRUE(progress.has_value());
+        ASSERT_TRUE(progress->next.has_value());
+        ASSERT_TRUE(progress->metadata.next.has_value());
+        ASSERT_TRUE(primary.Publish(*progress));
+        ASSERT_TRUE(applier.ApplyOpLogEntry(MakeEntry(
+            sequence++, OpType::WEIGHT_METADATA_UPSERT, key,
+            SerializeWeightUpsert(*progress->metadata.next, progress->next))));
+        WeightMetadataStore restored;
+        ASSERT_TRUE(restored.RestoreSnapshot(standby.SnapshotWeightMetadata()));
+        const auto view = restored.Get(ready.identity, 400);
+        ASSERT_TRUE(view.has_value());
+        EXPECT_EQ(*progress->metadata.next, view->metadata);
+        const auto operation =
+            restored.QueryOperation(start->next->operation_id);
+        ASSERT_TRUE(operation.has_value());
+        EXPECT_EQ(*progress->next, *operation);
+    }
+}
+
 TEST_F(OpLogApplierTest, AppliesWeightLeaseAndDeleteTombstones) {
     auto metadata = MakeWeightMetadata(1);
     const auto metadata_key = MakeWeightRevisionMetadataKey(metadata.identity);
