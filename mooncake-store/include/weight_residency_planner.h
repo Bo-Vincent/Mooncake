@@ -47,7 +47,9 @@ PlanMixedWeightResidency(const std::vector<WeightAffinityUnit>& units,
 
 std::optional<WeightAutoMigrationTarget> PlanAutomaticWeightMigration(
     const WeightRevisionMetadata& metadata, uint64_t active_lease_count,
-    WeightAutoMigrationSignal signal, uint64_t now_ms,
-    uint64_t cooldown_ms);
+    WeightAutoMigrationSignal signal, uint64_t now_ms, uint64_t cooldown_ms);
+
+bool WeightAutoMigrationCandidateLess(const WeightRevisionMetadata& lhs,
+                                      const WeightRevisionMetadata& rhs);
 
 }  // namespace mooncake
