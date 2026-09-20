@@ -9,6 +9,18 @@
 #include "tenant_id.h"
 
 namespace mooncake {
+
+struct LegacyWeightMetadataSnapshotV2 {
+    uint32_t schema_version{2};
+    std::vector<WeightRevisionMetadata> metadata;
+    std::vector<WeightRevisionLease> leases;
+    std::vector<WeightResidencyOperation> operations;
+    uint64_t next_lease_id{1};
+    uint64_t next_operation_id{1};
+};
+YLT_REFL(LegacyWeightMetadataSnapshotV2, schema_version, metadata, leases,
+         operations, next_lease_id, next_operation_id);
+
 namespace {
 
 WeightRevisionIdentity Identity(std::string revision = "step-100",
@@ -78,6 +90,297 @@ WeightRevisionMetadata PublishReady(WeightMetadataStore& metadata_store) {
     auto published = metadata_store.Publish(*candidate);
     EXPECT_TRUE(published.has_value());
     return *published;
+}
+
+BeginWeightUpsertRequest UpsertRequest(
+    std::string request_id = "request-1",
+    WeightUpsertMode mode = WeightUpsertMode::PUT_FIRST) {
+    return BeginWeightUpsertRequest{
+        .request_id = std::move(request_id),
+        .mode = mode,
+        .base_identity = Identity("step-100", 7),
+        .expected_base_metadata_generation = 2,
+        .target_identity = Identity("step-100", 8),
+        .import = BeginRequest(Identity("step-100", 8)),
+    };
+}
+
+TEST(WeightMetadataStoreTest, UpsertClaimIsCasFencedAndIdempotent) {
+    WeightMetadataStore metadata_store;
+    auto request = UpsertRequest();
+    auto prepared = metadata_store.PrepareBeginUpsert(request, 300);
+    ASSERT_TRUE(prepared.has_value());
+    auto published = metadata_store.Publish(*prepared);
+    ASSERT_TRUE(published.has_value());
+    EXPECT_EQ(1, published->lineage_metadata_generation);
+    EXPECT_EQ(7, published->committed_weight_generation);
+
+    auto retry = metadata_store.PrepareBeginUpsert(request, 301);
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_TRUE(retry->no_op);
+
+    auto competing =
+        metadata_store.PrepareBeginUpsert(UpsertRequest("request-2"), 302);
+    ASSERT_FALSE(competing.has_value());
+    EXPECT_EQ(WeightManagementError::BUSY, competing.error());
+}
+
+TEST(WeightMetadataStoreTest, UpsertClaimRejectsNonIncreasingGeneration) {
+    WeightMetadataStore metadata_store;
+    auto request = UpsertRequest();
+    request.target_identity.weight_generation =
+        request.base_identity.weight_generation;
+    request.import.identity = request.target_identity;
+    auto prepared = metadata_store.PrepareBeginUpsert(request, 300);
+    ASSERT_FALSE(prepared.has_value());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, prepared.error());
+}
+
+TEST(WeightMetadataStoreTest, LineageSnapshotRoundTripsAndV2DefaultsEmpty) {
+    WeightMetadataStore metadata_store;
+    auto claim = metadata_store.PrepareBeginUpsert(UpsertRequest(), 300);
+    ASSERT_TRUE(claim.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*claim).has_value());
+
+    auto snapshot = metadata_store.ExportSnapshot();
+    ASSERT_EQ(3, snapshot.schema_version);
+    ASSERT_TRUE(snapshot.lineages.has_value());
+    ASSERT_EQ(1, snapshot.lineages->size());
+    WeightMetadataStore restored;
+    ASSERT_TRUE(restored.RestoreSnapshot(snapshot).has_value());
+    EXPECT_EQ(snapshot.lineages->front(),
+              restored.GetLineage(snapshot.lineages->front().identity).value());
+
+    snapshot.schema_version = 2;
+    snapshot.lineages = std::vector<WeightLineageMetadata>{};
+    ASSERT_TRUE(restored.RestoreSnapshot(snapshot).has_value());
+    EXPECT_FALSE(
+        restored.GetLineage(ToWeightLineageIdentity(Identity())).has_value());
+}
+
+TEST(WeightMetadataStoreTest, DeserializesLegacyV2SnapshotBytes) {
+    const auto bytes = struct_pack::serialize(LegacyWeightMetadataSnapshotV2{});
+    WeightMetadataSnapshot decoded;
+    ASSERT_EQ(struct_pack::errc::ok,
+              struct_pack::deserialize_to(decoded, bytes));
+    EXPECT_EQ(2, decoded.schema_version);
+    EXPECT_FALSE(decoded.lineages.has_value());
+    WeightMetadataStore restored;
+    EXPECT_TRUE(restored.RestoreSnapshot(decoded).has_value());
+}
+
+TEST(WeightMetadataStoreTest, RejectsCorruptedLineageSnapshotRecords) {
+    WeightMetadataStore metadata_store;
+    auto claim = metadata_store.PrepareBeginUpsert(UpsertRequest(), 300);
+    ASSERT_TRUE(claim.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*claim).has_value());
+    const auto valid = metadata_store.ExportSnapshot();
+    ASSERT_TRUE(valid.lineages.has_value());
+    ASSERT_EQ(1, valid.lineages->size());
+
+    auto corrupted = valid;
+    corrupted.lineages->front().latest_claim->request_id.clear();
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->mode =
+        static_cast<WeightUpsertMode>(255);
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->phase =
+        WeightUpsertPhase::TARGET_IMPORTING;
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->phase =
+        static_cast<WeightUpsertPhase>(255);
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front()
+        .latest_claim->expected_base_metadata_generation = 0;
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->import.expected_payload_count = 0;
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->import.policy->migration_mode =
+        static_cast<WeightMigrationMode>(255);
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->import.affinity_summary = {};
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().committed_weight_generation = 999;
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+
+    corrupted = valid;
+    corrupted.lineages->front().latest_claim->updated_at_ms = 299;
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted).has_value());
+}
+
+TEST(WeightMetadataStoreTest, NewClaimBaseMustMatchCommittedWatermark) {
+    WeightMetadataStore metadata_store;
+    auto first = UpsertRequest();
+    auto claim = metadata_store.PrepareBeginUpsert(first, 300);
+    ASSERT_TRUE(claim.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*claim).has_value());
+    auto importing = PublishBegin(metadata_store, first.import, 310);
+    auto manifest = Manifest();
+    manifest.manifest_key = MakeWeightManifestKey(first.target_identity);
+    manifest.payload_group_id = first.import.payload_group_id;
+    auto committed = metadata_store.PrepareCommitImport(
+        CommitWeightImportRequest{
+            .identity = first.target_identity,
+            .expected_metadata_generation = importing.metadata_generation,
+            .manifest = manifest,
+        },
+        320);
+    ASSERT_TRUE(committed.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*committed).has_value());
+    auto retiring = metadata_store.PrepareCommitUpsert(
+        CommitWeightUpsertRequest{
+            .request_id = first.request_id,
+            .base_identity = first.base_identity,
+            .target_identity = first.target_identity,
+        },
+        330);
+    ASSERT_TRUE(retiring.has_value());
+    auto lineage = metadata_store.Publish(*retiring);
+    ASSERT_TRUE(lineage.has_value());
+    auto completed = metadata_store.PrepareAdvanceUpsert(
+        lineage->identity, first.request_id, WeightUpsertPhase::COMPLETED, 340);
+    ASSERT_TRUE(completed.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*completed).has_value());
+
+    auto stale_base = UpsertRequest("request-2");
+    stale_base.target_identity.weight_generation = 9;
+    stale_base.import.identity = stale_base.target_identity;
+    stale_base.import.payload_group_id =
+        MakeWeightPayloadGroupId(stale_base.target_identity);
+    auto rejected = metadata_store.PrepareBeginUpsert(stale_base, 350);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, rejected.error());
+}
+
+TEST(WeightMetadataStoreTest, DeleteFirstInterruptedImportRemainsRetryable) {
+    WeightMetadataStore metadata_store;
+    auto request =
+        UpsertRequest("delete-request", WeightUpsertMode::DELETE_FIRST);
+    auto claim = metadata_store.PrepareBeginUpsert(request, 300);
+    ASSERT_TRUE(claim.has_value());
+    auto lineage = metadata_store.Publish(*claim);
+    ASSERT_TRUE(lineage.has_value());
+    auto importing = metadata_store.PrepareAdvanceUpsert(
+        lineage->identity, request.request_id,
+        WeightUpsertPhase::TARGET_IMPORTING, 310);
+    ASSERT_TRUE(importing.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*importing).has_value());
+    auto target = metadata_store.PrepareBeginImport(request.import, 320);
+    ASSERT_TRUE(target.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*target).has_value());
+
+    auto aborted = metadata_store.PrepareAbortUpsert(
+        AbortWeightUpsertRequest{
+            .request_id = request.request_id,
+            .base_identity = request.base_identity,
+            .target_identity = request.target_identity,
+        },
+        330);
+    ASSERT_TRUE(aborted.has_value());
+    auto after_abort = metadata_store.Publish(*aborted);
+    ASSERT_TRUE(after_abort.has_value());
+    ASSERT_TRUE(after_abort->latest_claim.has_value());
+    EXPECT_EQ(WeightUpsertPhase::TARGET_IMPORTING,
+              after_abort->latest_claim->phase);
+    EXPECT_FALSE(after_abort->latest_claim->error.empty());
+
+    auto retry = metadata_store.PrepareBeginUpsert(request, 340);
+    ASSERT_TRUE(retry.has_value());
+    EXPECT_TRUE(retry->no_op);
+    auto import_retry = metadata_store.PrepareBeginImport(request.import, 340);
+    ASSERT_TRUE(import_retry.has_value());
+    EXPECT_TRUE(import_retry->no_op);
+}
+
+TEST(WeightMetadataStoreTest, DeleteFirstCanRestartAbortedTargetGeneration) {
+    WeightMetadataStore metadata_store;
+    auto request =
+        UpsertRequest("delete-restart", WeightUpsertMode::DELETE_FIRST);
+    auto claim = metadata_store.PrepareBeginUpsert(request, 300);
+    ASSERT_TRUE(claim.has_value());
+    auto lineage = metadata_store.Publish(*claim);
+    ASSERT_TRUE(lineage.has_value());
+    auto importing_phase = metadata_store.PrepareAdvanceUpsert(
+        lineage->identity, request.request_id,
+        WeightUpsertPhase::TARGET_IMPORTING, 310);
+    ASSERT_TRUE(importing_phase.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*importing_phase).has_value());
+    auto begin = metadata_store.PrepareBeginImport(request.import, 320);
+    ASSERT_TRUE(begin.has_value());
+    auto importing = metadata_store.Publish(*begin);
+    ASSERT_TRUE(importing.has_value());
+    auto abort = metadata_store.PrepareAbortImport(
+        AbortWeightImportRequest{
+            .identity = request.target_identity,
+            .expected_metadata_generation = importing->metadata_generation,
+        },
+        330);
+    ASSERT_TRUE(abort.has_value());
+    auto deleting = metadata_store.Publish(*abort);
+    ASSERT_TRUE(deleting.has_value());
+    auto finish = metadata_store.PrepareFinishDelete(
+        request.target_identity, deleting->metadata_generation, 340);
+    ASSERT_TRUE(finish.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*finish).has_value());
+
+    auto retry = metadata_store.PrepareBeginImport(request.import, 350, true);
+    ASSERT_TRUE(retry.has_value());
+    auto restarted = metadata_store.Publish(*retry);
+    ASSERT_TRUE(restarted.has_value());
+    EXPECT_EQ(WeightAvailabilityState::IMPORTING, restarted->availability);
+    EXPECT_GT(restarted->metadata_generation, deleting->metadata_generation);
+
+    auto competing = metadata_store.PrepareBeginUpsert(
+        UpsertRequest("different-request", WeightUpsertMode::DELETE_FIRST),
+        360);
+    ASSERT_FALSE(competing.has_value());
+    EXPECT_EQ(WeightManagementError::BUSY, competing.error());
+}
+
+TEST(WeightMetadataStoreTest, ConcurrentUpsertClaimsPublishOnlyOneSuccessor) {
+    WeightMetadataStore metadata_store;
+    auto first =
+        metadata_store.PrepareBeginUpsert(UpsertRequest("request-1"), 300);
+    auto second =
+        metadata_store.PrepareBeginUpsert(UpsertRequest("request-2"), 300);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_TRUE(metadata_store.Publish(*first).has_value());
+    auto rejected = metadata_store.Publish(*second);
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::STALE_GENERATION, rejected.error());
+}
+
+TEST(WeightMetadataStoreTest, DirectDeleteCannotBypassActiveUpsertClaim) {
+    WeightMetadataStore metadata_store;
+    auto ready = PublishReady(metadata_store);
+    auto claim = metadata_store.PrepareBeginUpsert(UpsertRequest(), 300);
+    ASSERT_TRUE(claim.has_value());
+    ASSERT_TRUE(metadata_store.Publish(*claim).has_value());
+    auto deletion = metadata_store.PrepareDelete(
+        DeleteWeightRevisionRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+        },
+        301);
+    ASSERT_FALSE(deletion.has_value());
+    EXPECT_EQ(WeightManagementError::BUSY, deletion.error());
 }
 
 TEST(WeightMetadataStoreTest, BeginIsIdempotent) {
