@@ -260,7 +260,9 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
             }
             for (const auto& lease : weight_metadata->leases) {
                 append(OpType::WEIGHT_LEASE_UPSERT,
-                       "weight-lease:" + std::to_string(lease.lease_id), lease);
+                       "weight-lease:" + std::to_string(lease.lease_id),
+                       WeightLeaseUpsertOp{.lease = lease,
+                                           .last_accessed_at_ms = 100});
             }
         }
         if (!batch.entries.empty()) {
@@ -401,6 +403,7 @@ TEST_F(BatchOpLogSnapshotWriterTest,
         .metadata_generation = 2,
         .created_at_ms = 100,
         .updated_at_ms = 102,
+        .last_accessed_at_ms = 100,
     };
     const WeightRevisionLease lease{
         .lease_id = 42,
@@ -454,7 +457,8 @@ TEST_F(BatchOpLogSnapshotWriterTest,
 
     auto renewed = lease;
     renewed.expires_at_ms = 2000;
-    const auto encoded_lease = struct_pack::serialize(renewed);
+    const auto encoded_lease = struct_pack::serialize(
+        WeightLeaseUpsertOp{.lease = renewed, .last_accessed_at_ms = 100});
     OpLogEntry renewal;
     renewal.sequence_id = 5;
     renewal.op_type = OpType::WEIGHT_LEASE_UPSERT;
