@@ -451,6 +451,9 @@ DEFINE_bool(enable_oplog_snapshot, false,
             "Enable standby batch OpLog snapshot production");
 DEFINE_uint64(snapshot_chunk_object_count, 1000000,
               "Maximum objects per standby batch OpLog snapshot chunk");
+DEFINE_bool(weight_lineage_oplog_capability_confirmed, false,
+            "Confirm every configured OpLog standby supports weight lineage "
+            "entry types before enabling weight upserts");
 DEFINE_int32(oplog_poll_interval_ms, 1000,
              "Batch-record standby poll interval.");
 DEFINE_uint32(oplog_batch_max_entries, 1024,
@@ -805,6 +808,10 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
     default_config.GetUInt64("snapshot_chunk_object_count",
                              &master_config.snapshot_chunk_object_count,
                              FLAGS_snapshot_chunk_object_count);
+    default_config.GetBool(
+        "weight_lineage_oplog_capability_confirmed",
+        &master_config.weight_lineage_oplog_capability_confirmed,
+        FLAGS_weight_lineage_oplog_capability_confirmed);
     default_config.GetInt32("oplog_poll_interval_ms",
                             &master_config.oplog_poll_interval_ms,
                             FLAGS_oplog_poll_interval_ms);
@@ -1350,6 +1357,13 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         master_config.snapshot_chunk_object_count =
             FLAGS_snapshot_chunk_object_count;
     }
+    if ((google::GetCommandLineFlagInfo(
+             "weight_lineage_oplog_capability_confirmed", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.weight_lineage_oplog_capability_confirmed =
+            FLAGS_weight_lineage_oplog_capability_confirmed;
+    }
     if ((google::GetCommandLineFlagInfo("oplog_poll_interval_ms", &info) &&
          !info.is_default) ||
         !conf_set) {
@@ -1860,8 +1874,7 @@ int main(int argc, char* argv[]) {
         << ", max_kv_soft_pin_ttl=" << master_config.max_kv_soft_pin_ttl
         << ", default_weight_preferred_residency="
         << mooncake::WeightResidencyTargetName(
-               master_config.default_weight_storage_policy
-                   .preferred_residency)
+               master_config.default_weight_storage_policy.preferred_residency)
         << ", default_weight_mixed_hot_ratio="
         << master_config.default_weight_storage_policy.mixed_hot_ratio
         << ", default_weight_migration_mode="
@@ -1887,6 +1900,8 @@ int main(int argc, char* argv[]) {
         << ", enable_oplog_snapshot=" << master_config.enable_oplog_snapshot
         << ", snapshot_chunk_object_count="
         << master_config.snapshot_chunk_object_count
+        << ", weight_lineage_oplog_capability_confirmed="
+        << master_config.weight_lineage_oplog_capability_confirmed
         << ", enable_offload=" << master_config.enable_offload
         << ", enable_kv_events=" << master_config.enable_kv_events
         << ", kv_events_bind_endpoint=" << master_config.kv_events_bind_endpoint
