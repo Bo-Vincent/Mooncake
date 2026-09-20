@@ -204,13 +204,14 @@ def _residency_affinity_id(fragment: PlacementFragment) -> str:
     return hashlib.sha256("\0".join(sorted(logical_names)).encode()).hexdigest()
 
 
-def plan_weight_upload(
+def _build_weight_put_plan(
     source_placement: WeightPlacementManifest,
     source_bindings: Sequence[WeightRuntimeBindingManifest],
     *,
     namespace: str = "default",
     key_prefix: str = "weights",
     payload_group_id: Optional[str] = None,
+    transaction_id: Optional[str] = None,
 ) -> WeightUploadPlan:
     """Build an address-free Store upload plan from complete source manifests."""
 
@@ -233,7 +234,7 @@ def plan_weight_upload(
             str(weight_generation),
         )
     )
-    transaction_id = uuid4().hex
+    transaction_id = transaction_id or uuid4().hex
     stored_fragments: list[StoredFragmentSnapshot] = []
     operations: list[UploadOperation] = []
     for placement_fragment, source_binding, binding_manifest in sources:
@@ -305,12 +306,14 @@ class WeightUploadService:
         source_bindings: Sequence[WeightRuntimeBindingManifest],
         *,
         namespace: str = "default",
+        transaction_id: Optional[str] = None,
     ) -> WeightUploadPlan:
-        return plan_weight_upload(
+        return _build_weight_put_plan(
             source_placement,
             source_bindings,
             namespace=namespace,
             key_prefix=self.client.key_prefix,
+            transaction_id=transaction_id,
         )
 
     def weight_put_payload(
