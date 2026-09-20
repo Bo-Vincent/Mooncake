@@ -178,7 +178,8 @@ class GatedOrderedOpLogWriter : public OrderedOpLogWriter {
     tl::expected<PendingHandle, ErrorCode> Commit(
         Reservation&& reservation, OpLogEntry entry,
         DurableCallback callback) override {
-        return OrderedOpLogWriter::Commit(
+        const auto op_type = entry.op_type;
+        auto committed = OrderedOpLogWriter::Commit(
             std::move(reservation), std::move(entry),
             [this, callback = std::move(callback)](const OpLogEntry& durable) {
                 {
@@ -197,6 +198,22 @@ class GatedOrderedOpLogWriter : public OrderedOpLogWriter {
                 }
                 cv_.notify_all();
             });
+        if (committed) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            committed_types_[op_type] = committed->sequence_id();
+            cv_.notify_all();
+        }
+        return committed;
+    }
+
+    std::optional<uint64_t> WaitForCommittedType(
+        OpType type, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cv_.wait_for(lock, timeout,
+                          [&] { return committed_types_.contains(type); })) {
+            return std::nullopt;
+        }
+        return committed_types_.at(type);
     }
 
     bool PauseCallbacksAfter(
@@ -240,6 +257,7 @@ class GatedOrderedOpLogWriter : public OrderedOpLogWriter {
     std::condition_variable cv_;
     uint64_t released_through_{UINT64_MAX};
     uint64_t completed_through_{0};
+    std::map<OpType, uint64_t> committed_types_;
     bool stopping_{false};
 };
 
@@ -281,6 +299,10 @@ class RejectOnceOrderedOpLogWriter : public OrderedOpLogWriter {
         reject_next_segment_unmount_.store(true);
     }
 
+    void RejectNextWeightLeaseDelete() {
+        reject_next_weight_lease_delete_.store(true);
+    }
+
     tl::expected<PendingHandle, ErrorCode> Commit(
         Reservation&& reservation, OpLogEntry entry,
         DurableCallback callback) override {
@@ -291,6 +313,10 @@ class RejectOnceOrderedOpLogWriter : public OrderedOpLogWriter {
             reject_next_segment_unmount_.exchange(false)) {
             return tl::make_unexpected(ErrorCode::PERSISTENT_FAIL);
         }
+        if (entry.op_type == OpType::WEIGHT_LEASE_DELETE &&
+            reject_next_weight_lease_delete_.exchange(false)) {
+            return tl::make_unexpected(ErrorCode::PERSISTENT_FAIL);
+        }
         return OrderedOpLogWriter::Commit(
             std::move(reservation), std::move(entry), std::move(callback));
     }
@@ -298,10 +324,49 @@ class RejectOnceOrderedOpLogWriter : public OrderedOpLogWriter {
    private:
     std::atomic<bool> reject_next_{false};
     std::atomic<bool> reject_next_segment_unmount_{false};
+    std::atomic<bool> reject_next_weight_lease_delete_{false};
 };
 
 class MasterServiceHATest : public ::testing::Test {
    protected:
+    static WeightMetadataSnapshot ReadyWeightLeaseDeletionBaseline() {
+        const WeightRevisionIdentity identity{
+            .tenant_id = "default",
+            .name_space = "production",
+            .resource_id = "llama-70b",
+            .revision = "step-100",
+            .weight_generation = 7,
+        };
+        return WeightMetadataSnapshot{
+            .metadata = {WeightRevisionMetadata{
+                .identity = identity,
+                .manifest =
+                    WeightManifestReference{
+                        .manifest_key = MakeWeightManifestKey(identity),
+                        .manifest_sha256 = std::string(64, 'a'),
+                        .payload_group_id = MakeWeightPayloadGroupId(identity),
+                        .payload_keys_sha256 = std::string(64, 'b'),
+                        .payload_count = 1,
+                        .logical_bytes = 1024,
+                    },
+                .availability = WeightAvailabilityState::READY,
+                .residency = WeightResidencyState::HOT,
+                .operation_id = std::nullopt,
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+                .observed_hot_ratio = 1.0,
+                .metadata_generation = 2,
+                .created_at_ms = 100,
+                .updated_at_ms = 200,
+                .last_accessed_at_ms = 150,
+            }},
+            .leases = {},
+            .operations = {},
+            .next_lease_id = 1,
+            .next_operation_id = 1,
+        };
+    }
+
     static void EnableDfsForTesting(MasterService& service) {
         MasterServiceTestPeer::EnableDfs(service) = true;
     }
@@ -2769,6 +2834,216 @@ TEST_F(MasterServiceHATest,
     OpLogBatchStorage storage(cluster_id, *backend);
     OpLogBatchRecord batch;
     EXPECT_EQ(ErrorCode::ETCD_KEY_NOT_EXIST, storage.ReadBatch(1, batch));
+}
+
+TEST_F(MasterServiceHATest,
+       WeightLineageMutationRequiresIndependentStandbyCapability) {
+    const std::string cluster_id = "weight_lineage_capability_gate";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .build();
+    MasterService service(config);
+
+    const WeightRevisionIdentity base_identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    WeightMetadataSnapshot snapshot{
+        .metadata = {WeightRevisionMetadata{
+            .identity = base_identity,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key =
+                        "weights/production/llama-70b/step-100/7/manifest",
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(base_identity),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .availability = WeightAvailabilityState::READY,
+            .residency = WeightResidencyState::HOT,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
+            .metadata_generation = 2,
+            .created_at_ms = 100,
+            .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
+        }},
+        .leases = {},
+        .operations = {},
+        .next_lease_id = 1,
+        .next_operation_id = 1,
+    };
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, snapshot));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
+
+    const WeightRevisionIdentity independent_identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "mixtral",
+        .revision = "step-1",
+        .weight_generation = 1,
+    };
+    auto old_mutation = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = independent_identity,
+        .expected_payload_count = 1,
+        .expected_logical_bytes = 512,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'd'),
+            },
+    });
+    ASSERT_TRUE(old_mutation.has_value())
+        << "error=" << static_cast<int>(old_mutation.error());
+
+    auto target_identity = base_identity;
+    target_identity.weight_generation = 8;
+    auto rejected = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base_identity,
+        .expected_base_metadata_generation = 2,
+        .target_identity = target_identity,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target_identity,
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'e'),
+                    },
+            },
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
+    EXPECT_FALSE(service
+                     .GetWeightLineage(GetWeightLineageRequest{
+                         .identity = ToWeightLineageIdentity(base_identity),
+                     })
+                     .has_value());
+    EXPECT_FALSE(service
+                     .GetWeightRevision(
+                         GetWeightRevisionRequest{.identity = target_identity})
+                     .has_value());
+
+    OpLogBatchStorage storage(cluster_id, *backend);
+    OpLogBatchRecord batch;
+    ASSERT_EQ(ErrorCode::OK, storage.ReadBatch(1, batch));
+    ASSERT_EQ(1, batch.entries.size());
+    EXPECT_EQ(OpType::WEIGHT_METADATA_UPSERT, batch.entries.front().op_type);
+}
+
+TEST_F(MasterServiceHATest,
+       WeightLineageOnlyCapabilityDoesNotLeaveClaimOnFailedUpsert) {
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_lineage_oplog_capability_confirmed(true)
+                      .set_cluster_id("weight_lineage_only_capability")
+                      .build();
+    MasterService service(config);
+
+    const WeightRevisionIdentity base_identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    WeightMetadataSnapshot snapshot{
+        .metadata = {WeightRevisionMetadata{
+            .identity = base_identity,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key =
+                        "weights/production/llama-70b/step-100/7/manifest",
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(base_identity),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .availability = WeightAvailabilityState::READY,
+            .residency = WeightResidencyState::HOT,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
+            .metadata_generation = 2,
+            .created_at_ms = 100,
+            .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
+        }},
+        .leases = {},
+        .operations = {},
+        .next_lease_id = 1,
+        .next_operation_id = 1,
+    };
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, snapshot));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
+
+    auto target_identity = base_identity;
+    target_identity.weight_generation = 8;
+    auto rejected = service.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "replace-7-with-8",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base_identity,
+        .expected_base_metadata_generation = 2,
+        .target_identity = target_identity,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target_identity,
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'e'),
+                    },
+            },
+    });
+    ASSERT_FALSE(rejected.has_value());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
+    EXPECT_FALSE(service
+                     .GetWeightLineage(GetWeightLineageRequest{
+                         .identity = ToWeightLineageIdentity(base_identity),
+                     })
+                     .has_value());
+    EXPECT_FALSE(service
+                     .GetWeightRevision(
+                         GetWeightRevisionRequest{.identity = target_identity})
+                     .has_value());
 }
 
 TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
@@ -6070,8 +6345,90 @@ TEST_F(MasterServiceHATest,
     EXPECT_FALSE(batch.entries[0].payload.empty());
 }
 
-TEST_F(MasterServiceHATest, WeightLeaseShorterTtlRenewalReplaysThroughReader) {
-    const std::string cluster_id = "weight_lease_shorter_ttl_replay";
+TEST_F(MasterServiceHATest,
+       ConcurrentBeginWeightImportProducesReplayableDurableHistory) {
+    const std::string cluster_id =
+        "test_concurrent_weight_import_replay_cluster";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .set_oplog_batch_max_entries(2)
+                      .build();
+    MasterService service(config);
+    auto* writer = InstallGatedWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
+    ASSERT_TRUE(writer->PauseCallbacksAfter(0));
+
+    const WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    auto begin = [&](size_t payload_count, uint64_t logical_bytes,
+                     char digest) {
+        return service.BeginWeightImport(BeginWeightImportRequest{
+            .identity = identity,
+            .expected_payload_count = payload_count,
+            .expected_logical_bytes = logical_bytes,
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = payload_count,
+                    .affinity_digest = std::string(64, digest),
+                },
+        });
+    };
+
+    OpLogBatchStorage storage(cluster_id, *backend);
+    OpLogBatchRecord first_batch;
+    OpLogBatchRecord second_batch;
+    auto first =
+        std::async(std::launch::async, [&] { return begin(2, 2048, 'c'); });
+    ASSERT_EQ(std::future_status::timeout,
+              first.wait_for(std::chrono::milliseconds(200)))
+        << "BeginWeightImport returned before its durable callback";
+    ReadBatchEventually(storage, 1, first_batch);
+    auto second =
+        std::async(std::launch::async, [&] { return begin(3, 3072, 'd'); });
+    ASSERT_EQ(1u, first_batch.entries.size());
+    ErrorCode second_batch_error = ErrorCode::ETCD_KEY_NOT_EXIST;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        second_batch_error = storage.ReadBatch(2, second_batch);
+        if (second_batch_error == ErrorCode::OK) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_EQ(ErrorCode::ETCD_KEY_NOT_EXIST, second_batch_error);
+    ASSERT_TRUE(writer->RunCallbacksThrough(1));
+
+    const auto first_result = first.get();
+    const auto second_status = second.wait_for(std::chrono::seconds(1));
+    if (second_status != std::future_status::ready) {
+        writer->Stop();
+        second.wait();
+    }
+    EXPECT_EQ(std::future_status::ready, second_status)
+        << "A conflicting import must wait for the first publication rather "
+           "than append an unpublishable durable record";
+    const auto second_result = second.get();
+    EXPECT_TRUE(first_result.has_value());
+    EXPECT_FALSE(second_result.has_value());
+
+    MockMetadataStore standby_metadata;
+    OpLogApplier applier(&standby_metadata, cluster_id);
+    EXPECT_EQ(1u, applier.ApplyOpLogEntries(first_batch.entries));
+    EXPECT_EQ(ErrorCode::ETCD_KEY_NOT_EXIST,
+              storage.ReadBatch(2, second_batch));
+}
+
+TEST_F(MasterServiceHATest,
+       WeightLeaseExpiryCleanupCannotReplayDeleteAfterPendingRenewal) {
+    const std::string cluster_id = "weight_expiry_pending_renewal";
     auto backend = std::make_shared<FakeBatchHaKvBackend>();
     auto config = MasterServiceConfig::builder()
                       .set_enable_ha(true)
@@ -6116,6 +6473,308 @@ TEST_F(MasterServiceHATest, WeightLeaseShorterTtlRenewalReplaysThroughReader) {
         .next_lease_id = 1,
         .next_operation_id = 1,
     };
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, baseline));
+    auto* writer = InstallGatedWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
+    auto acquired =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = identity,
+            .expected_metadata_generation = 2,
+            .holder = "worker-0",
+            .ttl_ms = 5'000,
+        });
+    ASSERT_TRUE(acquired.has_value());
+    ASSERT_TRUE(writer->PauseCallbacksAfter(1));
+    auto renewing = std::async(std::launch::async, [&] {
+        return service.RenewWeightRevisionLease(RenewWeightRevisionLeaseRequest{
+            .tenant_id = "default",
+            .lease_id = acquired->lease_id,
+            .ttl_ms = 120'000,
+        });
+    });
+
+    // Cross the real cleanup thread's 30-second interval while renewal is
+    // durable but its publication callback is delayed. No private cleanup
+    // helper or synthetic expiry timestamp participates in the race.
+    const auto pending = renewing.wait_for(std::chrono::seconds(33));
+    const auto cleanup_sequence = writer->WaitForCommittedType(
+        OpType::WEIGHT_LEASE_DELETE, std::chrono::seconds(1));
+    bool cleanup_durable = false;
+    if (cleanup_sequence) {
+        auto durable = writer->AwaitDurable(*cleanup_sequence);
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!durable.hasResult() &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        cleanup_durable =
+            durable.hasResult() && std::move(durable).get() == ErrorCode::OK;
+    }
+    const bool renewed_callback = writer->RunCallbacksThrough(2);
+    // Stop releases every gated callback, including cleanup work, before
+    // either future destruction or MasterService's worker joins can run.
+    writer->Stop();
+    const auto renewed = renewing.get();
+    EXPECT_EQ(std::future_status::timeout, pending);
+    EXPECT_TRUE(renewed_callback);
+    if (cleanup_sequence) {
+        EXPECT_TRUE(cleanup_durable)
+            << "Observed cleanup must be durable before stopping the writer";
+    }
+    ASSERT_TRUE(renewed.has_value());
+    const auto primary = ExportWeightMetadata(service);
+    const auto primary_lease = std::find_if(
+        primary.leases.begin(), primary.leases.end(), [&](const auto& lease) {
+            return lease.lease_id == acquired->lease_id;
+        });
+    ASSERT_NE(primary.leases.end(), primary_lease);
+    EXPECT_EQ(*renewed, *primary_lease);
+
+    StandbyMetadataStore standby_metadata;
+    ASSERT_TRUE(standby_metadata.RestoreWeightMetadata(baseline));
+    OpLogApplier applier(&standby_metadata, cluster_id);
+    OpLogBatchStandbyReader reader(cluster_id, *backend, applier);
+    const auto replayed = reader.PollOnce();
+    EXPECT_EQ(ErrorCode::OK, replayed.error);
+    EXPECT_GE(replayed.applied_entries, 2u);
+    const auto restored = standby_metadata.GetWeightLease(acquired->lease_id);
+    ASSERT_TRUE(restored.has_value())
+        << "A successful renewal must survive durable cleanup replay; applied="
+        << replayed.applied_entries;
+    EXPECT_EQ(*renewed, *restored);
+}
+
+TEST_F(MasterServiceHATest,
+       WeightCleanupShutdownCompletesDuringRetryableBackendFailure) {
+    auto backend = std::make_shared<FailingBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id("weight_cleanup_shutdown_retry")
+                      .build();
+    auto service = std::make_unique<MasterService>(config);
+    const WeightRevisionIdentity identity{
+        .tenant_id = "default",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+        .weight_generation = 7,
+    };
+    const WeightMetadataSnapshot baseline{
+        .metadata = {WeightRevisionMetadata{
+            .identity = identity,
+            .manifest =
+                WeightManifestReference{
+                    .manifest_key = MakeWeightManifestKey(identity),
+                    .manifest_sha256 = std::string(64, 'a'),
+                    .payload_group_id = MakeWeightPayloadGroupId(identity),
+                    .payload_keys_sha256 = std::string(64, 'b'),
+                    .payload_count = 1,
+                    .logical_bytes = 1024,
+                },
+            .availability = WeightAvailabilityState::READY,
+            .residency = WeightResidencyState::HOT,
+            .operation_id = std::nullopt,
+            .affinity_count = 1,
+            .affinity_digest = std::string(64, 'c'),
+            .observed_hot_ratio = 1.0,
+            .metadata_generation = 2,
+            .created_at_ms = 100,
+            .updated_at_ms = 200,
+            .last_accessed_at_ms = 150,
+        }},
+        .leases = {},
+        .operations = {},
+        .next_lease_id = 1,
+        .next_operation_id = 1,
+    };
+    ASSERT_TRUE(service->RestoreFromStandbySnapshot({}, 0, {}, baseline));
+    ASSERT_EQ(ErrorCode::OK,
+              MasterServiceTestPeer(*service).SetBatchOpLogBackendForTesting(
+                  backend));
+    const auto acquired =
+        service->AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = identity,
+            .expected_metadata_generation = 2,
+            .holder = "worker-0",
+            .ttl_ms = 1'000,
+        });
+    ASSERT_TRUE(acquired.has_value());
+    // Model repeated, promptly returning etcd failures, not a test-only
+    // backend that blocks forever inside a single transaction.
+    backend->SetTxnError(ErrorCode::ETCD_OPERATION_ERROR);
+    const bool cleanup_attempted =
+        backend->WaitForTxnCalls(2, std::chrono::seconds(35));
+    auto shutdown = std::async(std::launch::async, [&] { service.reset(); });
+    const auto completion = shutdown.wait_for(std::chrono::seconds(3));
+    // Recover the backend even on RED so the real worker and writer can
+    // finish and the test process exits normally without detached threads.
+    backend->SetTxnError(ErrorCode::OK);
+    shutdown.get();
+    EXPECT_TRUE(cleanup_attempted);
+    EXPECT_EQ(std::future_status::ready, completion)
+        << "Shutdown must stop durability retries before joining the cleanup "
+           "worker that is waiting for their completion";
+}
+
+TEST_F(MasterServiceHATest,
+       ExpiredWeightLeaseDeleteIsDurableBeforeDeletingMetadata) {
+    const std::string cluster_id = "weight_delete_durable_lease_order";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .set_oplog_batch_max_entries(1)
+                      .build();
+    MasterService service(config);
+    const auto baseline = ReadyWeightLeaseDeletionBaseline();
+    const auto& identity = baseline.metadata.front().identity;
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, baseline));
+    ASSERT_EQ(
+        ErrorCode::OK,
+        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
+    const auto acquired =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = identity,
+            .expected_metadata_generation = 2,
+            .holder = "worker-0",
+            .ttl_ms = 100,
+        });
+    ASSERT_TRUE(acquired.has_value());
+    std::this_thread::sleep_until(std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(acquired->expires_at_ms + 1)));
+    const auto deleted =
+        service.DeleteWeightRevision(DeleteWeightRevisionRequest{
+            .identity = identity,
+            .expected_metadata_generation = 2,
+        });
+    service.StopBatchOpLogWriter();
+    ASSERT_TRUE(deleted.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+    EXPECT_TRUE(ExportWeightMetadata(service).leases.empty());
+
+    OpLogBatchStorage storage(cluster_id, *backend);
+    OpLogBatchRecord lease_delete_batch;
+    ASSERT_EQ(ErrorCode::OK, storage.ReadBatch(2, lease_delete_batch));
+    ASSERT_EQ(1u, lease_delete_batch.entries.size());
+    EXPECT_EQ(OpType::WEIGHT_LEASE_DELETE,
+              lease_delete_batch.entries.front().op_type);
+    OpLogBatchRecord deleting_batch;
+    ASSERT_EQ(ErrorCode::OK, storage.ReadBatch(3, deleting_batch));
+    ASSERT_EQ(1u, deleting_batch.entries.size());
+    EXPECT_EQ(OpType::WEIGHT_METADATA_UPSERT,
+              deleting_batch.entries.front().op_type);
+    WeightMetadataUpsertOp deleting;
+    ASSERT_EQ(struct_pack::errc::ok,
+              struct_pack::deserialize_to(
+                  deleting, deleting_batch.entries.front().payload));
+    EXPECT_EQ(WeightAvailabilityState::DELETING,
+              deleting.metadata.availability);
+    EXPECT_LT(lease_delete_batch.entries.front().sequence_id,
+              deleting_batch.entries.front().sequence_id);
+
+    StandbyMetadataStore standby_metadata;
+    ASSERT_TRUE(standby_metadata.RestoreWeightMetadata(baseline));
+    OpLogApplier applier(&standby_metadata, cluster_id);
+    OpLogBatchStandbyReader reader(cluster_id, *backend, applier);
+    MasterService restored(MasterServiceConfig::builder().build());
+    // Every durable prefix, including DELETING, must be a restorable state.
+    for (size_t batch = 0; batch < 4; ++batch) {
+        const auto replayed = reader.PollOnce(1);
+        ASSERT_EQ(ErrorCode::OK, replayed.error);
+        ASSERT_EQ(1u, replayed.applied_entries);
+        ASSERT_TRUE(restored.RestoreFromStandbySnapshot(
+            {}, 0, {}, standby_metadata.SnapshotWeightMetadata()));
+    }
+    EXPECT_FALSE(standby_metadata.GetWeightLease(acquired->lease_id));
+    const auto recovered = restored.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = identity});
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(WeightAvailabilityState::DELETED,
+              recovered->metadata.availability);
+}
+
+TEST_F(MasterServiceHATest,
+       RejectedExpiredWeightLeaseDeleteKeepsReadyRevisionAndLease) {
+    const std::string cluster_id = "weight_delete_lease_rejected";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .set_oplog_batch_max_entries(1)
+                      .build();
+    MasterService service(config);
+    const auto baseline = ReadyWeightLeaseDeletionBaseline();
+    const auto& identity = baseline.metadata.front().identity;
+    ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, baseline));
+    auto* writer = InstallRejectOnceWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
+    const auto acquired =
+        service.AcquireWeightRevisionLease(AcquireWeightRevisionLeaseRequest{
+            .identity = identity,
+            .expected_metadata_generation = 2,
+            .holder = "worker-0",
+            .ttl_ms = 100,
+        });
+    ASSERT_TRUE(acquired.has_value());
+    std::this_thread::sleep_until(std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(acquired->expires_at_ms + 1)));
+    writer->RejectNextWeightLeaseDelete();
+    const auto deleted =
+        service.DeleteWeightRevision(DeleteWeightRevisionRequest{
+            .identity = identity,
+            .expected_metadata_generation = 2,
+        });
+    writer->Stop();
+    ASSERT_FALSE(deleted.has_value());
+    EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, deleted.error());
+    const auto primary = service.GetWeightRevision(
+        GetWeightRevisionRequest{.identity = identity});
+    ASSERT_TRUE(primary.has_value());
+    EXPECT_EQ(WeightAvailabilityState::READY, primary->metadata.availability);
+    EXPECT_EQ(2u, primary->metadata.metadata_generation);
+    const auto snapshot = ExportWeightMetadata(service);
+    ASSERT_EQ(1u, snapshot.leases.size());
+    EXPECT_EQ(*acquired, snapshot.leases.front());
+
+    StandbyMetadataStore standby_metadata;
+    ASSERT_TRUE(standby_metadata.RestoreWeightMetadata(baseline));
+    OpLogApplier applier(&standby_metadata, cluster_id);
+    OpLogBatchStandbyReader reader(cluster_id, *backend, applier);
+    const auto replayed = reader.PollOnce();
+    ASSERT_EQ(ErrorCode::OK, replayed.error);
+    EXPECT_EQ(1u, replayed.applied_entries);
+    const auto replayed_lease =
+        standby_metadata.GetWeightLease(acquired->lease_id);
+    ASSERT_TRUE(replayed_lease.has_value());
+    EXPECT_EQ(*acquired, *replayed_lease);
+    const auto replayed_metadata = standby_metadata.GetWeightMetadata(identity);
+    ASSERT_TRUE(replayed_metadata.has_value());
+    EXPECT_EQ(primary->metadata, *replayed_metadata);
+    MasterService restored(MasterServiceConfig::builder().build());
+    EXPECT_TRUE(restored.RestoreFromStandbySnapshot(
+        {}, 0, {}, standby_metadata.SnapshotWeightMetadata()));
+}
+
+TEST_F(MasterServiceHATest, WeightLeaseShorterTtlRenewalReplaysThroughReader) {
+    const std::string cluster_id = "weight_lease_shorter_ttl_replay";
+    auto backend = std::make_shared<FakeBatchHaKvBackend>();
+    auto config = MasterServiceConfig::builder()
+                      .set_enable_ha(true)
+                      .set_enable_oplog(true)
+                      .set_weight_management_oplog_capability_confirmed(true)
+                      .set_cluster_id(cluster_id)
+                      .set_oplog_batch_max_entries(1)
+                      .build();
+    MasterService service(config);
+    const auto baseline = ReadyWeightLeaseDeletionBaseline();
+    const auto& identity = baseline.metadata.front().identity;
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, baseline));
     ASSERT_EQ(
         ErrorCode::OK,
@@ -6163,41 +6822,8 @@ TEST_F(MasterServiceHATest, WeightLeaseRenewalRechecksExpiryAfterGroupWait) {
                       .set_oplog_batch_max_entries(1)
                       .build();
     MasterService service(config);
-    const WeightRevisionIdentity identity{
-        .tenant_id = "default",
-        .name_space = "production",
-        .resource_id = "llama-70b",
-        .revision = "step-100",
-        .weight_generation = 7,
-    };
-    const WeightMetadataSnapshot baseline{
-        .metadata = {WeightRevisionMetadata{
-            .identity = identity,
-            .manifest =
-                WeightManifestReference{
-                    .manifest_key = MakeWeightManifestKey(identity),
-                    .manifest_sha256 = std::string(64, 'a'),
-                    .payload_group_id = MakeWeightPayloadGroupId(identity),
-                    .payload_keys_sha256 = std::string(64, 'b'),
-                    .payload_count = 1,
-                    .logical_bytes = 1024,
-                },
-            .availability = WeightAvailabilityState::READY,
-            .residency = WeightResidencyState::HOT,
-            .operation_id = std::nullopt,
-            .affinity_count = 1,
-            .affinity_digest = std::string(64, 'c'),
-            .observed_hot_ratio = 1.0,
-            .metadata_generation = 2,
-            .created_at_ms = 100,
-            .updated_at_ms = 200,
-            .last_accessed_at_ms = 150,
-        }},
-        .leases = {},
-        .operations = {},
-        .next_lease_id = 1,
-        .next_operation_id = 1,
-    };
+    const auto baseline = ReadyWeightLeaseDeletionBaseline();
+    const auto& identity = baseline.metadata.front().identity;
     ASSERT_TRUE(service.RestoreFromStandbySnapshot({}, 0, {}, baseline));
     auto* writer = InstallGatedWriter(service, backend);
     ASSERT_NE(nullptr, writer);
