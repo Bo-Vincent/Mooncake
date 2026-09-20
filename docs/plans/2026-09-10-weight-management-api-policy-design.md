@@ -9,10 +9,8 @@ Management
 
 依赖：不依赖 Transfer Engine Reshard PR
 
-当前状态（2026-09-10）：上游 `origin/main` 为 `b9059252`，尚未包含
-revision-level managed Weight Management；main 已有 unmanaged manifest-backed
-`WeightStore`。新增管理代码只存在于当前 feature branch，因此必须在合入前直接
-完成 `WeightStore` 公共 API 的命名收敛，不保留未发布 managed API 的兼容层。
+revision-level managed API 尚未发布，因此本设计直接采用最终命名，不为中间名称
+保留兼容层。
 
 ## 1. 目标与边界
 
@@ -23,7 +21,8 @@ revision-level managed Weight Management；main 已有 unmanaged manifest-backed
 - 可持久化、可更新的 revision-level policy；
 - `HOT`、`COLD`、`MIXED`、`MIGRATING` 语义；
 - 显式和自动 residency migration；
-- query、update、operation query 与 group delete；
+- query、policy update、generation-aware replacement、operation query 与 group
+  delete；
 - group 级生命周期，禁止单个 Tensor/fragment 独立驱逐。
 
 管理聚合根是 Weight Revision。Tensor 语义保留在不可变 manifest 中，
@@ -50,6 +49,7 @@ Slime/SGLang/Megatron/未来 DTensor Adapter
 | `WeightRevisionMetadata` | Store Master metadata、OpLog、Master snapshot | identity、policy、availability、observed residency、operation ID、generation、lease、manifest reference |
 | `StoredWeightManifest` | Store `METADATA` object | Tensor 描述、fragment 几何、alias、object key 与 range |
 | Store object metadata | 现有 Store metadata | memory/disk/DFS/NoF 物理副本及可读状态 |
+| Lineage record | Store Master metadata、OpLog、Master snapshot | replacement claim、committed generation watermark、ordering、CAS 与恢复 |
 
 revision metadata 只保存 `WeightManifestReference`，通过它找到并校验
 manifest；manifest 再定位 payload。revision metadata 不保存 Tensor shape、
@@ -61,6 +61,9 @@ group 之外，因此 group 处于 COLD、DEGRADED、MIGRATING、DELETING 或 AB
 
 架构中不引入独立的发现服务或对应公共 API。公开管理者只有 `WeightStore`；Store
 Master 内部只维护 Weight metadata、索引、lease 和 operation 的持久化状态。
+
+lineage 定义为 `(tenant_id, namespace, resource_id, revision)`。lineage record 不保存
+serving active head；SGLang 或其他 serving control plane 仍负责流量切换和回滚。
 
 ## 3. `WeightStore` 公共 API
 
@@ -78,9 +81,9 @@ Master 内部只维护 Weight metadata、索引、lease 和 operation 的持久�
 | `batch_is_exist` | `weight_batch_is_exist`（需要批量接口时） |
 | `batch_remove` | `weight_batch_remove`（需要批量接口时） |
 
-Store 没有等价原语的管理操作才使用领域动词，例如 `weight_update`、
-`weight_migrate` 和 `weight_list`。查询 metadata 和 operation 统一使用 `get`
-语义，不再使用 `query`。
+Store 没有等价原语的管理操作才使用领域动词，例如 `weight_update_policy`、
+`weight_upsert`、`weight_migrate` 和 `weight_list`。查询 metadata 和 operation 统一
+使用 `get` 语义，不再使用 `query`。
 
 该规则覆盖整个 Python `WeightStore` 组件，即
 `mooncake.reshard.weight._store` 内从 facade 到 writer、upload/load service、
@@ -94,16 +97,22 @@ pybind、native client、RPC、`MasterService` 或 metadata state machine 机械
 
 ```text
 WeightStore.weight_put
-  -> WeightStore.weight_put_plan
+  -> WeightStoreWriter
+  -> WeightStore._begin_weight_put
+  -> WeightStore._weight_put_plan
   -> WeightStoreWriter.weight_put_tensor
+  -> WeightStore._weight_put_payload
   -> WeightUploadService.weight_put_payload
   -> StoreBackend.weight_batch_put_from
   -> [raw Store boundary] batch_put_from
   -> WeightUploadTransaction.weight_put_commit
 
 WeightStore.weight_get
+  -> WeightStore._weight_get_manifest
   -> WeightLoadService.weight_get_manifest
+  -> WeightStore._weight_get_plan
   -> WeightLoadService.weight_get_plan
+  -> WeightStore._weight_get_payload
   -> WeightLoadService.weight_get_payload
   -> StoreBackend.weight_get_into_ranges
   -> [raw Store boundary] get_into_ranges
@@ -116,9 +125,14 @@ WeightStore.weight_remove
   -> StoreBackend.weight_remove
   -> [native management boundary] delete_weight_revision
 
-WeightStore.weight_update
-  -> StoreBackend.weight_update
+WeightStore.weight_update_policy
+  -> StoreBackend.weight_update_policy
   -> [native management boundary] update_weight_policy
+
+WeightStore.weight_upsert
+  -> WeightStoreWriter
+  -> StoreBackend.weight_upsert_begin/commit/abort
+  -> [native management boundary] begin/commit/abort_weight_upsert
 
 WeightStore.weight_migrate
   -> StoreBackend.weight_migrate
@@ -129,9 +143,9 @@ WeightStore.weight_get_operation
   -> [native management boundary] query_weight_operation
 ```
 
-`weight_update`、`weight_migrate` 等没有普通 Store 等价原语，但它们仍属于
-`WeightStore` 公共和内部调用链，因此保持相同的 `weight_` 前缀。边界外继续使用
-现有准确的领域命名，不复制一套 Store 数据面实现。
+`weight_update_policy`、`weight_upsert`、`weight_migrate` 等没有普通 Store 等价
+原语，但它们仍属于 `WeightStore` 公共和内部调用链，因此保持相同的 `weight_`
+前缀。边界外继续使用现有准确的领域命名，不复制一套 Store 数据面实现。
 
 ```python
 weight_store = WeightStore(store, default_policy=default_policy)
@@ -154,11 +168,24 @@ manifest = weight_store.weight_get(
     target_bindings,
 )
 
-updated = weight_store.weight_update(
+updated = weight_store.weight_update_policy(
     identity,
     policy=new_policy,
     expected_metadata_generation=view.metadata.metadata_generation,
 )
+
+with weight_store.weight_upsert(
+    next_snapshot,
+    adapter,
+    replacing=identity,
+    expected_metadata_generation=updated.metadata_generation,
+    mode=WeightUpsertMode.PUT_FIRST,
+    request_id="rollout-2026-09-11-001",
+    policy=new_policy,
+) as successor:
+    for tensor_id, tensor in next_tensors:
+        successor.weight_put_tensor(tensor_id, tensor)
+next_identity = successor.identity
 
 operation = weight_store.weight_migrate(
     identity,
@@ -182,14 +209,18 @@ removed = weight_store.weight_remove(
 | `weight_get_metadata` | 获取轻量 revision metadata 和 manifest reference |
 | `weight_get_size` | 获取 revision 的 logical payload bytes |
 | `weight_list` | 分页查询 revision metadata，不读取完整 manifest |
-| `weight_update` | 只更新 policy，使用 metadata generation fencing |
+| `weight_update_policy` | 只更新 policy，使用 metadata generation fencing |
+| `weight_upsert` | 在同一 lineage 内用更高 generation 替换 base revision |
 | `weight_migrate` | 发起一次显式 residency 迁移 |
 | `weight_get_operation` | 获取异步迁移进度和错误 |
 | `weight_remove` | 显式整组删除 revision 并保留 tombstone |
 
-当前 feature branch 新增的 verbose managed API 尚未进入 main，直接重命名且不保留
-alias。main 已有的 `begin_weight_snapshot` 和 manifest-key API 继续作为明确的
-unmanaged 兼容路径，不提供生命周期保证，也不在本设计中改名。
+既有 manifest-key API 直接删除；应用统一通过 revision identity 和 managed
+`weight_*` API 访问权重。
+
+policy mutation 从旧名直接替换为 `weight_update_policy`，不提供兼容 wrapper。
+`weight_upsert` 不是普通 Store 对同 key 的原地覆盖；base 与 target 始终是两个
+不可变 generation。
 
 ## 4. Policy 与状态模型
 
@@ -200,6 +231,23 @@ class WeightStoragePolicy:
     mixed_hot_ratio: float = 0.5
     migration_mode: WeightMigrationMode = WeightMigrationMode.AUTO
 ```
+
+```python
+from enum import IntEnum
+
+class WeightUpsertMode(IntEnum):
+    PUT_FIRST = 0
+    DELETE_FIRST = 1
+```
+
+`weight_upsert(snapshot, adapter, *, replacing, expected_metadata_generation,
+mode=WeightUpsertMode.PUT_FIRST, tenant_id="default", policy=None,
+request_id=None)` 的 `snapshot` 必须与
+`replacing` 属于同一 lineage，且 target generation 同时大于 base generation 与
+lineage committed watermark。同一 lineage 只允许一个非终态 successor claim。
+`request_id` 省略时，`WeightStore` 对 base/target identity、mode 和
+`expected_metadata_generation` 的 canonical representation 计算确定性 hash，使 begin
+响应丢失后的同参数重试得到同一 ID；显式 `request_id` 原样使用。
 
 ```text
 policy:
@@ -318,12 +366,34 @@ identity -> metadata -> manifest/source ranges
          -> target placement/bindings -> get_into_ranges
 ```
 
-### Update
+### Update policy
 
-`weight_update` 只接受 `WeightStoragePolicy`，禁止调用方修改 identity、manifest
+`weight_update_policy` 只接受 `WeightStoragePolicy`，禁止调用方修改 identity、manifest
 reference、availability、observed residency 或 operation。更新必须
 durable-before-visible；相同请求幂等，过期 generation 返回
 `STALE_GENERATION`。`AUTO` 自动收敛，`MANUAL` 等待显式 migrate。
+
+### Upsert
+
+replacement claim 按 lineage 持久化 `request_id`、base、target、mode 和 phase。
+它只负责 ordering、CAS 和恢复，不代表 serving active head。同一 `request_id` 的
+重试参数必须完全相同并返回原 claim 或继续原 phase；不同 request 不能为同一
+lineage 建立第二个 successor。
+
+`PUT_FIRST` 是默认模式：先持久化 claim 并导入 target；target 达到 `READY` 后再
+持久化 fence/retire base，拒绝新的 base lease 和 renewal，等待已有 lease drain
+后删除 base。target 上传或提交失败时保留 base。该模式的峰值存储接近两份完整
+revision。
+
+`DELETE_FIRST` 只在 base 没有 active lease 和 lifecycle operation 时进入删除；它
+先 fence 并删除 base，确认回收后才允许 target import。这样可降低峰值存储，但从
+base 删除到 target `READY` 之间不可用，target 失败后 Store 也不能回滚到已删除的
+base。恢复使用原 `request_id` 和持久化 phase 继续。
+
+#3747 与 #3953 的 COO sparse update 可由 adapter 应用到 base 后生成新的完整
+generation，再进入 `weight_upsert`。直接引用 base payload 的 delta-backed target
+需要另行设计 dependency lease、base retention、链深上限和 compaction，不属于本
+replacement claim 的生命周期保证。
 
 ### Migrate
 
@@ -377,18 +447,25 @@ progress，再执行物理工作；切主后从真实副本状态继续。
 
 ## 8. 并发、HA 与错误
 
-`weight_update`、`weight_migrate`、`weight_remove` 必须携带
+`weight_update_policy`、`weight_migrate`、`weight_remove` 必须携带
 `expected_metadata_generation`。同一 revision 同时只允许一个 operation；metadata
 只保存可选 operation ID，operation kind、target 和 progress 存在独立 operation
 record 中。
+
+lineage claim 和 committed watermark 与 revision metadata 一起进入 OpLog 和
+snapshot。target generation 必须严格递增；切主后恢复原 claim，不能降低 watermark
+或产生第二个 successor。
 
 主要错误包括：`NOT_FOUND`、`NOT_READY`、`STALE_GENERATION`、`BUSY`、
 `CONFLICT`、`POLICY_UNSATISFIABLE` 和 `DURABILITY_FAILED`。
 
 Policy、operation target、affinity summary、operation progress 与 deletion
-tombstone 都进入现有 Store Master metadata OpLog 和 snapshot。由于这些 managed
-metadata 尚未进入 main，无需兼容旧内部字段名；standby 未具备新 schema 能力时，
-capability gate 必须禁止新 mutation。
+tombstone 进入普通 Weight metadata 的 OpType 8–11；其 gate 仍为
+`weight_management_oplog_capability_confirmed`。lineage claim 和 watermark 使用独立的
+OpType 12，`weight_upsert` 还要求
+`weight_lineage_oplog_capability_confirmed=true`。滚动升级先升级全部 standby，使其能
+重放 OpType 12，再打开新 flag。新 flag 为 false 时只拒绝 lineage mutation，不改变
+原 flag 对普通 Weight metadata mutation 的控制。
 
 ## 9. 实施切片
 
@@ -418,13 +495,15 @@ snapshot field weight_catalog -> weight_metadata
 1. Contracts/API：完成上述重命名，增加 policy、update contract、独立
    `WeightOperation`，统一 `WeightStore.weight_*` 门面。
 2. Management CRUD：补齐 `weight_is_exist`、`weight_get_metadata`、
-   `weight_get_size`、`weight_update`、`weight_get_operation` 与
+   `weight_get_size`、`weight_update_policy`、`weight_upsert`、
+   `weight_get_operation` 与
    `weight_remove`。
 3. WeightStore internal naming：把 writer、upload/load service、transaction 和
    backend adapter 中具有 Store 对应语义的方法统一到 `weight_*` 词根。
 4. MIXED：实现 payload-only residency、manifest HOT、affinity unit 和比例规划。
 5. AUTO：实现 pressure/access 触发、cooldown、限批和 failover resume。
-6. HA/docs：扩展 OpLog/snapshot、Python binding、API 文档和兼容迁移说明。
+6. HA/docs：扩展 OpLog/snapshot、Python binding 和 API 文档，明确唯一的 managed
+   public path 以及 OpType 8–11/12 的独立 rolling-upgrade gate。
 
 前四项不依赖 Transfer Engine PR；Store upload 继续使用已存在的 registered-buffer
 `batch_put_from`。未来 DTensor-native adapter 只替换 placement/binding 的生成方式，
@@ -432,9 +511,9 @@ snapshot field weight_catalog -> weight_metadata
 
 ## 10. 验收标准
 
-- 新增 `weight_*` managed API 不得弱化既有 unmanaged 兼容入口的公开契约；
-  `upload`、`load` 等既有 API 必须保留显式 keyword-only 参数、类型标注和可 introspect
-  的签名，完整 reshard contract suite 必须通过；
+- `WeightStore`、顶层 Python package 和 generic `MooncakeDistributedStore` 不再暴露
+  unmanaged Weight 入口；内部 payload/manifest 原语只通过 `weight_put_*`、
+  `weight_get_*` 调用链使用，完整 reshard contract suite 必须通过；
 
 以下标准必须在同一个 exact implementation head 上逐项验证。所有“最终收敛”类
 断言使用有 deadline 的状态轮询，不以固定 `sleep` 代替；无法在当前环境执行的
@@ -453,6 +532,9 @@ snapshot field weight_catalog -> weight_metadata
 - `WeightStore` 组件内从 facade 到 backend adapter 的方法，在 Store 存在同语义
   API 时使用对应 `weight_<Store method>` 词根；
 - pybind、native RPC、`MasterService` 等边界外代码不因该规则机械改名；
+- `weight_update_policy` 是唯一公开和 Python 内部 policy mutation 名称，不存在旧名
+  wrapper；`weight_upsert` 接受 `snapshot`、`adapter`、`replacing`、`mode` 与
+  `request_id`，默认 `PUT_FIRST`；
 - 除内部类型迁移说明外，不再出现旧 `WeightCatalog*`/`weight_catalog_*` 命名。
 
 ### 10.2 Put 与 policy
@@ -487,13 +569,21 @@ snapshot field weight_catalog -> weight_metadata
   `PINNED` 固定 residency，`MANUAL` 仅接受显式迁移，`AUTO` 才响应压力和访问；
 - 初始收敛完成后，`PINNED` 下显式迁移被拒绝，`MANUAL/AUTO` 下合法显式迁移被
   接受；非法 MIXED ratio 和无法满足 durability 的目标返回确定错误且不改变状态；
-- `weight_update` 只能修改 policy；同值更新幂等，过期 generation 返回
+- `weight_update_policy` 只能修改 policy；同值更新幂等，过期 generation 返回
   `STALE_GENERATION`，不允许修改 identity、manifest 或观测状态；
-- `weight_update` 不同步篡改 observed residency：更新后若 policy 为 `AUTO` 且当前
-  residency 与 preferred 不一致，则先持久化新 operation 再异步收敛；`MANUAL` 和
-  `PINNED` 不自动创建迁移 operation；
+- `weight_update_policy` 不同步篡改 observed residency：更新后若 policy 为 `AUTO`
+  且当前 residency 与 preferred 不一致，则先持久化新 operation 再异步收敛；
+  `MANUAL` 和 `PINNED` 不自动创建迁移 operation；
 - 并发 update/migrate/remove 只能有一个 generation-fenced mutation 成功，其余
   返回 `STALE_GENERATION` 或 `BUSY`。
+- 同一 lineage 的 target generation 必须同时大于 base 和 committed watermark；同一
+  `request_id` 重试幂等，不同 request 的并发 successor 被拒绝；
+- `PUT_FIRST` 验证 target 失败时 base 仍为 `READY`；target `READY` 后才 fence base，
+  等待 lease drain 后删除，测试记录接近两份 revision 的峰值；
+- `DELETE_FIRST` 在 active lease/operation 存在时于删除前返回 `BUSY`；无阻塞时先
+  删除 base、再允许 target import，并验证 target 失败后的不可用且不可回滚状态；
+- claim 每个 phase 的 restart/failover 恢复均使用原 `request_id`，不会创建第二个
+  successor 或降低 lineage watermark。
 
 ### 10.3 Migration
 
@@ -548,13 +638,16 @@ snapshot field weight_catalog -> weight_metadata
   `HOT/COLD/MIXED`；`DELETED` 对应 `ABSENT` 且无 active lease/operation；metadata
   中的 active operation ID 必须指向同 revision 的唯一非终态 operation，终态
   operation 可按原 ID 查询但不再挂在 metadata 上；
-- active/standby schema capability 未确认时，新 Weight mutation fail closed；
+- 原 `weight_management_oplog_capability_confirmed` 未确认时，普通 Weight metadata
+  mutation fail closed；`weight_lineage_oplog_capability_confirmed` 未确认时，
+  `weight_upsert` 单独 fail closed；
 - 旧 snapshot/OpLog 不含 weight metadata 时按兼容约定恢复为空；新 weight schema
   未被 standby 明确支持时 fail closed，不得静默丢失 revision、lease 或 operation；
+- rolling upgrade 先验证全部 standby 能重放 OpType 12，再打开 lineage flag；打开前
+  普通 Weight mutation 仍由原 flag 独立控制；
 - revision 到达终态后不残留 active lease、active operation、offload/promotion task
   或额外 group member；保留的 terminal operation 与 tombstone 仅承担查询和幂等；
-- 普通 Store、unmanaged WeightStore 和 KVCache 的 put/get/eviction/remove 行为无
-  回归。
+- 普通 Store 和 KVCache 的 put/get/eviction/remove 行为无回归。
 
 ### 10.5 交付门禁
 
