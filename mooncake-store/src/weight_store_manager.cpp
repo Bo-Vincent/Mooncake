@@ -1081,9 +1081,14 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
     return actions;
 }
 
-
 WeightMetadataStore::Result<WeightRevisionMetadata>
-WeightStoreManager::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
+WeightStoreManager::UpdateWeightPolicy(
+    const UpdateWeightPolicyRequest& request) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty()) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    auto group_operation_lock = LockGroup(request.identity);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
