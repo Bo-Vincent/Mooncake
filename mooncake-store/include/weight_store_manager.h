@@ -28,6 +28,10 @@ class WeightStoreManager {
         return weight_metadata_.RestoreSnapshot(snapshot);
     }
     void Clear() { weight_metadata_.Clear(); }
+    bool HasActiveLease(const WeightRevisionIdentity& identity,
+                        uint64_t generation, uint64_t now_ms) const {
+        return weight_metadata_.HasActiveLease(identity, generation, now_ms);
+    }
     size_t ReconcileWeightMetadataStoreOnce(uint64_t now_ms, size_t limit);
     std::unordered_set<std::string> SnapshotManagedWeightGroups() const;
     bool IsManagedGroup(const std::string& group) const {

@@ -182,11 +182,8 @@ class MasterService {
                                              size_t limit = 32) {
         return weight_manager_.ReconcileWeightMetadataStoreOnce(now_ms, limit);
     }
-    bool DropWeightGroupMemberForTesting(
-        const WeightRevisionIdentity& identity, const std::string& key) {
-        return RemoveObject(key, TenantId(identity.tenant_id), true, true)
-            .has_value();
-    }
+    bool DropWeightGroupMemberForTesting(const WeightRevisionIdentity& identity,
+                                         const std::string& key);
     WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
         const CommitWeightImportRequest& request);
     WeightMetadataStore::Result<WeightRevisionMetadata> AbortWeightImport(
@@ -1364,8 +1361,11 @@ class MasterService {
         bool stop_scan{false};
         ErrorCode error{ErrorCode::OK};
     };
-    GroupEvictionResult EvictManagedWeightGroupToCold(
-        const WeightRevisionMetadata& metadata);
+    GroupEvictionResult EvictManagedWeightMembersToCold(
+        const WeightRevisionMetadata& metadata,
+        const std::vector<std::string>& member_keys);
+    void QueueManagedWeightMemberOffload(const WeightRevisionMetadata& metadata,
+                                         const std::string& member_key);
 
     // Evicts every member of `group_id` across its metadata shards. MUST be
     // called WITHOUT holding any metadata shard lock: the caller releases the

@@ -63,6 +63,7 @@
 #include "master_snapshot_repository.h"
 #include "ha_metric_manager.h"
 #include "metadata_store.h"
+#include "weight_residency_planner.h"
 
 namespace mooncake {
 
@@ -1756,6 +1757,28 @@ MasterService::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
     return weight_manager_.UpdateWeightPolicy(request);
 }
 
+bool MasterService::DropWeightGroupMemberForTesting(
+    const WeightRevisionIdentity& identity, const std::string& key) {
+    const TenantId tenant_id(identity.tenant_id);
+    [[maybe_unused]] auto group_operation_lock = weight_manager_.LockGroup(
+        tenant_id, MakeWeightPayloadGroupId(identity));
+    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
+    MetadataAccessorRW accessor(this, MakeObjectIdentity(key, tenant_id));
+    if (!accessor.Exists()) {
+        return false;
+    }
+    bool dropped = false;
+    accessor.Get().VisitReplicas(
+        [](const Replica& replica) {
+            return replica.status() != ReplicaStatus::REMOVED;
+        },
+        [&dropped](Replica& replica) {
+            replica.mark_removed();
+            dropped = true;
+        });
+    return dropped;
+}
+
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,
                                           const std::string& key,
                                           const std::string& group_id) {
@@ -1888,27 +1911,87 @@ MasterService::GroupEvictionResult MasterService::EvictGroupOrObject(
     return result;
 }
 
-MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
-    const WeightRevisionMetadata& revision) {
+void MasterService::QueueManagedWeightMemberOffload(
+    const WeightRevisionMetadata& revision, const std::string& member_key) {
     const TenantId tenant_id(revision.identity.tenant_id);
-    auto member_keys =
-        GetGroupMemberKeys(tenant_id, revision.manifest.payload_group_id);
-    if (member_keys.empty()) {
-        return {};
+    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
+    MetadataAccessorRW accessor(this,
+                                MakeObjectIdentity(member_key, tenant_id));
+    if (!accessor.Exists()) {
+        return;
+    }
+    auto& metadata = accessor.Get();
+    if (metadata.group_id != revision.manifest.payload_group_id ||
+        metadata.data_type != ObjectDataType::WEIGHT ||
+        metadata.HasReplica([this](const Replica& replica) {
+            return !replica.is_memory_replica() && IsReplicaReadable(replica);
+        })) {
+        return;
     }
 
-    const auto now = std::chrono::system_clock::now();
+    auto& tenant_state = accessor.GetTenantState();
+    if (tenant_state.offloading_tasks.contains(member_key)) {
+        return;
+    }
+    std::optional<ReplicaID> source_id;
+    std::vector<UUID> mirror_clients;
+    metadata.VisitReplicas(
+        [this](const Replica& replica) {
+            return replica.is_memory_replica() && IsReplicaReadable(replica);
+        },
+        [&, this](Replica& replica) {
+            if (source_id.has_value()) {
+                return;
+            }
+            auto queued =
+                PushOffloadingQueue(MakeObjectIdentity(member_key, tenant_id),
+                                    replica, &mirror_clients);
+            if (queued) {
+                replica.inc_refcnt();
+                source_id = replica.id();
+            }
+        });
+    if (source_id.has_value()) {
+        tenant_state.offloading_tasks.emplace(
+            member_key,
+            OffloadingTask{*source_id, std::chrono::system_clock::now(),
+                           std::move(mirror_clients)});
+    }
+}
+
+MasterService::GroupEvictionResult
+MasterService::EvictManagedWeightMembersToCold(
+    const WeightRevisionMetadata& revision,
+    const std::vector<std::string>& member_keys) {
+    GroupEvictionResult result;
+    const auto now_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    if (weight_manager_.HasActiveLease(revision.identity,
+                                       revision.metadata_generation, now_ms)) {
+        return result;
+    }
+
+    const TenantId tenant_id(revision.identity.tenant_id);
     std::vector<std::vector<Replica>> deferred_replicas;
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     auto is_evictable_memory = [this](const Replica& replica) {
         return IsEvictableMemoryReplica(replica);
     };
-    auto evict_one = [&, this](const std::string& member_key,
-                               ObjectMetadata& metadata,
-                               TenantState& tenant_state,
-                               MetadataShardAccessorRW&) -> EvictMemberOutcome {
-        if (metadata.data_type != ObjectDataType::WEIGHT) {
-            return {};
+    auto ordered_keys = member_keys;
+    std::sort(ordered_keys.begin(), ordered_keys.end());
+    for (const auto& member_key : ordered_keys) {
+        MetadataAccessorRW accessor(this,
+                                    MakeObjectIdentity(member_key, tenant_id));
+        if (!accessor.Exists()) {
+            continue;
+        }
+        auto& metadata = accessor.Get();
+        auto& tenant_state = accessor.GetTenantState();
+        if (metadata.group_id != revision.manifest.payload_group_id ||
+            metadata.data_type != ObjectDataType::WEIGHT) {
+            continue;
         }
         const bool has_cold =
             metadata.HasReplica([this](const Replica& replica) {
@@ -1916,13 +1999,15 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
                        IsReplicaReadable(replica);
             });
         if (!has_cold) {
-            return {};
+            continue;
         }
 
         if (enable_oplog_) {
             auto reservation = ReserveBatchOpLogSlot();
             if (!reservation) {
-                return {.stop_scan = true, .error = reservation.error()};
+                result.stop_scan = true;
+                result.error = reservation.error();
+                break;
             }
             auto remaining =
                 BuildRemainingReplicaDescriptors(metadata, is_evictable_memory);
@@ -1933,7 +2018,7 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
                                        replica.mark_removed();
                                    });
             if (removed_ids.empty()) {
-                return {};
+                continue;
             }
             auto persisted = AppendReservedOpLogWithDurableFinalize(
                 std::move(reservation.value()), OpType::PUT_END,
@@ -1950,12 +2035,15 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
                         replica->cancel_remove();
                     }
                 }
-                return {.stop_scan = true, .error = persisted.error()};
+                result.stop_scan = true;
+                result.error = persisted.error();
+                break;
             }
             PublishKvRemovedAfterEvict(member_key, removed_ids.size(), "cpu",
                                        metadata, tenant_id);
-            return {.freed_bytes = metadata.size * removed_ids.size(),
-                    .evicted_objects = 1};
+            result.freed_bytes += metadata.size * removed_ids.size();
+            ++result.evicted_objects;
+            continue;
         }
 
         const uint64_t before_charge = CompletedMemoryQuotaCharge(metadata);
@@ -1963,7 +2051,7 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
             PopReplicasWithCacheTotalAccounting(metadata, is_evictable_memory);
         const uint64_t removed_count = removed.size();
         if (removed_count == 0) {
-            return {};
+            continue;
         }
         std::vector<ReplicaID> removed_ids;
         removed_ids.reserve(removed.size());
@@ -1982,13 +2070,10 @@ MasterService::GroupEvictionResult MasterService::EvictManagedWeightGroupToCold(
         }
         PublishKvRemovedAfterEvict(member_key, removed_count, "cpu", metadata,
                                    tenant_id);
-        return {.freed_bytes = metadata.size * removed_count,
-                .evicted_objects = 1};
-    };
-
-    return EvictGroupOrObject(tenant_id, member_keys.front(),
-                              revision.manifest.payload_group_id, false, true,
-                              true, now, evict_one);
+        result.freed_bytes += metadata.size * removed_count;
+        ++result.evicted_objects;
+    }
+    return result;
 }
 
 bool MasterService::HasCompletedMemoryCacheReplica(
