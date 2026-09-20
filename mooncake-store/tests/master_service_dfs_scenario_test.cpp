@@ -228,6 +228,8 @@ TEST_F(ManagedWeightDfsEvictionTest,
     payload_config.data_type = ObjectDataType::WEIGHT;
     payload_config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
+    payload_config.residency_affinity_ids =
+        std::vector<std::string>{payload_key};
     ASSERT_TRUE(service.PutStart(client_id, payload_key, TenantId::Default(),
                                  4096, payload_config));
     ASSERT_TRUE(service.PutEnd(client_id, payload_key, TenantId::Default(),
@@ -235,6 +237,7 @@ TEST_F(ManagedWeightDfsEvictionTest,
 
     auto manifest_config = payload_config;
     manifest_config.data_type = ObjectDataType::METADATA;
+    manifest_config.residency_affinity_ids.reset();
     ASSERT_TRUE(service.PutStart(client_id, manifest_key, TenantId::Default(),
                                  4096, manifest_config));
     ASSERT_TRUE(service.PutEnd(client_id, manifest_key, TenantId::Default(),
