@@ -1570,6 +1570,7 @@ WeightStoreManager::GetWeightLineage(
 WeightMetadataStore::Result<WeightLineageMetadata>
 WeightStoreManager::PersistAndPublishWeightLineageMutation(
     const WeightLineageMutation& mutation) {
+    std::shared_lock mutation_lock(mutation_mutex_);
     if (!mutation.no_op && !backend_.CanPublishWeightLineageMutations()) {
         return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
     }
