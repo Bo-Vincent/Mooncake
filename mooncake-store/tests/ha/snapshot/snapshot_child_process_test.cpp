@@ -822,7 +822,6 @@ TEST_F(SnapshotChildProcessTest,
     CheckWeightSnapshotBoundary(SnapshotBoundaryBackend::Gate::DurableTxn,
                                 false, true);
 }
-
 TEST_F(SnapshotChildProcessTest, WeightSnapshotStopWhilePublicationPending) {
     CheckWeightSnapshotBoundary(SnapshotBoundaryBackend::Gate::DurableTxn,
                                 true);
@@ -832,7 +831,6 @@ TEST_F(SnapshotChildProcessTest,
        WeightSnapshotPreservesDurableBeginOnWriterStop) {
     CheckWeightSnapshotAfterWriterStop();
 }
-
 TEST_F(SnapshotChildProcessTest, FormatTimestamp_MatchesExpectedFormat) {
     CreateDefaultService();
     auto ts = CallFormatTimestamp(std::chrono::system_clock::now());
