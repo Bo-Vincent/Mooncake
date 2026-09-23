@@ -251,6 +251,7 @@ WeightStoreManager::ValidateWeightGroupForCommit(
 WeightMetadataStore::Result<WeightRevisionMetadata>
 WeightStoreManager::PersistAndPublishWeightMutation(
     const WeightMetadataMutation& mutation) {
+    std::shared_lock mutation_lock(mutation_mutex_);
     if (!mutation.no_op && !backend_.CanPublishWeightMutations()) {
         return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
     }
@@ -402,6 +403,7 @@ WeightStoreManager::ReleaseWeightRevisionLease(
 WeightMetadataStore::Result<WeightRevisionLease>
 WeightStoreManager::PersistAndPublishWeightLeaseMutation(
     const WeightLeaseMutation& mutation) {
+    std::shared_lock mutation_lock(mutation_mutex_);
     if (!mutation.no_op && !backend_.CanPublishWeightMutations()) {
         return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
     }
@@ -927,6 +929,7 @@ WeightStoreManager::DeleteWeightRevisionInternal(
 WeightMetadataStore::Result<WeightResidencyOperation>
 WeightStoreManager::PersistAndPublishWeightOperationMutation(
     const WeightOperationMutation& mutation) {
+    std::shared_lock mutation_lock(mutation_mutex_);
     if (!mutation.no_op && !backend_.CanPublishWeightMutations()) {
         return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
     }
@@ -1568,6 +1571,7 @@ WeightStoreManager::GetWeightLineage(
 WeightMetadataStore::Result<WeightLineageMetadata>
 WeightStoreManager::PersistAndPublishWeightLineageMutation(
     const WeightLineageMutation& mutation) {
+    std::shared_lock mutation_lock(mutation_mutex_);
     if (!mutation.no_op && !backend_.CanPublishWeightLineageMutations()) {
         return tl::make_unexpected(WeightManagementError::DURABILITY_FAILED);
     }

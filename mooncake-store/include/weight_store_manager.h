@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_set>
 
 #include "weight_store_backend.h"
@@ -22,6 +23,12 @@ class WeightStoreManager {
                                 uint64_t migration_cooldown_ms,
                                 uint64_t migration_max_members_per_round,
                                 uint64_t migration_max_bytes_per_round);
+
+    // A successful guard excludes append-to-publication mutations while the
+    // caller captures the OpLog boundary and weight state together.
+    std::unique_lock<std::shared_mutex> TryLockSnapshot() {
+        return std::unique_lock(mutation_mutex_, std::try_to_lock);
+    }
 
     WeightMetadataSnapshot ExportSnapshot() const {
         return weight_metadata_.ExportSnapshot();
@@ -123,6 +130,7 @@ class WeightStoreManager {
     const uint64_t weight_migration_max_members_per_round_;
     const uint64_t weight_migration_max_bytes_per_round_;
     WeightMetadataStore weight_metadata_;
+    std::shared_mutex mutation_mutex_;
     std::array<std::mutex, 4096> group_locks_;
     std::array<std::mutex, 4096> lineage_locks_;
     std::atomic<size_t> weight_reconciliation_offset_{0};
