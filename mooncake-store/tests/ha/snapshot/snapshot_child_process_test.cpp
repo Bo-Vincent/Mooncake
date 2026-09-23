@@ -222,7 +222,12 @@ class SnapshotChildProcessTest : public ::testing::Test {
                 BeginWeightImportRequest{.identity = identity,
                                          .payload_group_id = {},
                                          .expected_payload_count = 1,
-                                         .expected_logical_bytes = 1});
+                                         .expected_logical_bytes = 1,
+                                         .policy = WeightStoragePolicy{
+                                             .preferred_residency = WeightResidencyState::HOT,
+                                             .migration_mode = WeightMigrationMode::MANUAL},
+                                         .affinity_summary = {.affinity_count = 1,
+                                             .affinity_digest = std::string(64, 'c')}});
         };
         std::optional<WeightRevisionMetadata> ready;
         std::optional<WeightResidencyOperation> operation;
@@ -474,7 +479,12 @@ class SnapshotChildProcessTest : public ::testing::Test {
                 BeginWeightImportRequest{.identity = identity,
                                          .payload_group_id = {},
                                          .expected_payload_count = 1,
-                                         .expected_logical_bytes = 1});
+                                         .expected_logical_bytes = 1,
+                                         .policy = WeightStoragePolicy{
+                                             .preferred_residency = WeightResidencyState::HOT,
+                                             .migration_mode = WeightMigrationMode::MANUAL},
+                                         .affinity_summary = {.affinity_count = 1,
+                                             .affinity_digest = std::string(64, 'c')}});
         });
         const bool entered = backend->WaitForGate();
         if (!entered) backend->Release();
@@ -549,6 +559,7 @@ class SnapshotChildProcessTest : public ::testing::Test {
             << "durable Begin was omitted at snapshot sequence " << sequence;
         EXPECT_EQ(*expected, *recovered);
     }
+
 
 #ifdef STORE_USE_ETCD
     void CreateEtcdHASnapshotService(const std::string& cluster_id,
@@ -831,6 +842,7 @@ TEST_F(SnapshotChildProcessTest,
        WeightSnapshotPreservesDurableBeginOnWriterStop) {
     CheckWeightSnapshotAfterWriterStop();
 }
+
 TEST_F(SnapshotChildProcessTest, FormatTimestamp_MatchesExpectedFormat) {
     CreateDefaultService();
     auto ts = CallFormatTimestamp(std::chrono::system_clock::now());
