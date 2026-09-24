@@ -139,9 +139,11 @@ the compatibility entry point. `max_batch_operations`,
 `max_region_segments`, and `max_total_lowered_segments` bound physical
 expansion before native submission.
 
-This version drains each batch ticket to a known terminal state before it
-submits the next batch or endpoint. Native non-draining submission and a
-bounded multi-ticket window are the next performance phase.
+`max_inflight_batches` controls one FIFO window across all endpoint batches.
+The default value `1` preserves synchronous submission. Values greater than
+`1` use native non-draining Scatter tickets, retain each batch's registrations
+and allocation guards through terminal completion, and stop new submissions
+after the first known failure or unresolved completion.
 
 Live TE adapters accept runtime-bound source fragments. Store-backed restore
 continues through `WeightStore.load()`, which uses the same target placement and
