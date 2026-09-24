@@ -139,9 +139,21 @@ the compatibility entry point. `max_batch_operations`,
 `max_region_segments`, and `max_total_lowered_segments` bound physical
 expansion before native submission.
 
-This version drains each batch ticket to a known terminal state before it
-submits the next batch or endpoint. Native non-draining submission and a
-bounded multi-ticket window are the next performance phase.
+`max_inflight_batches` controls one FIFO window across all endpoint batches.
+The default value `1` preserves synchronous submission. Values greater than
+`1` use native non-draining Scatter tickets, retain each batch's registrations
+and allocation guards through terminal completion, and stop new submissions
+after the first known failure or unresolved completion.
+
+Each composite pending-ticket drain shares one timeout budget across its
+children. Later children receive the remaining budget, including zero for a
+non-blocking completion check. Backend calls must honor that timeout; status
+queries and scheduling overhead are additional to the wait budget.
+
+`execute_batches` borrows its input iterable and does not call `close()` on
+caller-owned iterators. Keep a resource-owning generator alive on early exit,
+and explicitly close it after outstanding transfers reach a terminal state.
+Its `finally` block must not free buffers still retained by a pending transfer.
 
 Live TE adapters accept runtime-bound source fragments. Store-backed restore
 continues through `WeightStore.load()`, which uses the same target placement and

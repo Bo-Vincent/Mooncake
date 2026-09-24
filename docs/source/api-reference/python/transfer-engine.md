@@ -66,6 +66,12 @@ TransferOpcode.WRITE  # Write operation
 - `drained`: whether the native operation reached a terminal state.
 - `drain(timeout_ms)`: wait again for an unknown operation to become terminal.
 
+Keep the ticket itself alive and explicitly drain it to a terminal status.
+Dropping the last reference to an unfinished ticket invokes the native
+destructor, which waits for physical completion with the Python GIL held and
+can block other Python threads. Destruction is not a bounded cancellation
+mechanism; retain tickets with unknown completion for explicit recovery.
+
 ### Initialization Methods
 
 #### initialize()
