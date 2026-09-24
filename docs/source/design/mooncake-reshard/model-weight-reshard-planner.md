@@ -131,6 +131,12 @@ regions to bounded Transfer Engine batches. Store-backed restore uses
 `WeightStore.load()` and `get_into_ranges` with the same target binding
 contract.
 
+Live execution can keep a bounded FIFO window of native Scatter tickets in
+flight across endpoints. The default window is one. Larger windows retain the
+registration and allocation lifetime evidence for every published batch until
+its ticket reaches a known terminal state; unknown completion is handed to the
+pending-transfer manager as one recoverable composite ticket.
+
 ## Reproducible Contract Benchmark
 
 The following opt-in benchmark measures only Python-side planning and binding
