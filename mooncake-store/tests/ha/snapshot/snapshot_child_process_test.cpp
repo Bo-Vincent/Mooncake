@@ -218,16 +218,17 @@ class SnapshotChildProcessTest : public ::testing::Test {
                                               .revision = "step-1",
                                               .weight_generation = 1};
         auto begin = [&] {
-            return service_->BeginWeightImport(
-                BeginWeightImportRequest{.identity = identity,
-                                         .payload_group_id = {},
-                                         .expected_payload_count = 1,
-                                         .expected_logical_bytes = 1,
-                                         .policy = WeightStoragePolicy{
-                                             .preferred_residency = WeightResidencyState::HOT,
-                                             .migration_mode = WeightMigrationMode::MANUAL},
-                                         .affinity_summary = {.affinity_count = 1,
-                                             .affinity_digest = std::string(64, 'c')}});
+            return service_->BeginWeightImport(BeginWeightImportRequest{
+                .identity = identity,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL},
+                .affinity_summary = {.affinity_count = 1,
+                                     .affinity_digest = std::string(64, 'c')}});
         };
         std::optional<WeightRevisionMetadata> ready;
         std::optional<WeightResidencyOperation> operation;
@@ -258,6 +259,12 @@ class SnapshotChildProcessTest : public ::testing::Test {
             for (const auto& key : {std::string("payload"), manifest_key}) {
                 config.data_type = key == "payload" ? ObjectDataType::WEIGHT
                                                     : ObjectDataType::METADATA;
+                if (key == "payload") {
+                    config.residency_affinity_ids =
+                        std::vector<std::string>{key};
+                } else {
+                    config.residency_affinity_ids.reset();
+                }
                 ASSERT_TRUE(service_->PutStart(client_id, key,
                                                TenantId::Default(), 1, config));
                 ASSERT_TRUE(service_->PutEnd(
@@ -475,16 +482,17 @@ class SnapshotChildProcessTest : public ::testing::Test {
         ASSERT_TRUE(provider.has_value());
         backend->Arm(SnapshotBoundaryBackend::Gate::DurableTxn);
         auto mutation = std::async(std::launch::async, [&] {
-            return service_->BeginWeightImport(
-                BeginWeightImportRequest{.identity = identity,
-                                         .payload_group_id = {},
-                                         .expected_payload_count = 1,
-                                         .expected_logical_bytes = 1,
-                                         .policy = WeightStoragePolicy{
-                                             .preferred_residency = WeightResidencyState::HOT,
-                                             .migration_mode = WeightMigrationMode::MANUAL},
-                                         .affinity_summary = {.affinity_count = 1,
-                                             .affinity_digest = std::string(64, 'c')}});
+            return service_->BeginWeightImport(BeginWeightImportRequest{
+                .identity = identity,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL},
+                .affinity_summary = {.affinity_count = 1,
+                                     .affinity_digest = std::string(64, 'c')}});
         });
         const bool entered = backend->WaitForGate();
         if (!entered) backend->Release();
@@ -559,7 +567,6 @@ class SnapshotChildProcessTest : public ::testing::Test {
             << "durable Begin was omitted at snapshot sequence " << sequence;
         EXPECT_EQ(*expected, *recovered);
     }
-
 
 #ifdef STORE_USE_ETCD
     void CreateEtcdHASnapshotService(const std::string& cluster_id,

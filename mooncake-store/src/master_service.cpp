@@ -1786,28 +1786,6 @@ MasterService::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
     return weight_manager_.UpdateWeightPolicy(request);
 }
 
-bool MasterService::DropWeightGroupMemberForTesting(
-    const WeightRevisionIdentity& identity, const std::string& key) {
-    const TenantId tenant_id(identity.tenant_id);
-    [[maybe_unused]] auto group_operation_lock = weight_manager_.LockGroup(
-        tenant_id, MakeWeightPayloadGroupId(identity));
-    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
-    MetadataAccessorRW accessor(this, MakeObjectIdentity(key, tenant_id));
-    if (!accessor.Exists()) {
-        return false;
-    }
-    bool dropped = false;
-    accessor.Get().VisitReplicas(
-        [](const Replica& replica) {
-            return replica.status() != ReplicaStatus::REMOVED;
-        },
-        [&dropped](Replica& replica) {
-            replica.mark_removed();
-            dropped = true;
-        });
-    return dropped;
-}
-
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,
                                           const std::string& key,
                                           const std::string& group_id) {
@@ -5519,8 +5497,8 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             if (it == tenant_state.metadata.end()) {
                 return AllocateAndInsertMetadata(
                     shard, client_id, key, slice_length, config, writer_host_id,
-                    group_id, residency_affinity_id, object_id.tenant_id, now, *soft_pin_request,
-                    std::nullopt, &dfs_allocation_failed);
+                    group_id, residency_affinity_id, object_id.tenant_id, now,
+                    *soft_pin_request, std::nullopt, &dfs_allocation_failed);
             }
             // Logically unreachable: the object-exists paths above always
             // return or erase the entry. Kept for -Wreturn-type.
@@ -6308,9 +6286,9 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 VLOG(1) << "key=" << key << ", action=upsert_start_case_a";
                 return AllocateAndInsertMetadata(
                     shard, client_id, key, slice_length, allocation_config,
-                    writer_host_id, allocation_group_id, allocation_residency_affinity_id, object_id.tenant_id,
-                    now, *soft_pin_request,
-                    allocation_committed_soft_pin_timeout,
+                    writer_host_id, allocation_group_id,
+                    allocation_residency_affinity_id, object_id.tenant_id, now,
+                    *soft_pin_request, allocation_committed_soft_pin_timeout,
                     &dfs_allocation_failed);
             } else {
                 // --- Step 2: key exists with COMPLETE replicas → Case B or C
@@ -6527,8 +6505,9 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                             : AllocateAndInsertMetadata(
                                   shard, client_id, key, slice_length,
                                   allocation_config, writer_host_id,
-                                  allocation_group_id, allocation_residency_affinity_id, object_id.tenant_id, now,
-                                  *soft_pin_request,
+                                  allocation_group_id,
+                                  allocation_residency_affinity_id,
+                                  object_id.tenant_id, now, *soft_pin_request,
                                   allocation_committed_soft_pin_timeout,
                                   &dfs_allocation_failed);
                 if (!allocate_result) {
