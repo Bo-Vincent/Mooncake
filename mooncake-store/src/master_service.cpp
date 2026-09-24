@@ -1522,28 +1522,6 @@ MasterService::UpdateWeightPolicy(const UpdateWeightPolicyRequest& request) {
     return weight_manager_.UpdateWeightPolicy(request);
 }
 
-bool MasterService::DropWeightGroupMemberForTesting(
-    const WeightRevisionIdentity& identity, const std::string& key) {
-    const TenantId tenant_id(identity.tenant_id);
-    [[maybe_unused]] auto group_operation_lock = weight_manager_.LockGroup(
-        tenant_id, MakeWeightPayloadGroupId(identity));
-    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
-    MetadataAccessorRW accessor(this, MakeObjectIdentity(key, tenant_id));
-    if (!accessor.Exists()) {
-        return false;
-    }
-    bool dropped = false;
-    accessor.Get().VisitReplicas(
-        [](const Replica& replica) {
-            return replica.status() != ReplicaStatus::REMOVED;
-        },
-        [&dropped](Replica& replica) {
-            replica.mark_removed();
-            dropped = true;
-        });
-    return dropped;
-}
-
 void MasterService::UnregisterGroupMember(const TenantId& tenant_id,
                                           const std::string& key,
                                           const std::string& group_id) {
