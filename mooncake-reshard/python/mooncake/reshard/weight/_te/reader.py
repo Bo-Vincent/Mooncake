@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 from uuid import uuid4
@@ -7,12 +8,13 @@ from uuid import uuid4
 from ...contracts import LeaseId, RuntimeFragmentId
 from ...transfer_engine import (
     MooncakeTransferEngineExecutor,
-    TransferCompletionFailedError,
     TransferBatch,
+    TransferCompletionFailedError,
     TransferDirection,
     TransferEngineError,
     TransferSubmission,
 )
+from ...transfer_engine.lifetime import AllocationTokenSet, TerminalTransferState
 from ..manifest import (
     ParallelRank,
     RuntimeBindingFragment,
@@ -26,15 +28,19 @@ from .execution import (
     executors_for_operation_indices,
     operation_indices_for_executors,
     pair_manifests,
-    select_worker_executors,
-    validate_selected_executor_snapshot,
-    validate_scoped_executor_snapshot,
     require_live_transfer_operation,
     runtime_binding_fragment,
+    select_worker_executors,
     validate_execution_input_types,
     validate_lowering_budget,
     validate_lowering_limits,
     validate_manifest_pair,
+    validate_scoped_executor_snapshot,
+    validate_selected_executor_snapshot,
+)
+from .lifetime import (
+    WeightAllocationGuardProviders,
+    acquire_weight_lifetime_tokens,
 )
 from .registration import (
     MemoryRegistrationLease,
@@ -43,11 +49,6 @@ from .registration import (
     same_runtime_snapshot,
     validate_registration,
 )
-from .lifetime import (
-    WeightAllocationGuardProviders,
-    acquire_weight_lifetime_tokens,
-)
-from ...transfer_engine.lifetime import AllocationTokenSet, TerminalTransferState
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,7 @@ class MooncakeTransferEngineReader:
         max_batch_operations: int = 1024,
         max_region_segments: int = 1_000_000,
         max_total_lowered_segments: int = 10_000_000,
+        max_inflight_batches: int = 1,
         max_completion_drain_attempts: int = 3,
         completion_drain_timeout_ms: int = 1000,
     ) -> None:
@@ -75,6 +77,7 @@ class MooncakeTransferEngineReader:
             max_batch_operations=max_batch_operations,
             max_region_segments=max_region_segments,
             max_total_lowered_segments=max_total_lowered_segments,
+            max_inflight_batches=max_inflight_batches,
             max_completion_drain_attempts=max_completion_drain_attempts,
             completion_drain_timeout_ms=completion_drain_timeout_ms,
         )
@@ -82,6 +85,7 @@ class MooncakeTransferEngineReader:
         self.max_batch_operations = max_batch_operations
         self.max_region_segments = max_region_segments
         self.max_total_lowered_segments = max_total_lowered_segments
+        self.max_inflight_batches = max_inflight_batches
         self.max_completion_drain_attempts = max_completion_drain_attempts
         self.completion_drain_timeout_ms = completion_drain_timeout_ms
         self.transfer_executor = MooncakeTransferEngineExecutor(
@@ -412,42 +416,49 @@ class MooncakeTransferEngineReader:
             ),
             lifetime_tokens=lifetime_tokens,
         ):
-            receipts: list[DirectReadReceipt] = []
-            for endpoint in sorted(operations_by_endpoint):
-                operations = sorted(
-                    operations_by_endpoint[endpoint],
-                    key=lambda item: (
-                        item[2].address + item[0].target_offset,
-                        item[1].address + item[0].source_offset,
-                    ),
-                )
-                operation_count = 0
-                total_bytes = 0
-                for batch in iter_transfer_batches(
-                    endpoint,
-                    operations,
-                    max_batch_operations=self.max_batch_operations,
-                    max_region_segments=self.max_region_segments,
-                ):
-                    self._transfer_batch(submission, batch)
-                    operation_count += batch.operation_count
-                    total_bytes += batch.nbytes
-                receipts.append(
-                    DirectReadReceipt(
-                        source_endpoint=endpoint,
-                        target_worker_id=target_executor.worker_id,
-                        operation_count=operation_count,
-                        nbytes=total_bytes,
-                    )
-                )
-        return tuple(receipts)
 
-    def _transfer_batch(
-        self,
-        submission: TransferSubmission,
-        batch: TransferBatch,
-    ) -> None:
-        submission.execute_batch(batch, TransferDirection.READ)
+            def batches() -> Iterator[TransferBatch]:
+                for endpoint in sorted(operations_by_endpoint):
+                    operations = sorted(
+                        operations_by_endpoint[endpoint],
+                        key=lambda item: (
+                            item[2].address + item[0].target_offset,
+                            item[1].address + item[0].source_offset,
+                        ),
+                    )
+                    yield from iter_transfer_batches(
+                        endpoint,
+                        operations,
+                        max_batch_operations=self.max_batch_operations,
+                        max_region_segments=self.max_region_segments,
+                    )
+
+            batch_receipts = submission.execute_batches(
+                batches(),
+                TransferDirection.READ,
+                max_inflight_batches=self.max_inflight_batches,
+            )
+            totals_by_endpoint: dict[str, tuple[int, int]] = {}
+            for receipt in batch_receipts:
+                operation_count, total_bytes = totals_by_endpoint.get(
+                    receipt.endpoint, (0, 0)
+                )
+                totals_by_endpoint[receipt.endpoint] = (
+                    operation_count + receipt.operation_count,
+                    total_bytes + receipt.nbytes,
+                )
+            receipts = [
+                DirectReadReceipt(
+                    source_endpoint=endpoint,
+                    target_worker_id=target_executor.worker_id,
+                    operation_count=operation_count,
+                    nbytes=total_bytes,
+                )
+                for endpoint, (operation_count, total_bytes) in sorted(
+                    totals_by_endpoint.items()
+                )
+            ]
+        return tuple(receipts)
 
     def pending_transfer_ids(self) -> tuple[str, ...]:
         return self.transfer_executor.pending_transfer_ids()
