@@ -247,6 +247,12 @@ TEST_F(WeightManagementTcpTest, LeaseProtectsPublishedBytesUntilManagedDelete) {
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = kPayloadSize,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(begin.has_value());
     ASSERT_TRUE(begin->has_value());
@@ -254,12 +260,14 @@ TEST_F(WeightManagementTcpTest, LeaseProtectsPublishedBytesUntilManagedDelete) {
     ReplicateConfig config;
     config.replica_num = 1;
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{payload_key};
     config.group_ids =
         std::vector<std::string>{(*begin)->manifest.payload_group_id};
     // No hard pin: protection must come from managed group membership.
     ASSERT_FALSE(config.with_hard_pin);
     ASSERT_NO_FATAL_FAILURE(PutBytes(payload_key, payload, config));
     config.data_type = ObjectDataType::METADATA;
+    config.residency_affinity_ids.reset();
     ASSERT_NO_FATAL_FAILURE(PutBytes(manifest_key, manifest, config));
     auto ready = reader_->CommitWeightImport(CommitWeightImportRequest{
         .identity = Identity(),

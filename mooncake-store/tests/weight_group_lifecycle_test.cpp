@@ -460,9 +460,10 @@ TEST_F(WeightGroupLifecycleTest,
             ASSERT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
         }
 
-        EXPECT_GT(service.RunWeightReconciliationForTesting(
-                      deleting->updated_at_ms + 1, 8),
-                  0);
+        EXPECT_GT(
+            MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+                deleting->updated_at_ms + 1, 8),
+            0);
         auto deleted = service.GetWeightRevision(
             GetWeightRevisionRequest{.identity = target_identity});
         ASSERT_TRUE(deleted.has_value());
@@ -605,7 +606,9 @@ TEST_F(WeightGroupLifecycleTest, ReconciliationRecreatesMissingUpsertTarget) {
         ASSERT_TRUE(service.GetWeightStoreManager()
                         .RestoreSnapshot(snapshot)
                         .has_value());
-        EXPECT_EQ(1, service.RunWeightReconciliationForTesting(200, 1));
+        EXPECT_EQ(
+            1, MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+                   200, 1));
         auto recreated = service.GetWeightRevision(
             GetWeightRevisionRequest{.identity = target});
         ASSERT_TRUE(recreated.has_value());
@@ -1251,7 +1254,7 @@ TEST_F(WeightGroupLifecycleTest, PendingOperationReflectsLostReadableMembers) {
     ASSERT_TRUE(reconciled);
     EXPECT_EQ(WeightAvailabilityState::DEGRADED, reconciled->availability);
     EXPECT_EQ(WeightResidencyState::ABSENT, reconciled->residency);
-    EXPECT_EQ(WeightOperationState::EVICTING, reconciled->operation);
+    ASSERT_TRUE(reconciled->operation_id.has_value());
     EXPECT_EQ(started->operation_id, reconciled->operation_id);
     EXPECT_EQ(started->fenced_metadata_generation + 1,
               reconciled->metadata_generation);
@@ -1262,6 +1265,8 @@ TEST_F(WeightGroupLifecycleTest, PendingOperationReflectsLostReadableMembers) {
         .operation_id = started->operation_id,
     });
     ASSERT_TRUE(progress);
+    EXPECT_EQ(WeightOperationKind::MIGRATING, progress->kind);
+    EXPECT_EQ(WeightResidencyState::COLD, progress->target_residency);
     EXPECT_EQ(reconciled->metadata_generation,
               progress->fenced_metadata_generation);
     EXPECT_NE("completed", progress->message);
