@@ -919,8 +919,9 @@ TEST_F(WeightReconciliationTest,
                          .migration_mode = WeightMigrationMode::AUTO,
                      });
 
-    EXPECT_EQ(1, service.RunWeightReconciliationForTesting(
-                     ready.updated_at_ms + 30'001, 1));
+    EXPECT_EQ(1,
+              MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+                  ready.updated_at_ms + 30'001, 1));
 
     auto view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = ready.identity});
@@ -957,7 +958,8 @@ TEST_F(WeightReconciliationTest, AutoPressureSkipsActiveRevisionLease) {
         });
     ASSERT_TRUE(lease.has_value());
 
-    service.RunWeightReconciliationForTesting(ready.updated_at_ms + 30'001, 1);
+    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+        ready.updated_at_ms + 30'001, 1);
 
     auto view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = ready.identity});
