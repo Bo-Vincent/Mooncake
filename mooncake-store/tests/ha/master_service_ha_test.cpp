@@ -422,15 +422,23 @@ class MasterServiceHATest : public ::testing::Test {
                         .payload_count = 1,
                         .logical_bytes = 1024,
                     },
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL},
                 .availability = abandoned_import
                                     ? WeightAvailabilityState::IMPORTING
                                     : WeightAvailabilityState::READY,
                 .residency = abandoned_import ? WeightResidencyState::UNKNOWN
                                               : WeightResidencyState::HOT,
-                .operation = WeightOperationState::NONE,
+                .operation_id = std::nullopt,
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+                .observed_hot_ratio = abandoned_import ? 0.0 : 1.0,
                 .metadata_generation = abandoned_import ? 1u : 2u,
                 .created_at_ms = 100,
                 .updated_at_ms = 200,
+                .last_accessed_at_ms = 150,
             }},
             .leases = {},
             .operations = {},
@@ -7051,6 +7059,12 @@ TEST_F(MasterServiceHATest,
         .payload_group_id = {},
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(importing);
     const std::string payload_key = "operation-replay-payload";
@@ -7064,6 +7078,11 @@ TEST_F(MasterServiceHATest,
     for (const auto& key : {payload_key, manifest_key}) {
         replicate.data_type = key == payload_key ? ObjectDataType::WEIGHT
                                                  : ObjectDataType::METADATA;
+        if (key == payload_key) {
+            replicate.residency_affinity_ids = std::vector<std::string>{key};
+        } else {
+            replicate.residency_affinity_ids.reset();
+        }
         ASSERT_TRUE(service.PutStart(segment.client_id, key, kDefaultTenant,
                                      key == payload_key ? 1024 : 128,
                                      replicate));
@@ -7119,7 +7138,7 @@ TEST_F(MasterServiceHATest,
     const auto finished =
         service.ReconcileWeightRevision({.identity = identity});
     ASSERT_TRUE(finished);
-    ASSERT_EQ(WeightOperationState::NONE, finished->operation);
+    ASSERT_FALSE(finished->operation_id.has_value());
     const auto completed = service.QueryWeightOperation({
         .operation_id = active->operation_id,
     });
@@ -7144,7 +7163,7 @@ TEST_F(MasterServiceHATest,
     ASSERT_TRUE(degraded);
     EXPECT_EQ(WeightAvailabilityState::DEGRADED, degraded->availability);
     EXPECT_EQ(WeightResidencyState::ABSENT, degraded->residency);
-    EXPECT_EQ(WeightOperationState::EVICTING, degraded->operation);
+    ASSERT_TRUE(degraded->operation_id.has_value());
     EXPECT_EQ(evicting->operation_id, degraded->operation_id);
     EXPECT_EQ(evicting->fenced_metadata_generation + 1,
               degraded->metadata_generation);
@@ -7152,6 +7171,8 @@ TEST_F(MasterServiceHATest,
         .operation_id = evicting->operation_id,
     });
     ASSERT_TRUE(pending);
+    EXPECT_EQ(WeightOperationKind::MIGRATING, pending->kind);
+    EXPECT_EQ(WeightResidencyState::COLD, pending->target_residency);
     EXPECT_EQ(degraded->metadata_generation,
               pending->fenced_metadata_generation);
     EXPECT_NE("completed", pending->message);

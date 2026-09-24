@@ -690,16 +690,20 @@ class MasterService {
                        bool force = false) -> tl::expected<long, ErrorCode>;
 
     /**
-     * @brief Remove all objects and their replicas across all tenants.
-     * @param force If true, skip lease and replication task checks.
+     * @brief Remove eligible objects across all tenants, preserving managed
+     * weight groups. Disk space is reclaimed through per-object eviction.
+     * @param force If true, skip lease checks; in-flight work remains
+     * protected.
      * @return return the number of objects removed
      */
     long RemoveAll(bool force = false);
 
     /**
-     * @brief Remove all objects and their replicas for a single tenant.
+     * @brief Remove eligible objects for a single tenant, preserving managed
+     * weight groups. Disk space is reclaimed through per-object eviction.
      * @param tenant_id The tenant whose objects should be removed.
-     * @param force If true, skip lease and replication task checks.
+     * @param force If true, skip lease checks; in-flight work remains
+     * protected.
      * @return return the number of objects removed
      */
     long RemoveAll(const TenantId& tenant_id, bool force = false);

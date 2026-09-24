@@ -362,8 +362,9 @@ TEST_F(WeightReconciliationTest,
                          .migration_mode = WeightMigrationMode::AUTO,
                      });
 
-    EXPECT_EQ(1, service.RunWeightReconciliationForTesting(
-                     ready.updated_at_ms + 30'001, 1));
+    EXPECT_EQ(1,
+              MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+                  ready.updated_at_ms + 30'001, 1));
 
     auto view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = ready.identity});
@@ -400,7 +401,8 @@ TEST_F(WeightReconciliationTest, AutoPressureSkipsActiveRevisionLease) {
         });
     ASSERT_TRUE(lease.has_value());
 
-    service.RunWeightReconciliationForTesting(ready.updated_at_ms + 30'001, 1);
+    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+        ready.updated_at_ms + 30'001, 1);
 
     auto view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = ready.identity});
@@ -571,11 +573,12 @@ TEST_F(WeightReconciliationTest, MissingPayloadOrManifestBecomesDegraded) {
     ASSERT_TRUE(MasterServiceTestPeer(service).DropWeightGroupMemberForTesting(
         manifest_loss.identity, ManifestKey(manifest_loss.identity)));
 
-    EXPECT_EQ(2, MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
-                     std::max(payload_loss.updated_at_ms,
-                              manifest_loss.updated_at_ms) +
-                         1,
-                     32));
+    EXPECT_EQ(
+        2,
+        MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+            std::max(payload_loss.updated_at_ms, manifest_loss.updated_at_ms) +
+                1,
+            32));
     auto payload_loss_view = service.GetWeightRevision(
         GetWeightRevisionRequest{.identity = payload_loss.identity});
     ASSERT_TRUE(payload_loss_view.has_value());
