@@ -774,13 +774,14 @@ TEST(WeightMetadataStoreTest, OperationObservationPreservesRecoveryFences) {
     ASSERT_TRUE(operation);
 
     auto invalid = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, {}, WeightAvailabilityState::READY,
-        WeightResidencyState::ABSENT, 0.0, 400);
+        operation->operation_id, 0, 3, 0, 4096, {}, {},
+        WeightAvailabilityState::READY, WeightResidencyState::ABSENT, 0.0, 400);
     ASSERT_FALSE(invalid);
     EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, invalid.error());
     auto loss = metadata_store.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, {}, WeightAvailabilityState::DEGRADED,
-        WeightResidencyState::ABSENT, 0.0, 400);
+        operation->operation_id, 0, 3, 0, 4096, {}, {},
+        WeightAvailabilityState::DEGRADED, WeightResidencyState::ABSENT, 0.0,
+        400);
     ASSERT_TRUE(loss);
     EXPECT_EQ(start->metadata.next->metadata_generation + 1,
               loss->metadata.next->metadata_generation);
@@ -790,8 +791,9 @@ TEST(WeightMetadataStoreTest, OperationObservationPreservesRecoveryFences) {
     WeightMetadataStore restored;
     ASSERT_TRUE(restored.RestoreSnapshot(metadata_store.ExportSnapshot()));
     auto retry = restored.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, {}, WeightAvailabilityState::DEGRADED,
-        WeightResidencyState::ABSENT, 0.0, 500);
+        operation->operation_id, 0, 3, 0, 4096, {}, {},
+        WeightAvailabilityState::DEGRADED, WeightResidencyState::ABSENT, 0.0,
+        500);
     ASSERT_TRUE(retry);
     EXPECT_TRUE(retry->no_op);
 
@@ -803,8 +805,8 @@ TEST(WeightMetadataStoreTest, OperationObservationPreservesRecoveryFences) {
     WeightMetadataStore exhausted;
     ASSERT_TRUE(exhausted.RestoreSnapshot(exhausted_snapshot));
     auto rejected = exhausted.PrepareUpdateOperationProgress(
-        operation->operation_id, 0, 4, 0, 4096, {}, {}, WeightAvailabilityState::READY,
-        WeightResidencyState::HOT, 1.0, 600);
+        operation->operation_id, 0, 3, 0, 4096, {}, {},
+        WeightAvailabilityState::READY, WeightResidencyState::HOT, 1.0, 600);
     ASSERT_FALSE(rejected);
     EXPECT_EQ(WeightManagementError::GENERATION_EXHAUSTED, rejected.error());
     EXPECT_EQ(exhausted_snapshot, exhausted.ExportSnapshot());
@@ -1054,7 +1056,8 @@ TEST(WeightMetadataStoreTest,
     EXPECT_EQ(400, retried->updated_at_ms);
 }
 
-TEST(WeightMetadataStoreTest, GroupProjectionPreservesTenantAndDeletingGroups) {
+TEST(WeightMetadataStoreTest,
+     ManagedGroupLookupPreservesTenantAndDeletingGroups) {
     WeightMetadataStore metadata_store;
     auto first_identity = Identity();
     auto second_identity = first_identity;
@@ -1071,14 +1074,11 @@ TEST(WeightMetadataStoreTest, GroupProjectionPreservesTenantAndDeletingGroups) {
         200);
     ASSERT_TRUE(abort.has_value());
     ASSERT_TRUE(metadata_store.Publish(*abort).has_value());
-    const auto groups = metadata_store.SnapshotManagedWeightGroups();
-    EXPECT_EQ(2u, groups.size());
+    EXPECT_NE(first.manifest.payload_group_id,
+              second.manifest.payload_group_id);
+    EXPECT_TRUE(metadata_store.IsManagedGroup(first.manifest.payload_group_id));
     EXPECT_TRUE(
-        groups.contains(TenantId(first_identity.tenant_id)
-                            .MakeScopedKey(first.manifest.payload_group_id)));
-    EXPECT_TRUE(
-        groups.contains(TenantId(second_identity.tenant_id)
-                            .MakeScopedKey(second.manifest.payload_group_id)));
+        metadata_store.IsManagedGroup(second.manifest.payload_group_id));
 }
 
 TEST(WeightMetadataStoreTest, ExpiredLeaseSelectionIsRevisionScoped) {
