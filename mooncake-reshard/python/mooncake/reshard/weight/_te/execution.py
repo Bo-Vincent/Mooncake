@@ -28,8 +28,10 @@ def validate_lowering_limits(
     max_total_lowered_segments: int,
     max_completion_drain_attempts: int,
     completion_drain_timeout_ms: int,
+    max_inflight_batches: int = 1,
 ) -> None:
     for name, value in (
+        ("max_inflight_batches", max_inflight_batches),
         ("max_batch_operations", max_batch_operations),
         ("max_region_segments", max_region_segments),
         ("max_total_lowered_segments", max_total_lowered_segments),
