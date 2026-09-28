@@ -28,6 +28,7 @@ from .execution import (
     executors_for_operation_indices,
     operation_indices_for_executors,
     pair_manifests,
+    planned_executors_for_binding,
     require_live_transfer_operation,
     runtime_binding_fragment,
     select_worker_executors,
@@ -36,7 +37,6 @@ from .execution import (
     validate_lowering_limits,
     validate_manifest_pair,
     validate_scoped_executor_snapshot,
-    validate_selected_executor_snapshot,
 )
 from .lifetime import (
     WeightAllocationGuardProviders,
@@ -121,14 +121,10 @@ class MooncakeTransferEngineReader:
         # This preflight is diagnostic only. The executor repeats validation
         # after framework guards return a freshly pinned binding snapshot.
         validate_manifest_pair(plan, target_placement, target_binding, "target")
-        target_executors = validate_selected_executor_snapshot(
-            plan,
-            target_placement,
-            target_binding,
-            "target",
-        )
         target_executors = select_worker_executors(
-            target_executors, target_worker_id, "target"
+            planned_executors_for_binding(plan, target_binding, "target"),
+            target_worker_id,
+            "target",
         )
         if not target_executors:
             return ()
@@ -140,6 +136,17 @@ class MooncakeTransferEngineReader:
         )
         target_requirements = executor_requirements_for_operation_indices(
             plan, local_operation_indices, "target"
+        )
+        target_binding_key = (
+            target_binding.instance_id,
+            target_binding.participant_id,
+        )
+        validate_scoped_executor_snapshot(
+            plan,
+            target_placement,
+            target_binding,
+            "target",
+            target_requirements[target_binding_key],
         )
         scoped_source_bindings = tuple(
             binding
@@ -153,11 +160,12 @@ class MooncakeTransferEngineReader:
             raise TransferEngineError("source executor set is incomplete")
         for binding in scoped_source_bindings:
             validate_manifest_pair(plan, source_placement, binding, "source")
-            validate_selected_executor_snapshot(
+            validate_scoped_executor_snapshot(
                 plan,
                 source_placement,
                 binding,
                 "source",
+                source_requirements[(binding.instance_id, binding.participant_id)],
             )
         with self.transfer_executor.submission() as submission:
             transfer_id = transfer_id or uuid4().hex
@@ -209,7 +217,7 @@ class MooncakeTransferEngineReader:
                     target_registrations=target_registrations,
                     lifetime_tokens=lifetime_tokens,
                     target_required_fragment_ids=target_requirements[
-                        (target_binding.instance_id, target_binding.participant_id)
+                        target_binding_key
                     ],
                 )
                 terminal_state = TerminalTransferState.COMPLETED
