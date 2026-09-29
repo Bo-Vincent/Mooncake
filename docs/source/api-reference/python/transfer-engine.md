@@ -393,6 +393,20 @@ fragment must fit within both declared capacities.
 **Returns:**
 - `ScatterTransferTicket`: A drainable completion handle for the native scatter operation.
 
+#### submit_scatter_write() / submit_scatter_read()
+
+These methods accept the same arguments as
+`scatter_transfer_sync_write_with_ticket()` and
+`scatter_transfer_sync_read_with_ticket()`. They submit the operation and
+return its `ScatterTransferTicket` without waiting for completion, allowing
+multiple operations to overlap.
+
+Keep both allocations and their registrations alive until the ticket reports
+`COMPLETED` or `FAILED_DRAINED`. Call `ticket.drain(timeout_ms)` to wait for a
+terminal result. `COMPLETION_UNKNOWN` retains the lifetime requirement and
+allows another drain attempt. A failed drain is not permission to release
+the buffers while completion remains unknown.
+
 #### batch_transfer_sync()
 
 ```python
