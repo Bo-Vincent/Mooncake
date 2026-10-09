@@ -5560,6 +5560,8 @@ TEST_F(MasterServiceHATest, BatchRemoveFinalizesEachObjectAfterDurable) {
             .set_cluster_id(cluster_id)
             .set_oplog_batch_max_entries(1)
             .set_enable_multi_tenants(true)
+            // Keep quota release under the explicit BatchRemove callback.
+            .set_tenant_eviction_high_watermark_ratio(0.0)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
                 WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
@@ -5582,7 +5584,7 @@ TEST_F(MasterServiceHATest, BatchRemoveFinalizesEachObjectAfterDurable) {
     backend->BlockTxn();
     auto results = service.BatchRemove({key}, kDefaultTenant, /*force=*/true);
     ASSERT_EQ(1u, results.size());
-    ASSERT_TRUE(results[0].has_value());
+    ASSERT_TRUE(results[0].has_value()) << toString(results[0].error());
     EXPECT_FALSE(service.GetReplicaList(key, kDefaultTenant).has_value());
 
     ReplicateConfig config;
