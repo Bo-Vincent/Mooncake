@@ -5190,6 +5190,8 @@ TEST_F(MasterServiceHATest, BatchRemoveFinalizesEachObjectAfterDurable) {
             .set_cluster_id(cluster_id)
             .set_oplog_batch_max_entries(1)
             .set_enable_multi_tenants(true)
+            // Keep quota release under the explicit BatchRemove callback.
+            .set_tenant_eviction_high_watermark_ratio(0.0)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
                 WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
@@ -5212,7 +5214,7 @@ TEST_F(MasterServiceHATest, BatchRemoveFinalizesEachObjectAfterDurable) {
     backend->BlockTxn();
     auto results = service.BatchRemove({key}, kDefaultTenant, /*force=*/true);
     ASSERT_EQ(1u, results.size());
-    ASSERT_TRUE(results[0].has_value());
+    ASSERT_TRUE(results[0].has_value()) << toString(results[0].error());
     EXPECT_FALSE(service.GetReplicaList(key, kDefaultTenant).has_value());
 
     ReplicateConfig config;
@@ -6314,10 +6316,10 @@ TEST_F(MasterServiceHATest,
                       .set_oplog_batch_max_entries(1)
                       .build();
     MasterService service(config);
-    ASSERT_EQ(
-        ErrorCode::OK,
-        MasterServiceTestPeer(service).SetBatchOpLogBackendForTesting(backend));
+    auto* writer = InstallGatedWriter(service, backend);
+    ASSERT_NE(nullptr, writer);
     const auto segment = PrepareSimpleSegment(service);
+    ASSERT_TRUE(writer->RunCallbacksThrough(1));
     const WeightRevisionIdentity identity{
         .tenant_id = "default",
         .name_space = "production",
@@ -6339,6 +6341,7 @@ TEST_F(MasterServiceHATest,
     replicate.with_hard_pin = true;
     replicate.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
+    uint64_t put_sequence = 3;
     for (const auto& key : {payload_key, manifest_key}) {
         replicate.data_type = key == payload_key ? ObjectDataType::WEIGHT
                                                  : ObjectDataType::METADATA;
@@ -6347,6 +6350,8 @@ TEST_F(MasterServiceHATest,
                                      replicate));
         ASSERT_TRUE(service.PutEnd(segment.client_id, key, kDefaultTenant,
                                    ReplicaType::MEMORY));
+        // PutEnd returns before durability; drain the single-entry writer.
+        ASSERT_TRUE(writer->RunCallbacksThrough(put_sequence++));
     }
     const auto ready = service.CommitWeightImport({
         .identity = identity,
