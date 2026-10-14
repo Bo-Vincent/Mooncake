@@ -576,10 +576,11 @@ TEST_F(WeightReconciliationTest,
 
 TEST_F(WeightReconciliationTest,
        PublicCompletedMigrationMemberLossStillUpdatesAvailability) {
-    CheckPublicPayloadLoss(1, true, WeightResidencyState::MIXED, 0.5, true);
+    CheckPublicPayloadLoss(1, true, WeightResidencyState::HOT, 1.0, true);
 }
-TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsPartialHotCoverage) {
-    CheckPublicPayloadLoss(1, false, WeightResidencyState::MIXED, 0.5);
+
+TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsHotResidency) {
+    CheckPublicPayloadLoss(1, false, WeightResidencyState::HOT, 1.0);
 }
 
 TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsColdResidency) {
@@ -950,6 +951,8 @@ TEST_F(WeightReconciliationTest, MemberBudgetBoundsDeletionAndResumes) {
         .identity = identity,
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
+        .affinity_summary = {.affinity_count = 2,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(importing);
     ReplicateConfig config;
@@ -958,6 +961,7 @@ TEST_F(WeightReconciliationTest, MemberBudgetBoundsDeletionAndResumes) {
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{"delete-unit"};
     PutCompletedObject(service, context.client_id, "bounded-a", config, 1024);
     PutCompletedObject(service, context.client_id, "bounded-b", config, 1024);
     config.data_type = ObjectDataType::METADATA;
@@ -1000,6 +1004,8 @@ TEST_F(WeightReconciliationTest, MemberBudgetIsSharedAcrossRevisions) {
             .identity = identity,
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .affinity_summary = {.affinity_count = 2,
+                                 .affinity_digest = std::string(64, 'c')},
         });
         ASSERT_TRUE(importing);
         ReplicateConfig config;
@@ -1008,6 +1014,7 @@ TEST_F(WeightReconciliationTest, MemberBudgetIsSharedAcrossRevisions) {
         config.group_ids =
             std::vector<std::string>{importing->manifest.payload_group_id};
         config.data_type = ObjectDataType::WEIGHT;
+        config.residency_affinity_ids = std::vector<std::string>{"delete-unit"};
         for (int i = 0; i < 2; ++i) {
             keys.push_back(std::string(revision) + std::to_string(i));
             PutCompletedObject(service, context.client_id, keys.back(), config,
@@ -1034,6 +1041,105 @@ TEST_F(WeightReconciliationTest, MemberBudgetIsSharedAcrossRevisions) {
         const auto exists = service.ExistKey(key, TenantId::Default());
         EXPECT_FALSE(exists && *exists);
     }
+}
+
+TEST_F(WeightReconciliationTest, UnitBudgetKeepsAffinityWholeAndResumes) {
+    MasterServiceConfig config;
+    config.default_kv_lease_ttl = 0;
+    config.enable_offload = true;
+    config.offload_on_evict = true;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    const auto identity = Identity("bounded-affinity");
+    const std::vector<std::string> keys{"unit-a-1", "unit-a-2", "unit-b-1",
+                                        "unit-b-2"};
+    const auto importing = service.BeginWeightImport({
+        .identity = identity,
+        .expected_payload_count = 4,
+        .expected_logical_bytes = 4096,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary = {.affinity_count = 2,
+                             .affinity_digest = std::string(64, 'c')},
+    });
+    ASSERT_TRUE(importing);
+    ReplicateConfig put;
+    put.replica_num = 1;
+    put.with_hard_pin = true;
+    put.group_ids =
+        std::vector<std::string>{importing->manifest.payload_group_id};
+    put.data_type = ObjectDataType::WEIGHT;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        put.residency_affinity_ids =
+            std::vector<std::string>{i < 2 ? "unit-a" : "unit-b"};
+        PutCompletedObject(service, context.client_id, keys[i], put, 1024);
+    }
+    put.data_type = ObjectDataType::METADATA;
+    PutCompletedObject(service, context.client_id, ManifestKey(identity), put,
+                       128);
+    const auto ready = service.CommitWeightImport({
+        .identity = identity,
+        .expected_metadata_generation = importing->metadata_generation,
+        .manifest = {.manifest_key = ManifestKey(identity),
+                     .manifest_sha256 = std::string(64, 'a'),
+                     .payload_group_id = importing->manifest.payload_group_id,
+                     .payload_keys_sha256 =
+                         ComputeWeightPayloadKeysSha256(keys),
+                     .payload_count = 4,
+                     .logical_bytes = 4096},
+    });
+    ASSERT_TRUE(ready);
+    const auto operation = service.StartWeightResidencyOperation({
+        .identity = identity,
+        .expected_metadata_generation = ready->metadata_generation,
+        .target_residency = WeightResidencyState::COLD,
+        .mixed_hot_ratio = std::nullopt,
+    });
+    ASSERT_TRUE(operation);
+    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+        operation->started_at_ms + 1, 1);
+    const auto first = service.OffloadObjectHeartbeat(context.client_id, true);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(2u, first->size());
+    EXPECT_EQ((*first)[0].key.substr(0, 6), (*first)[1].key.substr(0, 6));
+
+    // A pending first affinity must not prevent the next complete unit.
+    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+        operation->started_at_ms + 2, 1);
+    const auto second = service.OffloadObjectHeartbeat(context.client_id, true);
+    ASSERT_TRUE(second);
+    ASSERT_EQ(2u, second->size());
+    EXPECT_EQ((*second)[0].key.substr(0, 6), (*second)[1].key.substr(0, 6));
+    EXPECT_NE((*first)[0].key.substr(0, 6), (*second)[0].key.substr(0, 6));
+    for (const auto& tasks : {*first, *second}) {
+        std::vector<StorageObjectMetadata> disk;
+        for (const auto& task : tasks) {
+            StorageObjectMetadata metadata{};
+            metadata.key_size = task.key.size();
+            metadata.data_size = task.size;
+            metadata.transport_endpoint = "test_segment";
+            disk.push_back(metadata);
+        }
+        ASSERT_TRUE(
+            service.NotifyOffloadSuccess(context.client_id, tasks, disk));
+    }
+    for (size_t round = 0; round < 4; ++round) {
+        MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+            operation->started_at_ms + 3 + round, 1);
+    }
+    const auto view = service.GetWeightRevision({.identity = identity});
+    ASSERT_TRUE(view);
+    EXPECT_EQ(WeightResidencyState::COLD, view->metadata.residency);
+    EXPECT_FALSE(view->metadata.operation_id.has_value());
+    const auto manifest =
+        service.GetReplicaList(ManifestKey(identity), TenantId::Default());
+    ASSERT_TRUE(manifest);
+    ASSERT_FALSE(manifest->replicas.empty());
+    EXPECT_TRUE(manifest->replicas.front().is_memory_replica());
 }
 
 TEST_F(WeightReconciliationTest, ProjectsLeaseAndOperationMetrics) {

@@ -12,11 +12,20 @@ independent tensor-level management metadata.
 ## Delivery Status
 
 This stage provides Master RPC and C++ client access to revision management,
-managed-group removal protection, lease-fenced deletion, and basic residency
-operation reconciliation with HA recovery. Configurable residency policies,
-automatic migration, and the managed Python `WeightStore` facade remain
-follow-up work. The upload flow below describes the caller's responsibilities;
-the Python facade is not required to use the C++ interfaces.
+managed-group removal protection, lease-fenced deletion, residency policies,
+automatic migration, and operation reconciliation with HA recovery. The managed
+Python `WeightStore` facade provides the upload and replacement lifecycle; C++
+callers can use the same management interfaces directly.
+
+The PR3 lifecycle schema supports its earlier metadata-only OpLog writer.
+The later integration schema adds mandatory residency-affinity metadata and
+different operation progress units. It does not inherit that wire migration:
+old metadata, operation envelopes, snapshots, and bare lease records are
+rejected without advancing replay or partially publishing state. Its existing
+schema-2 snapshots remain readable by schema 3 through the compatible lineage
+extension. Migration from PR3 requires a separate design and acceptance run
+before the integration schema is released; missing affinity data must not be
+invented or active operations silently discarded.
 
 ## Authority Model
 
@@ -151,7 +160,7 @@ Availability, physical residency, and an in-progress operation are separate:
 | Residency | `UNKNOWN`, `HOT`, `COLD`, `MIXED`, `ABSENT` | observed placement across required group members |
 | Operation | `NONE`, `MIGRATING`, `REPAIRING` | durable non-terminal group work |
 
-The current operation entry point starts `EVICTING` or `REHYDRATING`.
+The current operation entry point starts `MIGRATING` toward HOT, COLD, or MIXED.
 `REPAIRING` is reserved for a follow-up recovery workflow.
 
 `READY` means the manifest and every required payload object have a readable
@@ -162,6 +171,18 @@ removal produces the retained `DELETED`/`ABSENT` tombstone.
 For an incomplete revision, residency describes the readable members still present;
 `DEGRADED` reports the missing required members. Missing members alone do not
 mean the remaining objects span multiple storage tiers.
+`observed_hot_ratio` divides observed payload bytes with memory replicas by
+observed payload bytes, excluding the resident manifest. Completeness still
+requires the manifest's full payload count, byte count, hash, and affinities;
+a partial revision cannot complete migration merely by reaching its target ratio.
+
+Each background pass shares a work budget across revisions and upsert cleanup.
+Deletion spends one item per member and removes the manifest last. Migration
+spends one item per complete affinity, which may contain multiple members;
+this is not a strict bound on backend member calls. Manifest promotion is a
+separate control item. Pending affinities rotate so subsequent passes can
+schedule other units. The per-round member and byte limits remain soft bounds
+for an indivisible first affinity. Weight work runs on its dedicated worker.
 
 Commit, abort, lease acquisition, operation start, and deletion check the
 caller's `expected_metadata_generation`. Lease renewal and release use the
@@ -275,9 +296,9 @@ managed groups. Only the weight lifecycle path may change their aggregate
 residency or availability.
 
 Reconciliation runs on a dedicated Master worker, not the general task-cleanup
-thread, and is not exposed as a client RPC. A background pass shares a bounded
-number of member actions across revisions. This bounds physical action attempts,
-not the time required for a durable write or the cost of observing group metadata.
+thread, and is not exposed as a client RPC. A background pass shares bounded
+work items across revisions, as defined above. This bounds selected units,
+not individual migration member calls, durable-write latency, or metadata scans.
 Clients use operation and revision queries to observe convergence. The operation
 `cursor` reports progress; it is not a client-controlled resume token.
 
@@ -291,13 +312,12 @@ snapshots capture that namespace with object and segment metadata at the same
 durable replay cursor. Derived group indexes are rebuilt from restored
 metadata records.
 
-OpLog replay accepts both the legacy `WeightRevisionMetadata` payload and the
-metadata-plus-operation envelope, distinguished by their serialized type hashes.
-Legacy records can only describe metadata without an active operation. A valid
-envelope with invalid metadata or operation fields is rejected rather than
-retried as a legacy payload. Deploy new readers before enabling writers that
-publish operation envelopes; compatibility decoding does not make an old reader
-understand a new writer's format.
+PR3 replay supports its legacy metadata-only payload and its operation envelope.
+The affinity-aware integration schema described here accepts its own operation
+envelope and rejects earlier weight-state schemas, including PR3 snapshots and
+lease records. Schema 2 to schema 3 retains the compatible lineage extension;
+this does not migrate the earlier member-based operation format. A migration
+from PR3 must be designed and validated separately before release.
 The `cancelled` terminal message also requires upgraded readers before writers
 enable cancellation, even though the serialized envelope shape is unchanged.
 
