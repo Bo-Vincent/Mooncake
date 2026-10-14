@@ -250,9 +250,9 @@ def _run_lifecycle(client, store, suffix: str) -> None:
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             result = _require_success(
-                client.reconcile_weight_revision(*identity),
-                "reconcile residency",
-            )
+                client.get_weight_revision(*identity),
+                "query residency",
+            ).metadata
             if result.residency == residency and result.operation_id is None:
                 return result
             time.sleep(0.2)
@@ -311,9 +311,9 @@ def _run_lifecycle(client, store, suffix: str) -> None:
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         result = _require_success(
-            client.reconcile_weight_revision(*identity),
-            "reconcile delete",
-        )
+            client.get_weight_revision(*identity),
+            "query delete",
+        ).metadata
         if result.availability == store.WeightAvailabilityState.DELETED:
             break
         time.sleep(0.2)

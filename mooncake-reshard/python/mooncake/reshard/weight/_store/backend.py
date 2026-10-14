@@ -398,15 +398,6 @@ class StoreBackend:
             self._management_call("query_weight_operation", tenant_id, operation_id)
         )
 
-    def weight_reconcile(
-        self, identity: WeightRevisionIdentity
-    ) -> WeightRevisionMetadata:
-        return metadata_from_native(
-            self._management_call(
-                "reconcile_weight_revision", *self._identity_args(identity)
-            )
-        )
-
     def weight_remove(
         self, identity: WeightRevisionIdentity, expected_metadata_generation: int
     ) -> WeightRevisionMetadata:
