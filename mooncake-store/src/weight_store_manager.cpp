@@ -650,37 +650,14 @@ WeightStoreManager::ReconcileWeightRevision(
     return ReconcileWeightRevisionBounded(request, nullptr);
 }
 
-std::vector<std::string> WeightStoreManager::SelectReconciliationMembers(
-    const WeightRevisionMetadata& revision, size_t* member_budget) {
-    auto keys =
-        backend_.GetGroupMemberKeys(TenantId(revision.identity.tenant_id),
-                                    revision.manifest.payload_group_id);
-    if (!member_budget || keys.empty()) {
-        return keys;
-    }
-    std::sort(keys.begin(), keys.end());
-    const size_t count = std::min(*member_budget, keys.size());
-    {
-        std::lock_guard lock(member_cursor_mutex_);
-        auto& offset =
-            member_cursors_[MakeWeightRevisionMetadataKey(revision.identity)];
-        offset %= keys.size();
-        std::rotate(keys.begin(), keys.begin() + offset, keys.end());
-        offset = (offset + count) % keys.size();
-    }
-    keys.resize(count);
-    *member_budget -= count;
-    return keys;
-}
-
 void WeightStoreManager::ForgetReconciliationCursor(
     const WeightRevisionIdentity& identity) {
-    std::lock_guard lock(member_cursor_mutex_);
-    member_cursors_.erase(MakeWeightRevisionMetadataKey(identity));
+    std::lock_guard lock(affinity_cursor_mutex_);
+    affinity_cursors_.erase(MakeWeightRevisionMetadataKey(identity));
 }
 
 WeightMetadataStore::Result<void> WeightStoreManager::RemoveWeightMembers(
-    const WeightRevisionMetadata& revision, size_t* member_budget) {
+    const WeightRevisionMetadata& revision, size_t* deletion_member_budget) {
     const TenantId tenant_id(revision.identity.tenant_id);
     auto keys = backend_.GetGroupMemberKeys(tenant_id,
                                             revision.manifest.payload_group_id);
@@ -694,11 +671,11 @@ WeightMetadataStore::Result<void> WeightStoreManager::RemoveWeightMembers(
         return lhs < rhs;
     });
     for (const auto& key : keys) {
-        if (member_budget) {
-            if (*member_budget == 0) {
+        if (deletion_member_budget) {
+            if (*deletion_member_budget == 0) {
                 break;
             }
-            --*member_budget;
+            --*deletion_member_budget;
         }
         auto removed = backend_.RemoveObject(key, tenant_id, true, true);
         if (!removed && removed.error() != ErrorCode::OBJECT_NOT_FOUND) {
@@ -715,14 +692,14 @@ WeightMetadataStore::Result<void> WeightStoreManager::RemoveWeightMembers(
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
 WeightStoreManager::ReconcileWeightRevisionBounded(
-    const ReconcileWeightRevisionRequest& request, size_t* member_budget) {
+    const ReconcileWeightRevisionRequest& request, size_t* work_budget) {
     auto lineage_lock = LockLineage(ToWeightLineageIdentity(request.identity));
-    return ReconcileWeightRevisionInternal(request, member_budget);
+    return ReconcileWeightRevisionInternal(request, work_budget);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
 WeightStoreManager::ReconcileWeightRevisionInternal(
-    const ReconcileWeightRevisionRequest& request, size_t* member_budget) {
+    const ReconcileWeightRevisionRequest& request, size_t* work_budget) {
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
@@ -742,7 +719,7 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
         return current;
     }
     if (current.availability == WeightAvailabilityState::DELETING) {
-        auto removed = RemoveWeightMembers(current, member_budget);
+        auto removed = RemoveWeightMembers(current, work_budget);
         if (!removed) {
             return tl::make_unexpected(removed.error());
         }
@@ -847,7 +824,9 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
                 return member.key == current.manifest.manifest_key &&
                        member.data_type == ObjectDataType::METADATA;
             });
-        if (manifest != members->end() && !manifest->has_memory) {
+        if (manifest != members->end() && !manifest->has_memory &&
+            (!work_budget || *work_budget > 0)) {
+            if (work_budget) --*work_budget;
             const auto result =
                 backend_.PromoteWeightObject(tenant_id, manifest->key);
             VLOG(1) << "weight_manifest_promotion key=" << manifest->key
@@ -858,6 +837,10 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
         uint64_t scheduled_members = 0;
         uint64_t scheduled_bytes = 0;
         auto reserve_affinity = [&](const AffinityObservation& affinity) {
+            // One work item is a complete affinity, even if it has many keys.
+            if (work_budget && *work_budget == 0) {
+                return false;
+            }
             const auto member_count =
                 static_cast<uint64_t>(affinity.keys.size());
             if (scheduled_affinities != 0 &&
@@ -880,10 +863,25 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
                 scheduled_bytes += affinity.logical_bytes;
             }
             ++scheduled_affinities;
+            if (work_budget) --*work_budget;
             return true;
         };
 
+        std::vector<std::string> affinity_ids;
         for (const auto& [affinity_id, affinity] : affinities) {
+            affinity_ids.push_back(affinity_id);
+        }
+        size_t start = 0;
+        if (work_budget && !affinity_ids.empty()) {
+            std::lock_guard lock(affinity_cursor_mutex_);
+            start = affinity_cursors_[MakeWeightRevisionMetadataKey(
+                        current.identity)] %
+                    affinity_ids.size();
+        }
+        for (size_t examined = 0; examined < affinity_ids.size(); ++examined) {
+            const size_t index = (start + examined) % affinity_ids.size();
+            const auto& affinity_id = affinity_ids[index];
+            const auto& affinity = affinities.at(affinity_id);
             const bool should_be_hot = hot_affinities.contains(affinity_id);
             const bool needs_action =
                 should_be_hot
@@ -895,6 +893,11 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
             }
             if (!reserve_affinity(affinity)) {
                 break;
+            }
+            if (work_budget) {
+                std::lock_guard lock(affinity_cursor_mutex_);
+                affinity_cursors_[MakeWeightRevisionMetadataKey(
+                    current.identity)] = (index + 1) % affinity_ids.size();
             }
             if (should_be_hot) {
                 for (const auto& key : affinity.keys) {
@@ -961,10 +964,9 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
     complete = complete && !affinities.contains("") &&
                affinities.size() == current.affinity_count;
     const double observed_hot_ratio =
-        current.manifest.logical_bytes == 0
-            ? 0.0
-            : static_cast<double>(hot_bytes) /
-                  static_cast<double>(current.manifest.logical_bytes);
+        logical_bytes == 0 ? 0.0
+                           : static_cast<double>(hot_bytes) /
+                                 static_cast<double>(logical_bytes);
     const auto observed_residency =
         absent || !any_payload_readable
             ? WeightResidencyState::ABSENT
@@ -1066,7 +1068,8 @@ WeightStoreManager::DeleteWeightRevision(
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
 WeightStoreManager::DeleteWeightRevisionInternal(
-    const DeleteWeightRevisionRequest& request, bool allow_active_upsert) {
+    const DeleteWeightRevisionRequest& request, bool allow_active_upsert,
+    size_t* deletion_member_budget) {
     const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
     if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
@@ -1113,8 +1116,10 @@ WeightStoreManager::DeleteWeightRevisionInternal(
         return tl::make_unexpected(deleting.error());
     }
 
-    size_t member_budget = 64;
-    auto removed = RemoveWeightMembers(*deleting, &member_budget);
+    size_t public_delete_budget = 64;
+    auto removed = RemoveWeightMembers(*deleting, deletion_member_budget
+                                                      ? deletion_member_budget
+                                                      : &public_delete_budget);
     if (!removed) {
         return tl::make_unexpected(removed.error());
     }
@@ -1200,7 +1205,8 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
     }
 
-    size_t member_budget = limit - actions;
+    // Deletion spends one item per member; migration spends one per affinity.
+    size_t remaining_work = limit - actions;
     auto snapshot = weight_metadata_.ExportSnapshot();
     bool has_member_cursors;
     {
@@ -1225,7 +1231,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
     }
     for (const auto& lineage :
          snapshot.lineages.value_or(std::vector<WeightLineageMetadata>{})) {
-        if (actions == limit) {
+        if (actions >= limit || remaining_work == 0) {
             break;
         }
         if (!lineage.latest_claim.has_value()) {
@@ -1264,7 +1270,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                             .expected_metadata_generation =
                                 target->metadata.metadata_generation,
                         },
-                        true);
+                        true, &remaining_work);
                     if (!cleaned || cleaned->availability !=
                                         WeightAvailabilityState::DELETED) {
                         continue;
@@ -1309,7 +1315,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                         .expected_metadata_generation =
                             target->metadata.metadata_generation,
                     },
-                    true);
+                    true, &remaining_work);
                 if (cleaned) {
                     ++actions;
                 }
@@ -1340,6 +1346,9 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
             claim.phase != WeightUpsertPhase::RETIRING_BASE) {
             continue;
         }
+        if (actions >= limit || remaining_work == 0) {
+            continue;
+        }
         auto base = weight_metadata_.Get(claim.base_identity, now_ms);
         if (base && base->active_lease_count == 0 &&
             !base->metadata.operation_id.has_value() &&
@@ -1350,7 +1359,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                     .expected_metadata_generation =
                         base->metadata.metadata_generation,
                 },
-                true);
+                true, &remaining_work);
             if (!deleted) {
                 continue;
             }
@@ -1359,6 +1368,9 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
         if (!base ||
             base->metadata.availability != WeightAvailabilityState::DELETED) {
+            continue;
+        }
+        if (actions >= limit) {
             continue;
         }
         const auto next_phase = claim.phase == WeightUpsertPhase::DELETING_BASE
@@ -1412,7 +1424,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                              ? 0
                              : weight_reconciliation_offset_ % revision_count;
     size_t examined = 0;
-    for (; examined < revision_count && actions < limit && member_budget > 0;
+    for (; examined < revision_count && actions < limit && remaining_work > 0;
          ++examined) {
         const auto& metadata =
             snapshot.metadata[(start + examined) % revision_count];
@@ -1507,7 +1519,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
         auto reconciled = ReconcileWeightRevisionBounded(
             ReconcileWeightRevisionRequest{.identity = metadata.identity},
-            &member_budget);
+            &remaining_work);
         ++actions;
         if (!reconciled &&
             reconciled.error() != WeightManagementError::STALE_GENERATION) {

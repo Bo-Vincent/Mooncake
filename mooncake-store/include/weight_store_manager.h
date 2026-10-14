@@ -122,11 +122,9 @@ class WeightStoreManager {
    private:
     WeightMetadataStore::Result<WeightRevisionMetadata>
     ReconcileWeightRevisionBounded(
-        const ReconcileWeightRevisionRequest& request, size_t* member_budget);
+        const ReconcileWeightRevisionRequest& request, size_t* work_budget);
     WeightMetadataStore::Result<void> RemoveWeightMembers(
-        const WeightRevisionMetadata& revision, size_t* member_budget);
-    std::vector<std::string> SelectReconciliationMembers(
-        const WeightRevisionMetadata& revision, size_t* member_budget);
+        const WeightRevisionMetadata& revision, size_t* deletion_member_budget);
     void ForgetReconciliationCursor(const WeightRevisionIdentity& identity);
     std::unique_lock<std::mutex> LockLineage(
         const WeightLineageIdentity& identity);
@@ -135,10 +133,12 @@ class WeightStoreManager {
         const WeightLineageMutation& mutation);
     WeightMetadataStore::Result<WeightRevisionMetadata>
     DeleteWeightRevisionInternal(const DeleteWeightRevisionRequest& request,
-                                 bool allow_active_upsert);
+                                 bool allow_active_upsert,
+                                 size_t* deletion_member_budget = nullptr);
     WeightMetadataStore::Result<WeightRevisionMetadata>
     ReconcileWeightRevisionInternal(
-        const ReconcileWeightRevisionRequest& request, size_t* member_budget = nullptr);
+        const ReconcileWeightRevisionRequest& request,
+        size_t* work_budget = nullptr);
     WeightMetadataStore::Result<WeightResidencyOperation>
     StartWeightResidencyOperationLocked(
         const StartWeightResidencyOperationRequest& request, uint64_t now_ms);
@@ -174,9 +174,9 @@ class WeightStoreManager {
     size_t weight_reconciliation_offset_{0};
     bool expire_leases_on_unit_budget_{true};
     std::mutex reconciliation_mutex_;
-    std::mutex member_cursor_mutex_;
+    std::mutex affinity_cursor_mutex_;
     // Retry offsets are local scheduling hints, not durable progress tokens.
-    std::unordered_map<std::string, size_t> member_cursors_;
+    std::unordered_map<std::string, size_t> affinity_cursors_;
 };
 
 }  // namespace mooncake

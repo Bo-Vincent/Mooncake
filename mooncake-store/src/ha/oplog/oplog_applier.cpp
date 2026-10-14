@@ -246,20 +246,8 @@ bool OpLogApplier::ApplyWeightMetadataUpsert(const OpLogEntry& entry) {
     static_assert(struct_pack::get_type_code<WeightMetadataUpsertOp>() !=
                   struct_pack::get_type_code<WeightRevisionMetadata>());
     WeightMetadataUpsertOp upsert;
-    bool decoded = struct_pack::deserialize_to(upsert, entry.payload) ==
-                   struct_pack::errc::ok;
-    if (!decoded) {
-        // Before residency operations, this op type carried metadata directly.
-        // struct_pack checks the distinct type hashes before decoding either
-        // shape. Legacy records could only contain idle metadata.
-        WeightRevisionMetadata legacy;
-        decoded = struct_pack::deserialize_to(legacy, entry.payload) ==
-                      struct_pack::errc::ok &&
-                  legacy.operation == WeightOperationState::NONE;
-        if (decoded) {
-            upsert = {.metadata = std::move(legacy), .operation = std::nullopt};
-        }
-    }
+    const bool decoded = struct_pack::deserialize_to(upsert, entry.payload) ==
+                         struct_pack::errc::ok;
     if (!decoded || !ValidateWeightRevisionMetadata(upsert.metadata).ok() ||
         !MatchesWeightTenantAndKey(entry, upsert.metadata.identity)) {
         LOG(ERROR) << "OpLogApplier: invalid weight metadata upsert, key="
