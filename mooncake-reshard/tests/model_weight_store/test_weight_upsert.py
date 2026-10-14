@@ -204,10 +204,10 @@ class UpsertInMemoryStore(ManagedInMemoryStore):
         self.upsert_events.append("claim_aborted")
         return self.catalog[base], 0, 0
 
-    def reconcile_weight_revision(self, *args):
+    def delete_weight_revision(self, *args):
         identity = self._identity(args)
         payload_group_id = self.catalog[identity].manifest.payload_group_id
-        result = super().reconcile_weight_revision(*args)
+        result = super().delete_weight_revision(*args)
         if self.catalog[identity].availability is WeightAvailabilityState.DELETED:
             for key, group_id in tuple(self.group_ids.items()):
                 if group_id == payload_group_id:

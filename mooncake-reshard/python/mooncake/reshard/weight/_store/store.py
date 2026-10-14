@@ -432,7 +432,9 @@ class WeightStore:
                     metadata.metadata_generation,
                 )
             if metadata.availability is WeightAvailabilityState.DELETING:
-                metadata = self.store.weight_reconcile(metadata.identity)
+                metadata = self.store.weight_remove(
+                    metadata.identity, metadata.metadata_generation
+                )
             if metadata.availability is not WeightAvailabilityState.DELETED:
                 raise WeightStoreError(
                     "cannot abort weight revision in availability state "
