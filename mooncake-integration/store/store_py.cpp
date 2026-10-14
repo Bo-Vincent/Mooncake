@@ -4223,27 +4223,6 @@ PYBIND11_MODULE(_store, m) {
         },
         py::arg("tenant_id"), py::arg("operation_id"));
     store_class.def(
-        "reconcile_weight_revision",
-        [identity_from_args](
-            MooncakeStorePyWrapper &self, const std::string &tenant_id,
-            const std::string &name_space, const std::string &resource_id,
-            const std::string &revision, uint64_t weight_generation) {
-            auto request = ReconcileWeightRevisionRequest{
-                .identity =
-                    identity_from_args(tenant_id, name_space, resource_id,
-                                       revision, weight_generation),
-            };
-            WeightRpcResult<WeightRevisionMetadata> result =
-                tl::make_unexpected(ErrorCode::INVALID_PARAMS);
-            if (self.store_) {
-                py::gil_scoped_release release;
-                result = self.store_->reconcile_weight_revision(request);
-            }
-            return weight_rpc_result_to_python(std::move(result));
-        },
-        py::arg("tenant_id"), py::arg("namespace"), py::arg("resource_id"),
-        py::arg("revision"), py::arg("weight_generation"));
-    store_class.def(
         "delete_weight_revision",
         [identity_from_args](
             MooncakeStorePyWrapper &self, const std::string &tenant_id,
