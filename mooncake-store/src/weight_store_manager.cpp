@@ -1208,12 +1208,12 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
     // Deletion spends one item per member; migration spends one per affinity.
     size_t remaining_work = limit - actions;
     auto snapshot = weight_metadata_.ExportSnapshot();
-    bool has_member_cursors;
+    bool has_affinity_cursors;
     {
-        std::lock_guard cursor_lock(member_cursor_mutex_);
-        has_member_cursors = !member_cursors_.empty();
+        std::lock_guard cursor_lock(affinity_cursor_mutex_);
+        has_affinity_cursors = !affinity_cursors_.empty();
     }
-    if (has_member_cursors) {
+    if (has_affinity_cursors) {
         // Build the lookup outside the cursor lock; retry hints need no
         // persistence when the owning metadata disappears or is deleted.
         std::unordered_set<std::string> live_revisions;
@@ -1224,46 +1224,104 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                     MakeWeightRevisionMetadataKey(metadata.identity));
             }
         }
-        std::lock_guard cursor_lock(member_cursor_mutex_);
-        std::erase_if(member_cursors_, [&](const auto& cursor) {
+        std::lock_guard cursor_lock(affinity_cursor_mutex_);
+        std::erase_if(affinity_cursors_, [&](const auto& cursor) {
             return !live_revisions.contains(cursor.first);
         });
     }
-    for (const auto& lineage :
-         snapshot.lineages.value_or(std::vector<WeightLineageMetadata>{})) {
-        if (actions >= limit || remaining_work == 0) {
-            break;
-        }
-        if (!lineage.latest_claim.has_value()) {
-            continue;
-        }
-        auto claim = *lineage.latest_claim;
-        [[maybe_unused]] auto lineage_lock = LockLineage(lineage.identity);
-        auto current_lineage = weight_metadata_.GetLineage(lineage.identity);
-        if (!current_lineage ||
-            current_lineage->lineage_metadata_generation !=
-                lineage.lineage_metadata_generation ||
-            !current_lineage->latest_claim.has_value() ||
-            current_lineage->latest_claim->request_id != claim.request_id ||
-            current_lineage->latest_claim->base_identity !=
-                claim.base_identity ||
-            current_lineage->latest_claim->target_identity !=
-                claim.target_identity ||
-            current_lineage->latest_claim->mode != claim.mode ||
-            current_lineage->latest_claim->phase != claim.phase) {
-            continue;
-        }
-        claim = *current_lineage->latest_claim;
-        if (claim.phase == WeightUpsertPhase::PREPARING_TARGET ||
-            claim.phase == WeightUpsertPhase::TARGET_IMPORTING) {
-            auto target = weight_metadata_.Get(claim.target_identity, now_ms);
-            if (claim.phase == WeightUpsertPhase::PREPARING_TARGET && target &&
-                (target->metadata.availability ==
-                     WeightAvailabilityState::DELETING ||
-                 target->metadata.availability ==
-                     WeightAvailabilityState::DELETED)) {
-                if (target->metadata.availability ==
-                    WeightAvailabilityState::DELETING) {
+    auto reconcile_lineages = [&] {
+        if (actions >= limit || remaining_work == 0) return;
+        const auto lineages =
+            snapshot.lineages.value_or(std::vector<WeightLineageMetadata>{});
+        const size_t start =
+            lineages.empty()
+                ? 0
+                : lineage_reconciliation_offset_++ % lineages.size();
+        for (size_t examined = 0; examined < lineages.size(); ++examined) {
+            const auto& lineage =
+                lineages[(start + examined) % lineages.size()];
+            if (actions >= limit || remaining_work == 0) {
+                break;
+            }
+            if (!lineage.latest_claim.has_value()) {
+                continue;
+            }
+            auto claim = *lineage.latest_claim;
+            [[maybe_unused]] auto lineage_lock = LockLineage(lineage.identity);
+            auto current_lineage =
+                weight_metadata_.GetLineage(lineage.identity);
+            if (!current_lineage ||
+                current_lineage->lineage_metadata_generation !=
+                    lineage.lineage_metadata_generation ||
+                !current_lineage->latest_claim.has_value() ||
+                current_lineage->latest_claim->request_id != claim.request_id ||
+                current_lineage->latest_claim->base_identity !=
+                    claim.base_identity ||
+                current_lineage->latest_claim->target_identity !=
+                    claim.target_identity ||
+                current_lineage->latest_claim->mode != claim.mode ||
+                current_lineage->latest_claim->phase != claim.phase) {
+                continue;
+            }
+            claim = *current_lineage->latest_claim;
+            if (claim.phase == WeightUpsertPhase::PREPARING_TARGET ||
+                claim.phase == WeightUpsertPhase::TARGET_IMPORTING) {
+                auto target =
+                    weight_metadata_.Get(claim.target_identity, now_ms);
+                if (claim.phase == WeightUpsertPhase::PREPARING_TARGET &&
+                    target &&
+                    (target->metadata.availability ==
+                         WeightAvailabilityState::DELETING ||
+                     target->metadata.availability ==
+                         WeightAvailabilityState::DELETED)) {
+                    if (target->metadata.availability ==
+                        WeightAvailabilityState::DELETING) {
+                        auto cleaned = DeleteWeightRevisionInternal(
+                            DeleteWeightRevisionRequest{
+                                .identity = claim.target_identity,
+                                .expected_metadata_generation =
+                                    target->metadata.metadata_generation,
+                            },
+                            true, &remaining_work);
+                        if (!cleaned || cleaned->availability !=
+                                            WeightAvailabilityState::DELETED) {
+                            continue;
+                        }
+                    }
+                    auto aborted = weight_metadata_.PrepareAdvanceUpsert(
+                        lineage.identity, claim.request_id,
+                        WeightUpsertPhase::ABORTED, now_ms);
+                    if (aborted &&
+                        PersistAndPublishWeightLineageMutation(*aborted)) {
+                        ++actions;
+                    }
+                    continue;
+                }
+                if (!target || target->metadata.availability ==
+                                   WeightAvailabilityState::DELETED) {
+                    [[maybe_unused]] auto group_operation_lock =
+                        LockGroup(claim.target_identity);
+                    auto import = weight_metadata_.PrepareBeginImport(
+                        BeginWeightImportRequest{
+                            .identity = claim.target_identity,
+                            .payload_group_id = claim.import.payload_group_id,
+                            .expected_payload_count =
+                                claim.import.expected_payload_count,
+                            .expected_logical_bytes =
+                                claim.import.expected_logical_bytes,
+                            .policy = claim.import.policy,
+                            .affinity_summary = claim.import.affinity_summary,
+                        },
+                        now_ms, true);
+                    if (import && PersistAndPublishWeightMutation(*import)) {
+                        ++actions;
+                    }
+                    continue;
+                }
+                if (claim.phase == WeightUpsertPhase::TARGET_IMPORTING &&
+                    target &&
+                    target->metadata.availability ==
+                        WeightAvailabilityState::DELETING) {
                     auto cleaned = DeleteWeightRevisionInternal(
                         DeleteWeightRevisionRequest{
                             .identity = claim.target_identity,
@@ -1271,25 +1329,84 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                                 target->metadata.metadata_generation,
                         },
                         true, &remaining_work);
-                    if (!cleaned || cleaned->availability !=
-                                        WeightAvailabilityState::DELETED) {
-                        continue;
+                    if (cleaned) {
+                        ++actions;
                     }
+                    continue;
                 }
-                auto aborted = weight_metadata_.PrepareAdvanceUpsert(
-                    lineage.identity, claim.request_id,
-                    WeightUpsertPhase::ABORTED, now_ms);
-                if (aborted &&
-                    PersistAndPublishWeightLineageMutation(*aborted)) {
-                    ++actions;
+                if (!target || target->metadata.availability !=
+                                   WeightAvailabilityState::READY) {
+                    continue;
                 }
+                auto committed = weight_metadata_.PrepareCommitUpsert(
+                    CommitWeightUpsertRequest{
+                        .request_id = claim.request_id,
+                        .base_identity = claim.base_identity,
+                        .target_identity = claim.target_identity,
+                    },
+                    now_ms);
+                if (!committed) {
+                    continue;
+                }
+                auto published =
+                    PersistAndPublishWeightLineageMutation(*committed);
+                if (!published || !published->latest_claim.has_value()) {
+                    continue;
+                }
+                claim = *published->latest_claim;
+                ++actions;
+            }
+            if (claim.phase != WeightUpsertPhase::DELETING_BASE &&
+                claim.phase != WeightUpsertPhase::RETIRING_BASE) {
                 continue;
             }
-            if (!target || target->metadata.availability ==
-                               WeightAvailabilityState::DELETED) {
+            if (actions >= limit || remaining_work == 0) {
+                continue;
+            }
+            auto base = weight_metadata_.Get(claim.base_identity, now_ms);
+            if (base && base->active_lease_count == 0 &&
+                !base->metadata.operation_id.has_value() &&
+                base->metadata.availability !=
+                    WeightAvailabilityState::DELETED) {
+                auto deleted = DeleteWeightRevisionInternal(
+                    DeleteWeightRevisionRequest{
+                        .identity = claim.base_identity,
+                        .expected_metadata_generation =
+                            base->metadata.metadata_generation,
+                    },
+                    true, &remaining_work);
+                if (!deleted) {
+                    continue;
+                }
+                base = weight_metadata_.Get(claim.base_identity, now_ms);
+                ++actions;
+            }
+            if (!base || base->metadata.availability !=
+                             WeightAvailabilityState::DELETED) {
+                continue;
+            }
+            if (actions >= limit) {
+                continue;
+            }
+            const auto next_phase =
+                claim.phase == WeightUpsertPhase::DELETING_BASE
+                    ? WeightUpsertPhase::TARGET_IMPORTING
+                    : WeightUpsertPhase::COMPLETED;
+            auto advanced = weight_metadata_.PrepareAdvanceUpsert(
+                lineage.identity, claim.request_id, next_phase, now_ms);
+            if (!advanced ||
+                !PersistAndPublishWeightLineageMutation(*advanced)) {
+                continue;
+            }
+            if (next_phase == WeightUpsertPhase::TARGET_IMPORTING) {
+                const auto canonical_group =
+                    MakeWeightPayloadGroupId(claim.target_identity);
+                if (canonical_group.empty()) {
+                    continue;
+                }
                 [[maybe_unused]] auto group_operation_lock =
                     LockGroup(claim.target_identity);
-                auto import = weight_metadata_.PrepareBeginImport(
+                auto imported = weight_metadata_.PrepareBeginImport(
                     BeginWeightImportRequest{
                         .identity = claim.target_identity,
                         .payload_group_id = claim.import.payload_group_id,
@@ -1301,236 +1418,159 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                         .affinity_summary = claim.import.affinity_summary,
                     },
                     now_ms, true);
-                if (import && PersistAndPublishWeightMutation(*import)) {
-                    ++actions;
-                }
-                continue;
-            }
-            if (claim.phase == WeightUpsertPhase::TARGET_IMPORTING && target &&
-                target->metadata.availability ==
-                    WeightAvailabilityState::DELETING) {
-                auto cleaned = DeleteWeightRevisionInternal(
-                    DeleteWeightRevisionRequest{
-                        .identity = claim.target_identity,
-                        .expected_metadata_generation =
-                            target->metadata.metadata_generation,
-                    },
-                    true, &remaining_work);
-                if (cleaned) {
-                    ++actions;
-                }
-                continue;
-            }
-            if (!target || target->metadata.availability !=
-                               WeightAvailabilityState::READY) {
-                continue;
-            }
-            auto committed = weight_metadata_.PrepareCommitUpsert(
-                CommitWeightUpsertRequest{
-                    .request_id = claim.request_id,
-                    .base_identity = claim.base_identity,
-                    .target_identity = claim.target_identity,
-                },
-                now_ms);
-            if (!committed) {
-                continue;
-            }
-            auto published = PersistAndPublishWeightLineageMutation(*committed);
-            if (!published || !published->latest_claim.has_value()) {
-                continue;
-            }
-            claim = *published->latest_claim;
-            ++actions;
-        }
-        if (claim.phase != WeightUpsertPhase::DELETING_BASE &&
-            claim.phase != WeightUpsertPhase::RETIRING_BASE) {
-            continue;
-        }
-        if (actions >= limit || remaining_work == 0) {
-            continue;
-        }
-        auto base = weight_metadata_.Get(claim.base_identity, now_ms);
-        if (base && base->active_lease_count == 0 &&
-            !base->metadata.operation_id.has_value() &&
-            base->metadata.availability != WeightAvailabilityState::DELETED) {
-            auto deleted = DeleteWeightRevisionInternal(
-                DeleteWeightRevisionRequest{
-                    .identity = claim.base_identity,
-                    .expected_metadata_generation =
-                        base->metadata.metadata_generation,
-                },
-                true, &remaining_work);
-            if (!deleted) {
-                continue;
-            }
-            base = weight_metadata_.Get(claim.base_identity, now_ms);
-            ++actions;
-        }
-        if (!base ||
-            base->metadata.availability != WeightAvailabilityState::DELETED) {
-            continue;
-        }
-        if (actions >= limit) {
-            continue;
-        }
-        const auto next_phase = claim.phase == WeightUpsertPhase::DELETING_BASE
-                                    ? WeightUpsertPhase::TARGET_IMPORTING
-                                    : WeightUpsertPhase::COMPLETED;
-        auto advanced = weight_metadata_.PrepareAdvanceUpsert(
-            lineage.identity, claim.request_id, next_phase, now_ms);
-        if (!advanced || !PersistAndPublishWeightLineageMutation(*advanced)) {
-            continue;
-        }
-        if (next_phase == WeightUpsertPhase::TARGET_IMPORTING) {
-            const auto canonical_group =
-                MakeWeightPayloadGroupId(claim.target_identity);
-            if (canonical_group.empty()) {
-                continue;
-            }
-            [[maybe_unused]] auto group_operation_lock =
-                LockGroup(claim.target_identity);
-            auto imported = weight_metadata_.PrepareBeginImport(
-                BeginWeightImportRequest{
-                    .identity = claim.target_identity,
-                    .payload_group_id = claim.import.payload_group_id,
-                    .expected_payload_count =
-                        claim.import.expected_payload_count,
-                    .expected_logical_bytes =
-                        claim.import.expected_logical_bytes,
-                    .policy = claim.import.policy,
-                    .affinity_summary = claim.import.affinity_summary,
-                },
-                now_ms, true);
-            if (!imported || !PersistAndPublishWeightMutation(*imported)) {
-                continue;
-            }
-        }
-        ++actions;
-    }
-    const auto pressure = backend_.GetMemoryPressure();
-    const double memory_used_ratio = pressure.used_ratio;
-    const bool memory_pressure = memory_used_ratio > pressure.high_watermark ||
-                                 pressure.eviction_requested;
-    const double memory_low_watermark =
-        std::max(0.0, pressure.high_watermark - pressure.eviction_ratio);
-    const bool capacity_available =
-        !memory_pressure && memory_used_ratio < memory_low_watermark;
-    if (memory_pressure) {
-        std::sort(snapshot.metadata.begin(), snapshot.metadata.end(),
-                  WeightAutoMigrationCandidateLess);
-    }
-    const size_t revision_count = snapshot.metadata.size();
-    const size_t start = revision_count == 0 || memory_pressure
-                             ? 0
-                             : weight_reconciliation_offset_ % revision_count;
-    size_t examined = 0;
-    for (; examined < revision_count && actions < limit && remaining_work > 0;
-         ++examined) {
-        const auto& metadata =
-            snapshot.metadata[(start + examined) % revision_count];
-        if (metadata.availability == WeightAvailabilityState::DELETED) {
-            continue;
-        }
-
-        if (metadata.availability == WeightAvailabilityState::IMPORTING) {
-            [[maybe_unused]] auto lineage_operation_lock =
-                LockLineage(ToWeightLineageIdentity(metadata.identity));
-            auto group_lock = LockGroup(metadata.identity);
-            auto current = weight_metadata_.Get(metadata.identity, now_ms);
-            if (!current || current->metadata.availability !=
-                                WeightAvailabilityState::IMPORTING) {
-                continue;
-            }
-            auto activity =
-                FindImportActivity(TenantId(metadata.identity.tenant_id),
-                                   metadata.manifest.payload_group_id);
-            if (!activity) {
-                continue;
-            }
-            {
-                std::lock_guard activity_lock(activity->mutex);
-                if (activity->closing || activity->in_flight != 0 ||
-                    now_ms < activity->last_write_ms ||
-                    now_ms - activity->last_write_ms <
-                        import_idle_timeout_ms_) {
+                if (!imported || !PersistAndPublishWeightMutation(*imported)) {
                     continue;
                 }
-                // Claim abandonment before releasing the activity lock. An End
-                // either holds a write guard or observes this closed admission.
-                activity->closing = true;
             }
-            auto mutation = weight_metadata_.PrepareAbortImport(
-                AbortWeightImportRequest{
-                    .identity = metadata.identity,
-                    .expected_metadata_generation =
-                        current->metadata.metadata_generation,
-                },
-                now_ms);
             ++actions;
-            if (!mutation || !PersistAndPublishWeightMutation(*mutation)) {
-                std::lock_guard activity_lock(activity->mutex);
-                activity->closing = false;
-                MasterMetricManager::instance()
-                    .inc_weight_reconciliation_failures();
+        }
+    };
+
+    auto reconcile_revisions = [&] {
+        if (actions >= limit || remaining_work == 0) return;
+        const auto pressure = backend_.GetMemoryPressure();
+        const double memory_used_ratio = pressure.used_ratio;
+        const bool memory_pressure =
+            memory_used_ratio > pressure.high_watermark ||
+            pressure.eviction_requested;
+        const double memory_low_watermark =
+            std::max(0.0, pressure.high_watermark - pressure.eviction_ratio);
+        const bool capacity_available =
+            !memory_pressure && memory_used_ratio < memory_low_watermark;
+        if (memory_pressure) {
+            std::sort(snapshot.metadata.begin(), snapshot.metadata.end(),
+                      WeightAutoMigrationCandidateLess);
+        }
+        const size_t revision_count = snapshot.metadata.size();
+        const size_t start =
+            revision_count == 0 ? 0
+            : memory_pressure
+                ? 0
+                : weight_reconciliation_offset_ % revision_count;
+        size_t examined = 0;
+        for (;
+             examined < revision_count && actions < limit && remaining_work > 0;
+             ++examined) {
+            const auto& metadata =
+                snapshot.metadata[(start + examined) % revision_count];
+            if (metadata.availability == WeightAvailabilityState::DELETED) {
                 continue;
             }
-            continue;
-        }
 
-        std::optional<WeightAutoMigrationSignal> auto_signal;
-        if (memory_pressure) {
-            auto_signal = WeightAutoMigrationSignal::MEMORY_PRESSURE;
-        } else if (capacity_available) {
-            auto_signal = WeightAutoMigrationSignal::CAPACITY_AVAILABLE;
-        }
-        if (auto_signal.has_value() &&
-            metadata.availability == WeightAvailabilityState::READY) {
-            auto current = weight_metadata_.Get(metadata.identity, now_ms);
-            if (current) {
-                auto target = PlanAutomaticWeightMigration(
-                    current->metadata, current->active_lease_count,
-                    *auto_signal, now_ms, weight_migration_cooldown_ms_);
-                if (target.has_value()) {
-                    auto started = StartWeightResidencyOperation(
-                        StartWeightResidencyOperationRequest{
-                            .identity = metadata.identity,
-                            .expected_metadata_generation =
-                                current->metadata.metadata_generation,
-                            .target_residency = target->residency,
-                            .mixed_hot_ratio = target->mixed_hot_ratio,
-                        });
-                    if (started) {
-                        ++actions;
+            if (metadata.availability == WeightAvailabilityState::IMPORTING) {
+                [[maybe_unused]] auto lineage_operation_lock =
+                    LockLineage(ToWeightLineageIdentity(metadata.identity));
+                auto group_lock = LockGroup(metadata.identity);
+                auto current = weight_metadata_.Get(metadata.identity, now_ms);
+                if (!current || current->metadata.availability !=
+                                    WeightAvailabilityState::IMPORTING) {
+                    continue;
+                }
+                auto activity =
+                    FindImportActivity(TenantId(metadata.identity.tenant_id),
+                                       metadata.manifest.payload_group_id);
+                if (!activity) {
+                    continue;
+                }
+                {
+                    std::lock_guard activity_lock(activity->mutex);
+                    if (activity->closing || activity->in_flight != 0 ||
+                        now_ms < activity->last_write_ms ||
+                        now_ms - activity->last_write_ms <
+                            import_idle_timeout_ms_) {
                         continue;
                     }
-                    if (started.error() !=
-                            WeightManagementError::STALE_GENERATION &&
-                        started.error() != WeightManagementError::BUSY) {
-                        MasterMetricManager::instance()
-                            .inc_weight_reconciliation_failures();
+                    // Claim abandonment before releasing the activity lock. An End
+                    // either holds a write guard or observes this closed admission.
+                    activity->closing = true;
+                }
+                auto mutation = weight_metadata_.PrepareAbortImport(
+                    AbortWeightImportRequest{
+                        .identity = metadata.identity,
+                        .expected_metadata_generation =
+                            current->metadata.metadata_generation,
+                    },
+                    now_ms);
+                ++actions;
+                if (!mutation || !PersistAndPublishWeightMutation(*mutation)) {
+                    std::lock_guard activity_lock(activity->mutex);
+                    activity->closing = false;
+                    MasterMetricManager::instance()
+                        .inc_weight_reconciliation_failures();
+                    continue;
+                }
+                continue;
+            }
+
+            std::optional<WeightAutoMigrationSignal> auto_signal;
+            if (memory_pressure) {
+                auto_signal = WeightAutoMigrationSignal::MEMORY_PRESSURE;
+            } else if (capacity_available) {
+                auto_signal = WeightAutoMigrationSignal::CAPACITY_AVAILABLE;
+            }
+            if (auto_signal.has_value() &&
+                metadata.availability == WeightAvailabilityState::READY) {
+                auto current = weight_metadata_.Get(metadata.identity, now_ms);
+                if (current) {
+                    auto target = PlanAutomaticWeightMigration(
+                        current->metadata, current->active_lease_count,
+                        *auto_signal, now_ms, weight_migration_cooldown_ms_);
+                    if (target.has_value()) {
+                        auto started = StartWeightResidencyOperation(
+                            StartWeightResidencyOperationRequest{
+                                .identity = metadata.identity,
+                                .expected_metadata_generation =
+                                    current->metadata.metadata_generation,
+                                .target_residency = target->residency,
+                                .mixed_hot_ratio = target->mixed_hot_ratio,
+                            });
+                        if (started) {
+                            ++actions;
+                            continue;
+                        }
+                        if (started.error() !=
+                                WeightManagementError::STALE_GENERATION &&
+                            started.error() != WeightManagementError::BUSY) {
+                            MasterMetricManager::instance()
+                                .inc_weight_reconciliation_failures();
+                        }
                     }
                 }
             }
-        }
 
-        if (metadata.availability == WeightAvailabilityState::DELETING &&
-            weight_metadata_.HasActiveUpsertClaim(metadata.identity)) {
-            continue;
+            if (metadata.availability == WeightAvailabilityState::DELETING &&
+                weight_metadata_.HasActiveUpsertClaim(metadata.identity)) {
+                continue;
+            }
+            auto reconciled = ReconcileWeightRevisionBounded(
+                ReconcileWeightRevisionRequest{.identity = metadata.identity},
+                &remaining_work);
+            ++actions;
+            if (!reconciled &&
+                reconciled.error() != WeightManagementError::STALE_GENERATION) {
+                MasterMetricManager::instance()
+                    .inc_weight_reconciliation_failures();
+            }
         }
-        auto reconciled = ReconcileWeightRevisionBounded(
-            ReconcileWeightRevisionRequest{.identity = metadata.identity},
-            &remaining_work);
-        ++actions;
-        if (!reconciled &&
-            reconciled.error() != WeightManagementError::STALE_GENERATION) {
-            MasterMetricManager::instance()
-                .inc_weight_reconciliation_failures();
+        if (!memory_pressure && examined != 0) {
+            weight_reconciliation_offset_ = (start + examined) % revision_count;
+        }
+    };
+
+    // Alternate phases and advance each cursor only when its sweep can run.
+    // Separate counters avoid phase parity pinning an even-sized lineage set.
+    if (actions < limit && remaining_work > 0) {
+        const bool lineages_first = reconcile_lineages_first_;
+        reconcile_lineages_first_ = !reconcile_lineages_first_;
+        if (lineages_first) {
+            reconcile_lineages();
+            reconcile_revisions();
+        } else {
+            reconcile_revisions();
+            reconcile_lineages();
         }
     }
 
-    if (!memory_pressure && examined != 0) {
-        weight_reconciliation_offset_ = (start + examined) % revision_count;
-    }
     MasterMetricManager::instance().project_weight_metadata(
         weight_metadata_.ExportSnapshot(), now_ms);
     return actions;
