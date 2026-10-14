@@ -9,6 +9,11 @@ import sys
 import time
 
 
+# The 30s worker cycle admits work, then observes it after client heartbeats.
+# Allow the next observation cycle plus margin with a fixed, non-renewing deadline.
+BACKGROUND_CONVERGENCE_TIMEOUT_S = 120
+
+
 def _require_store():
     try:
         import store  # type: ignore
@@ -247,16 +252,26 @@ def _run_lifecycle(client, store, suffix: str) -> None:
     assert released[1:] == (0, 0), released
 
     def wait_for(residency):
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + BACKGROUND_CONVERGENCE_TIMEOUT_S
+        last_metadata = None
         while time.monotonic() < deadline:
             result = _require_success(
                 client.get_weight_revision(*identity),
                 "query residency",
             ).metadata
+            last_metadata = {
+                "generation": result.metadata_generation,
+                "availability": result.availability,
+                "residency": result.residency,
+                "operation_id": result.operation_id,
+                "observed_hot_ratio": result.observed_hot_ratio,
+            }
             if result.residency == residency and result.operation_id is None:
                 return result
             time.sleep(0.2)
-        raise AssertionError(f"residency did not converge to {residency}")
+        raise AssertionError(
+            f"residency did not converge to {residency}; last metadata={last_metadata}"
+        )
 
     for target, hot_count in (
         (store.WeightResidencyState.COLD, 0),
@@ -308,17 +323,24 @@ def _run_lifecycle(client, store, suffix: str) -> None:
         client.delete_weight_revision(*identity, current.metadata.metadata_generation),
         "delete revision",
     )
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + BACKGROUND_CONVERGENCE_TIMEOUT_S
+    last_metadata = None
     while time.monotonic() < deadline:
         result = _require_success(
             client.get_weight_revision(*identity),
             "query delete",
         ).metadata
+        last_metadata = {
+            "generation": result.metadata_generation,
+            "availability": result.availability,
+            "residency": result.residency,
+            "operation_id": result.operation_id,
+        }
         if result.availability == store.WeightAvailabilityState.DELETED:
             break
         time.sleep(0.2)
     else:
-        raise AssertionError("delete did not complete")
+        raise AssertionError(f"delete did not complete; last metadata={last_metadata}")
     for key in list(payloads) + [manifest_key]:
         assert client.is_exist(key) == 0, key
     print("lifecycle lease, policy, migration, delete PASSED", flush=True)
