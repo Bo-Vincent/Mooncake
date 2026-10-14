@@ -1653,7 +1653,7 @@ MasterService::GroupEvictionResult MasterService::EvictGroupOrObject(
 bool MasterService::QueueManagedWeightMemberOffload(
     const WeightRevisionMetadata& revision, const std::string& member_key) {
     const TenantId tenant_id(revision.identity.tenant_id);
-    std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
+    std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
     MetadataAccessorRW accessor(this,
                                 MakeObjectIdentity(member_key, tenant_id));
     if (!accessor.Exists()) {
