@@ -322,10 +322,17 @@ WeightMetadataSnapshot MakeWeightSnapshot(bool active) {
     };
     metadata.availability = WeightAvailabilityState::READY;
     metadata.residency = WeightResidencyState::HOT;
+    metadata.policy = {.preferred_residency = WeightResidencyState::HOT,
+                       .migration_mode = WeightMigrationMode::MANUAL};
+    metadata.affinity_count = 2;
+    metadata.affinity_digest = std::string(64, 'c');
+    metadata.observed_hot_ratio = 1.0;
     metadata.metadata_generation = active ? 3 : 2;
     metadata.created_at_ms = 100;
     metadata.updated_at_ms = 200;
+    metadata.last_accessed_at_ms = 100;
     WeightMetadataSnapshot snapshot;
+    snapshot.lineages = std::vector<WeightLineageMetadata>{};
     snapshot.leases.push_back({
         .lease_id = 42,
         .identity = metadata.identity,
@@ -335,18 +342,19 @@ WeightMetadataSnapshot MakeWeightSnapshot(bool active) {
     });
     snapshot.next_lease_id = 43;
     if (active) {
-        metadata.operation = WeightOperationState::REHYDRATING;
         metadata.operation_id = 9;
         snapshot.operations.push_back({
             .operation_id = 9,
             .identity = metadata.identity,
-            .operation = WeightOperationState::REHYDRATING,
+            .kind = WeightOperationKind::MIGRATING,
             .target_residency = WeightResidencyState::HOT,
             .fenced_metadata_generation = 3,
             .started_at_ms = 200,
             .updated_at_ms = 200,
-            .processed_members = 0,
-            .total_members = 3,
+            .processed_units = 0,
+            .total_units = 2,
+            .processed_bytes = 0,
+            .total_bytes = 2048,
         });
         snapshot.next_operation_id = 10;
     }
@@ -393,8 +401,7 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
                 importing.metadata_generation = 1;
                 importing.availability = WeightAvailabilityState::IMPORTING;
                 importing.residency = WeightResidencyState::UNKNOWN;
-                importing.operation = WeightOperationState::NONE;
-                importing.operation_id = 0;
+                importing.operation_id.reset();
                 importing.observed_hot_ratio = 0.0;
                 importing.manifest.manifest_key.clear();
                 importing.manifest.manifest_sha256.clear();
@@ -407,8 +414,7 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
                 ready.metadata_generation = 2;
                 ready.availability = WeightAvailabilityState::READY;
                 ready.residency = WeightResidencyState::HOT;
-                ready.operation = WeightOperationState::NONE;
-                ready.operation_id = 0;
+                ready.operation_id.reset();
                 append(OpType::WEIGHT_METADATA_UPSERT,
                        MakeWeightRevisionMetadataKey(metadata.identity),
                        WeightMetadataUpsertOp{.metadata = ready});
@@ -418,10 +424,11 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
                                MakeWeightLeaseMetadataKey(lease.lease_id),
                                WeightLeaseUpsertOp{
                                    .lease = lease,
-                                   .last_accessed_at_ms = metadata.last_accessed_at_ms});
+                                   .last_accessed_at_ms =
+                                       metadata.last_accessed_at_ms});
                     }
                 }
-                if (metadata.operation != WeightOperationState::NONE) {
+                if (metadata.operation_id.has_value()) {
                     for (const auto& operation : weight_metadata->operations) {
                         if (operation.operation_id == metadata.operation_id) {
                             append(OpType::WEIGHT_METADATA_UPSERT,
@@ -532,11 +539,11 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
             auto& metadata = expected.metadata.front();
             metadata.metadata_generation = 4;
             metadata.updated_at_ms = 300;
-            metadata.operation = WeightOperationState::NONE;
-            metadata.operation_id = 0;
+            metadata.operation_id.reset();
             auto& operation = expected.operations.front();
             operation.updated_at_ms = 300;
-            operation.processed_members = operation.total_members;
+            operation.processed_units = operation.total_units;
+            operation.processed_bytes = operation.total_bytes;
             operation.message = kWeightOperationCompletedMessage;
             OpLogEntry entry;
             entry.sequence_id = 5;
@@ -933,6 +940,12 @@ TEST_F(BatchOpLogSnapshotWriterTest,
         .identity = identity,
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(importing);
     const std::string payload_key = "snapshot-weight-payload";
@@ -946,6 +959,12 @@ TEST_F(BatchOpLogSnapshotWriterTest,
     for (const auto& key : {payload_key, manifest_key}) {
         replicate.data_type = key == payload_key ? ObjectDataType::WEIGHT
                                                  : ObjectDataType::METADATA;
+        if (key == payload_key) {
+            replicate.residency_affinity_ids =
+                std::vector<std::string>{"snapshot-weight-affinity"};
+        } else {
+            replicate.residency_affinity_ids.reset();
+        }
         ASSERT_TRUE(primary.PutStart(client_id, key, TenantId::Default(),
                                      key == payload_key ? 1024 : 128,
                                      replicate));
