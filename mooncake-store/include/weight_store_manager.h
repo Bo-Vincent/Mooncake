@@ -174,6 +174,8 @@ class WeightStoreManager {
     size_t weight_reconciliation_offset_{0};
     bool expire_leases_on_unit_budget_{true};
     std::mutex reconciliation_mutex_;
+    size_t lineage_reconciliation_offset_{0};
+    bool reconcile_lineages_first_{true};
     std::mutex affinity_cursor_mutex_;
     // Retry offsets are local scheduling hints, not durable progress tokens.
     std::unordered_map<std::string, size_t> affinity_cursors_;

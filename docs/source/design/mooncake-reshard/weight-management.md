@@ -183,6 +183,11 @@ this is not a strict bound on backend member calls. Manifest promotion is a
 separate control item. Pending affinities rotate so subsequent passes can
 schedule other units. The per-round member and byte limits remain soft bounds
 for an indivisible first affinity. Weight work runs on its dedicated worker.
+Lineage and revision sweeps alternate priority and share any remaining budget.
+A separate lineage cursor prevents a blocked retirement from monopolizing later
+lineages. Revision cleanup retains its existing rotation and memory-pressure
+priority ordering. Cursors are local scheduling hints and do not change durable
+operation progress.
 
 Commit, abort, lease acquisition, operation start, and deletion check the
 caller's `expected_metadata_generation`. Lease renewal and release use the
