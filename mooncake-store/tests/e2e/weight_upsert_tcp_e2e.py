@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -16,10 +17,22 @@ BACKGROUND_CONVERGENCE_TIMEOUT_S = 120
 
 def _require_store():
     try:
-        import store  # type: ignore
+        from mooncake import store
     except Exception as exc:  # pragma: no cover
         print(f"import_fail {exc}", flush=True)
         raise SystemExit(10)
+    expected_facade = (
+        Path(__file__).resolve().parents[3] / "python/mooncake/store/__init__.py"
+    )
+    native = sys.modules["mooncake._store"]
+    expected_native = Path(os.environ["MOONCAKE_E2E_STORE_SO"]).resolve()
+    assert Path(store.__file__).resolve() == expected_facade
+    assert Path(native.__file__).resolve() == expected_native
+    assert store.MooncakeDistributedStore is native.MooncakeDistributedStore
+    assert store.WeightUpsertMode is native.WeightUpsertMode
+    print(
+        f"store_identity facade={store.__file__} native={native.__file__}", flush=True
+    )
     return store
 
 

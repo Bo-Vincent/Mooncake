@@ -1117,15 +1117,16 @@ WeightStoreManager::DeleteWeightRevisionInternal(
     }
 
     size_t public_delete_budget = 64;
-    auto removed = RemoveWeightMembers(*deleting, deletion_member_budget
-                                                      ? deletion_member_budget
-                                                      : &public_delete_budget);
+    auto* remaining_budget =
+        deletion_member_budget ? deletion_member_budget : &public_delete_budget;
+    auto removed = RemoveWeightMembers(*deleting, remaining_budget);
     if (!removed) {
         return tl::make_unexpected(removed.error());
     }
     group_operation_lock.unlock();
     return ReconcileWeightRevisionInternal(
-        ReconcileWeightRevisionRequest{.identity = request.identity});
+        ReconcileWeightRevisionRequest{.identity = request.identity},
+        remaining_budget);
 }
 
 WeightMetadataStore::Result<WeightResidencyOperation>
@@ -1444,9 +1445,8 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         const size_t revision_count = snapshot.metadata.size();
         const size_t start =
             revision_count == 0 ? 0
-            : memory_pressure
-                ? 0
-                : weight_reconciliation_offset_ % revision_count;
+            : memory_pressure   ? 0
+                              : weight_reconciliation_offset_ % revision_count;
         size_t examined = 0;
         for (;
              examined < revision_count && actions < limit && remaining_work > 0;

@@ -58,6 +58,12 @@ TEST(WeightManagementRpcTest,
         .identity = Identity(),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(begin.has_value());
     ASSERT_TRUE(Domain(begin).has_value());

@@ -131,6 +131,7 @@ class WeightStoreManager {
     WeightMetadataStore::Result<WeightLineageMetadata>
     PersistAndPublishWeightLineageMutation(
         const WeightLineageMutation& mutation);
+    // Both internal entry points require the caller to hold the lineage lock.
     WeightMetadataStore::Result<WeightRevisionMetadata>
     DeleteWeightRevisionInternal(const DeleteWeightRevisionRequest& request,
                                  bool allow_active_upsert,
