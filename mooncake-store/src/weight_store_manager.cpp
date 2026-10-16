@@ -932,6 +932,7 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
     bool manifest_found = false;
     bool any_payload_readable = false;
     uint64_t logical_bytes = 0;
+    uint64_t readable_bytes = 0;
     uint64_t hot_bytes = 0;
     std::vector<std::string> payload_keys;
     if (!absent) {
@@ -946,8 +947,11 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
                 logical_bytes += member.size;
                 payload_keys.push_back(member.key);
                 any_payload_readable = any_payload_readable || member.readable;
-                if (member.has_memory) {
-                    hot_bytes += member.size;
+                if (member.readable) {
+                    readable_bytes += member.size;
+                    if (member.has_memory) {
+                        hot_bytes += member.size;
+                    }
                 }
             } else {
                 complete = false;
@@ -964,9 +968,9 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
     complete = complete && !affinities.contains("") &&
                affinities.size() == current.affinity_count;
     const double observed_hot_ratio =
-        logical_bytes == 0 ? 0.0
-                           : static_cast<double>(hot_bytes) /
-                                 static_cast<double>(logical_bytes);
+        readable_bytes == 0 ? 0.0
+                            : static_cast<double>(hot_bytes) /
+                                  static_cast<double>(readable_bytes);
     const auto observed_residency =
         absent || !any_payload_readable
             ? WeightResidencyState::ABSENT
@@ -1079,11 +1083,12 @@ WeightStoreManager::DeleteWeightRevisionInternal(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
-    auto mutation = weight_metadata_.PrepareDelete(request, now_ms, allow_active_upsert);
+    auto mutation =
+        weight_metadata_.PrepareDelete(request, now_ms, allow_active_upsert);
     std::optional<WeightOperationMutation> cancellation;
     if (!mutation && mutation.error() == WeightManagementError::BUSY) {
-        auto cancelled =
-            weight_metadata_.PrepareCancelOperationForDelete(request, now_ms, allow_active_upsert);
+        auto cancelled = weight_metadata_.PrepareCancelOperationForDelete(
+            request, now_ms, allow_active_upsert);
         if (!cancelled) {
             return tl::make_unexpected(cancelled.error());
         }
@@ -1315,6 +1320,9 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                         },
                         now_ms, true);
                     if (import && PersistAndPublishWeightMutation(*import)) {
+                        if (!import->no_op) {
+                            RegisterImportActivity(*import->next);
+                        }
                         ++actions;
                     }
                     continue;
@@ -1422,6 +1430,9 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                 if (!imported || !PersistAndPublishWeightMutation(*imported)) {
                     continue;
                 }
+                if (!imported->no_op) {
+                    RegisterImportActivity(*imported->next);
+                }
             }
             ++actions;
         }
@@ -1480,8 +1491,9 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                             import_idle_timeout_ms_) {
                         continue;
                     }
-                    // Claim abandonment before releasing the activity lock. An End
-                    // either holds a write guard or observes this closed admission.
+                    // Claim abandonment before releasing the activity lock. An
+                    // End either holds a write guard or observes this closed
+                    // admission.
                     activity->closing = true;
                 }
                 auto mutation = weight_metadata_.PrepareAbortImport(
@@ -1758,7 +1770,11 @@ WeightStoreManager::BeginWeightUpsert(const BeginWeightUpsertRequest& request) {
     if (!import) {
         return tl::make_unexpected(import.error());
     }
-    return PersistAndPublishWeightMutation(*import);
+    auto importing = PersistAndPublishWeightMutation(*import);
+    if (importing && !import->no_op) {
+        RegisterImportActivity(*importing);
+    }
+    return importing;
 }
 
 WeightMetadataStore::Result<WeightLineageMetadata>
@@ -1845,6 +1861,13 @@ WeightStoreManager::AbortWeightUpsert(const AbortWeightUpsertRequest& request) {
         auto published = PersistAndPublishWeightMutation(*aborted);
         if (!published) {
             return tl::make_unexpected(published.error());
+        }
+        auto activity =
+            FindImportActivity(TenantId(request.target_identity.tenant_id),
+                               published->manifest.payload_group_id);
+        if (activity) {
+            std::lock_guard lock(activity->mutex);
+            activity->closing = true;
         }
     }
     return PersistAndPublishWeightLineageMutation(*mutation);
