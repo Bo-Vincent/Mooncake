@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -145,6 +146,7 @@ class WeightReconciliationTest : public MasterServiceTest {
         EXPECT_EQ(WeightAvailabilityState::DEGRADED,
                   observed->metadata.availability);
     }
+
     void CheckPublicPayloadLoss(size_t lost_payloads, bool start_cold,
                                 WeightResidencyState expected_residency,
                                 double expected_hot_ratio,
@@ -793,27 +795,22 @@ TEST_F(WeightReconciliationTest,
     CheckPublicPayloadLoss(1, true, WeightResidencyState::HOT, 1.0, true);
 }
 
-TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsHotResidency) {
-    CheckPublicPayloadLoss(1, false, WeightResidencyState::HOT, 1.0);
-}
-
-TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsColdResidency) {
-    CheckPublicPayloadLoss(1, true, WeightResidencyState::COLD, 0.0);
-}
-
-TEST_F(WeightReconciliationTest, PublicAllPayloadLossBecomesAbsent) {
-    CheckPublicPayloadLoss(2, false, WeightResidencyState::ABSENT, 0.0);
-}
-
 TEST_F(WeightReconciliationTest, RevisionWindowsAdvancePastExaminedRows) {
     MasterService service;
     const auto context = PrepareSimpleSegment(service);
     for (const auto& revision : {"00-fresh-import", "01-fresh-import"}) {
-        ASSERT_TRUE(service.BeginWeightImport({
+        const auto importing = service.BeginWeightImport({
             .identity = Identity(revision),
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
-        }));
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL},
+            .affinity_summary = {.affinity_count = 1,
+                                 .affinity_digest = std::string(64, 'c')},
+        });
+        ASSERT_TRUE(importing) << static_cast<int>(importing.error());
     }
     std::vector<WeightRevisionIdentity> identities;
     uint64_t now_ms = 0;
@@ -840,6 +837,69 @@ TEST_F(WeightReconciliationTest, RevisionWindowsAdvancePastExaminedRows) {
     }
 }
 
+TEST_F(WeightReconciliationTest,
+       UnboundedReconcileCompletesAbortedImportDelete) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    const auto identity = Identity("unbounded-delete");
+    const auto importing = service.BeginWeightImport({
+        .identity = identity,
+        .expected_payload_count = 1,
+        .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
+    });
+    ASSERT_TRUE(importing) << static_cast<int>(importing.error());
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.with_hard_pin = true;
+    config.group_ids =
+        std::vector<std::string>{importing->manifest.payload_group_id};
+    config.residency_affinity_ids =
+        std::vector<std::string>{"unbounded-affinity"};
+    config.data_type = ObjectDataType::WEIGHT;
+    PutCompletedObject(service, context.client_id, "unbounded-delete-payload",
+                       config, 1024);
+    config.residency_affinity_ids.reset();
+    config.data_type = ObjectDataType::METADATA;
+    PutCompletedObject(service, context.client_id, ManifestKey(identity),
+                       config, 128);
+    ASSERT_TRUE(service.AbortWeightImport({
+        .identity = identity,
+        .expected_metadata_generation = importing->metadata_generation,
+    }));
+    const auto deleted =
+        service.ReconcileWeightRevision({.identity = identity});
+    ASSERT_TRUE(deleted);
+    EXPECT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
+    for (const auto& key :
+         {std::string("unbounded-delete-payload"), ManifestKey(identity)}) {
+        const auto exists = service.ExistKey(key, TenantId::Default());
+        ASSERT_TRUE(exists);
+        EXPECT_FALSE(*exists) << key;
+    }
+    const auto retried =
+        service.ReconcileWeightRevision({.identity = identity});
+    ASSERT_TRUE(retried);
+    EXPECT_EQ(*deleted, *retried);
+}
+
+TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsHotResidency) {
+    CheckPublicPayloadLoss(1, false, WeightResidencyState::HOT, 1.0);
+}
+
+TEST_F(WeightReconciliationTest, PublicPayloadLossRetainsColdResidency) {
+    CheckPublicPayloadLoss(1, true, WeightResidencyState::COLD, 0.0);
+}
+
+TEST_F(WeightReconciliationTest, PublicAllPayloadLossBecomesAbsent) {
+    CheckPublicPayloadLoss(2, false, WeightResidencyState::ABSENT, 0.0);
+}
+
 TEST_F(WeightReconciliationTest, ExpiredLeaseTrafficLeavesRevisionBudget) {
     CheckContinuousLeaseTraffic(2);
 }
@@ -862,48 +922,6 @@ TEST_F(WeightReconciliationTest, UnitBudgetWithoutLeasesDoesRevisionWork) {
     ASSERT_TRUE(observed);
     EXPECT_EQ(WeightAvailabilityState::DEGRADED,
               observed->metadata.availability);
-}
-
-TEST_F(WeightReconciliationTest,
-       UnboundedReconcileCompletesAbortedImportDelete) {
-    MasterService service;
-    const auto context = PrepareSimpleSegment(service);
-    const auto identity = Identity("unbounded-delete");
-    const auto importing = service.BeginWeightImport({
-        .identity = identity,
-        .expected_payload_count = 1,
-        .expected_logical_bytes = 1024,
-    });
-    ASSERT_TRUE(importing);
-    ReplicateConfig config;
-    config.replica_num = 1;
-    config.with_hard_pin = true;
-    config.group_ids =
-        std::vector<std::string>{importing->manifest.payload_group_id};
-    config.data_type = ObjectDataType::WEIGHT;
-    PutCompletedObject(service, context.client_id, "unbounded-delete-payload",
-                       config, 1024);
-    config.data_type = ObjectDataType::METADATA;
-    PutCompletedObject(service, context.client_id, ManifestKey(identity),
-                       config, 128);
-    ASSERT_TRUE(service.AbortWeightImport({
-        .identity = identity,
-        .expected_metadata_generation = importing->metadata_generation,
-    }));
-    const auto deleted =
-        service.ReconcileWeightRevision({.identity = identity});
-    ASSERT_TRUE(deleted);
-    EXPECT_EQ(WeightAvailabilityState::DELETED, deleted->availability);
-    for (const auto& key :
-         {std::string("unbounded-delete-payload"), ManifestKey(identity)}) {
-        const auto exists = service.ExistKey(key, TenantId::Default());
-        ASSERT_TRUE(exists);
-        EXPECT_FALSE(*exists) << key;
-    }
-    const auto retried =
-        service.ReconcileWeightRevision({.identity = identity});
-    ASSERT_TRUE(retried);
-    EXPECT_EQ(*deleted, *retried);
 }
 
 TEST_F(WeightReconciliationTest,

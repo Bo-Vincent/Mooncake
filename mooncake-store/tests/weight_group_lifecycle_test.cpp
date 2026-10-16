@@ -132,6 +132,313 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
     }
 };
 
+TEST_F(WeightGroupLifecycleTest, RecreatedMetadataStartsFreshMemberSelection) {
+    const auto config = MasterServiceConfig::builder()
+                            .set_default_kv_lease_ttl(0)
+                            .set_enable_offload(true)
+                            .set_root_fs_dir("/mnt/ssd")
+                            .build();
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    const std::vector<PayloadSpec> payloads{{"unit-a1", 1024, "a"},
+                                            {"unit-a2", 1024, "a"},
+                                            {"unit-b1", 1024, "b"},
+                                            {"unit-b2", 1024, "b"}};
+    const auto ready =
+        PublishReadyWithPayloads(service, context.client_id, payloads);
+    const auto manifest_key = MakeWeightManifestKey(ready.identity);
+    const auto attach_cold = [&](const PayloadSpec& payload) {
+        ASSERT_TRUE(service.PutEnd(context.client_id, payload.key,
+                                   TenantId::Default(), ReplicaType::DISK));
+        AddLocalDiskReplica(service, context.client_id, payload.key,
+                            payload.size, "test_segment");
+    };
+    for (const auto& payload : payloads) attach_cold(payload);
+    ASSERT_TRUE(service.StartWeightResidencyOperation({
+        .identity = ready.identity,
+        .expected_metadata_generation = ready.metadata_generation,
+        .target_residency = WeightResidencyState::COLD,
+    }));
+    auto& manager = service.GetWeightStoreManager();
+    const auto initial = manager.ExportSnapshot();
+    ASSERT_EQ(1, initial.operations.size());
+    ASSERT_TRUE(initial.lineages.has_value());
+    ASSERT_EQ(1, manager.ReconcileWeightMetadataStoreOnce(
+                     ready.updated_at_ms + 1, 1));
+
+    // Observe absence before restoring the same identity and physical objects.
+    WeightMetadataSnapshot empty;
+    empty.schema_version = kWeightMetadataSchemaVersion;
+    empty.lineages = std::vector<WeightLineageMetadata>{};
+    ASSERT_TRUE(manager.RestoreSnapshot(empty));
+    EXPECT_EQ(0, manager.ReconcileWeightMetadataStoreOnce(
+                     ready.updated_at_ms + 2, 1));
+    ReplicateConfig put;
+    put.replica_num = 1;
+    put.with_hard_pin = true;
+    put.group_ids = std::vector<std::string>{ready.manifest.payload_group_id};
+    put.data_type = ObjectDataType::WEIGHT;
+    for (const auto& payload : payloads) {
+        ASSERT_TRUE(service.Remove(payload.key, TenantId::Default(), true));
+        put.residency_affinity_ids =
+            std::vector<std::string>{payload.affinity_id};
+        PutCompletedObject(service, context.client_id, payload.key, put,
+                           payload.size);
+        attach_cold(payload);
+    }
+    ASSERT_TRUE(manager.RestoreSnapshot(initial));
+    ASSERT_EQ(1, manager.ReconcileWeightMetadataStoreOnce(
+                     ready.updated_at_ms + 3, 1));
+    for (const auto& payload : payloads) {
+        const auto replicas =
+            service.GetReplicaListForAdmin(payload.key, TenantId::Default());
+        ASSERT_TRUE(replicas);
+        const bool has_memory = std::any_of(
+            replicas->replicas.begin(), replicas->replicas.end(),
+            [](const auto& replica) { return replica.is_memory_replica(); });
+        EXPECT_EQ(payload.affinity_id == "b", has_memory) << payload.key;
+    }
+    const auto manifest =
+        service.GetReplicaListForAdmin(manifest_key, TenantId::Default());
+    ASSERT_TRUE(manifest);
+    EXPECT_TRUE(std::any_of(
+        manifest->replicas.begin(), manifest->replicas.end(),
+        [](const auto& replica) { return replica.is_memory_replica(); }));
+}
+
+TEST_F(WeightGroupLifecycleTest, PublicDeletePreservesDefaultMemberBudget) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    std::vector<PayloadSpec> payloads;
+    for (size_t i = 0; i < 65; ++i) {
+        payloads.push_back({"bounded-delete-" + std::to_string(i), 1024, "a"});
+    }
+    const auto ready =
+        PublishReadyWithPayloads(service, context.client_id, payloads);
+    const auto manifest_key = MakeWeightManifestKey(ready.identity);
+    const auto first = service.DeleteWeightRevision({
+        .identity = ready.identity,
+        .expected_metadata_generation = ready.metadata_generation,
+    });
+    ASSERT_TRUE(first);
+    EXPECT_EQ(WeightAvailabilityState::DELETING, first->availability);
+    size_t remaining = 0;
+    for (const auto& payload : payloads) {
+        const auto exists = service.ExistKey(payload.key, TenantId::Default());
+        ASSERT_TRUE(exists);
+        remaining += *exists;
+    }
+    EXPECT_EQ(1, remaining);
+    const auto manifest = service.ExistKey(manifest_key, TenantId::Default());
+    ASSERT_TRUE(manifest);
+    EXPECT_TRUE(*manifest);
+    const auto second = service.DeleteWeightRevision({
+        .identity = ready.identity,
+        .expected_metadata_generation = first->metadata_generation,
+    });
+    ASSERT_TRUE(second);
+    EXPECT_EQ(WeightAvailabilityState::DELETED, second->availability);
+    for (const auto& payload : payloads) {
+        const auto exists = service.ExistKey(payload.key, TenantId::Default());
+        ASSERT_TRUE(exists);
+        EXPECT_FALSE(*exists);
+    }
+    EXPECT_FALSE(
+        service.ExistKey(manifest_key, TenantId::Default()).value_or(true));
+}
+
+TEST_F(WeightGroupLifecycleTest, TwoRetiringLineagesShareBoundedProgress) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    const WeightStoragePolicy policy{
+        .preferred_residency = WeightResidencyState::HOT,
+        .migration_mode = WeightMigrationMode::MANUAL};
+    for (const auto& revision : {"00-idle", "01-idle"}) {
+        auto identity = Identity();
+        identity.revision = revision;
+        PublishReadyWithPayloads(
+            service, context.client_id,
+            {{std::string(revision) + "-payload", 1024, "a"}}, policy,
+            identity);
+    }
+    std::vector<std::vector<PayloadSpec>> retiring_payloads;
+    uint64_t now_ms = 0;
+    for (const auto& revision : {"a-retiring", "b-retiring"}) {
+        auto identity = Identity();
+        identity.revision = revision;
+        std::vector<PayloadSpec> payloads;
+        for (int i = 0; i < 5; ++i) {
+            payloads.push_back(
+                {std::string(revision) + "-" + std::to_string(i), 1024, "a"});
+        }
+        const auto base = PublishReadyWithPayloads(service, context.client_id,
+                                                   payloads, policy, identity);
+        const auto lease = service.AcquireWeightRevisionLease({
+            .identity = base.identity,
+            .expected_metadata_generation = base.metadata_generation,
+            .holder = "hold-retirement",
+            .ttl_ms = 60'000,
+        });
+        ASSERT_TRUE(lease);
+        auto target = identity;
+        ++target.weight_generation;
+        const std::string request_id = std::string(revision) + "-upsert";
+        ASSERT_TRUE(service.BeginWeightUpsert({
+            .request_id = request_id,
+            .mode = WeightUpsertMode::PUT_FIRST,
+            .base_identity = base.identity,
+            .expected_base_metadata_generation = base.metadata_generation,
+            .target_identity = target,
+            .import = {.identity = target,
+                       .expected_payload_count = 1,
+                       .expected_logical_bytes = 1024,
+                       .policy = policy,
+                       .affinity_summary = {.affinity_count = 1,
+                                            .affinity_digest =
+                                                std::string(64, 'c')}},
+        }));
+        const auto ready_target = PublishReadyWithPayloads(
+            service, context.client_id,
+            {{std::string(revision) + "-replacement", 1024, "a"}}, policy,
+            target);
+        const auto committed = service.CommitWeightUpsert({
+            .request_id = request_id,
+            .base_identity = base.identity,
+            .target_identity = target,
+        });
+        ASSERT_TRUE(committed && committed->latest_claim);
+        ASSERT_EQ(WeightUpsertPhase::RETIRING_BASE,
+                  committed->latest_claim->phase);
+        ASSERT_TRUE(service.ReleaseWeightRevisionLease({
+            .tenant_id = identity.tenant_id,
+            .lease_id = lease->lease_id,
+        }));
+        now_ms = std::max(now_ms, ready_target.updated_at_ms + 1);
+        retiring_payloads.push_back(payloads);
+    }
+    const auto remaining = [&](const std::vector<PayloadSpec>& payloads) {
+        size_t count = 0;
+        for (const auto& payload : payloads) {
+            const auto exists =
+                service.ExistKey(payload.key, TenantId::Default());
+            EXPECT_TRUE(exists);
+            count += exists.value_or(false);
+        }
+        return count;
+    };
+    for (const auto& payloads : retiring_payloads)
+        ASSERT_EQ(5, remaining(payloads));
+    // Idle revisions consume the revision-first tick; both active lineages
+    // must make physical progress on the two lineage-first ticks.
+    for (int tick = 0; tick < 3; ++tick) {
+        EXPECT_LE(
+            MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+                now_ms + tick, 2),
+            2);
+    }
+    EXPECT_EQ(3, remaining(retiring_payloads[0]));
+    EXPECT_EQ(3, remaining(retiring_payloads[1]));
+}
+
+TEST_F(WeightGroupLifecycleTest,
+       ExpiredLeaseTrafficLeavesBothCleanupPhasesProgress) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    const WeightStoragePolicy policy{
+        .preferred_residency = WeightResidencyState::HOT,
+        .migration_mode = WeightMigrationMode::MANUAL};
+    auto identity = Identity();
+    identity.revision = "a-retiring-with-lease-traffic";
+    const std::vector<PayloadSpec> payloads{
+        {"lease-traffic-retire-a", 1024, "a"},
+        {"lease-traffic-retire-b", 1024, "a"},
+        {"lease-traffic-retire-c", 1024, "a"}};
+    const auto base = PublishReadyWithPayloads(service, context.client_id,
+                                               payloads, policy, identity);
+    const auto hold = service.AcquireWeightRevisionLease({
+        .identity = identity,
+        .expected_metadata_generation = base.metadata_generation,
+        .holder = "hold-retirement",
+        .ttl_ms = 60'000,
+    });
+    ASSERT_TRUE(hold);
+    auto target = identity;
+    ++target.weight_generation;
+    ASSERT_TRUE(service.BeginWeightUpsert({
+        .request_id = "lease-traffic-retirement",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = identity,
+        .expected_base_metadata_generation = base.metadata_generation,
+        .target_identity = target,
+        .import = {.identity = target,
+                   .expected_payload_count = 1,
+                   .expected_logical_bytes = 1024,
+                   .policy = policy,
+                   .affinity_summary = {.affinity_count = 1,
+                                        .affinity_digest =
+                                            std::string(64, 'c')}},
+    }));
+    PublishReadyWithPayloads(service, context.client_id,
+                             {{"lease-traffic-target", 1024, "a"}}, policy,
+                             target);
+    const auto committed = service.CommitWeightUpsert({
+        .request_id = "lease-traffic-retirement",
+        .base_identity = identity,
+        .target_identity = target,
+    });
+    ASSERT_TRUE(committed && committed->latest_claim);
+    ASSERT_EQ(WeightUpsertPhase::RETIRING_BASE, committed->latest_claim->phase);
+    ASSERT_TRUE(service.ReleaseWeightRevisionLease(
+        {.tenant_id = identity.tenant_id, .lease_id = hold->lease_id}));
+    auto damaged_identity = Identity();
+    damaged_identity.revision = "b-damaged-with-lease-traffic";
+    const auto damaged = PublishReadyWithPayloads(
+        service, context.client_id, {{"lease-traffic-damaged", 1024, "a"}},
+        policy, damaged_identity);
+    ASSERT_TRUE(MasterServiceTestPeer(service).DropWeightGroupMemberForTesting(
+        damaged.identity, "lease-traffic-damaged"));
+    auto healthy_identity = Identity();
+    healthy_identity.revision = "z-healthy-with-lease-traffic";
+    const auto healthy = PublishReadyWithPayloads(
+        service, context.client_id, {{"lease-traffic-healthy", 1024, "a"}},
+        policy, healthy_identity);
+    size_t previously_released = 0;
+    for (size_t tick = 0; tick < 16; ++tick) {
+        const auto lease = service.AcquireWeightRevisionLease({
+            .identity = healthy.identity,
+            .expected_metadata_generation = healthy.metadata_generation,
+            .holder = "continuous-" + std::to_string(tick),
+            .ttl_ms = 60'000,
+        });
+        ASSERT_TRUE(lease);
+        EXPECT_LE(
+            MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+                lease->expires_at_ms + 1, 1),
+            1);
+        if ((tick + 1) % 4 == 0) {
+            const auto snapshot =
+                service.GetWeightStoreManager().ExportSnapshot();
+            ASSERT_LE(snapshot.leases.size(), tick + 1);
+            const auto released = tick + 1 - snapshot.leases.size();
+            EXPECT_GT(released, previously_released);
+            previously_released = released;
+        }
+    }
+    size_t remaining = 0;
+    for (const auto& payload : payloads) {
+        const auto exists = service.ExistKey(payload.key, TenantId::Default());
+        ASSERT_TRUE(exists);
+        remaining += *exists;
+    }
+    EXPECT_LT(remaining, payloads.size());
+    const auto observed =
+        service.GetWeightRevision({.identity = damaged.identity});
+    ASSERT_TRUE(observed);
+    EXPECT_EQ(WeightAvailabilityState::DEGRADED,
+              observed->metadata.availability);
+}
+
 TEST_F(WeightGroupLifecycleTest, BlockedRetirementDoesNotStarveOtherLineages) {
     MasterService service;
     const auto source = PrepareSimpleSegment(service);
@@ -1631,73 +1938,6 @@ TEST_F(WeightGroupLifecycleTest, RehydrateQueuesAndCompletesWholeManagedGroup) {
         QueryWeightOperationRequest{.operation_id = started->operation_id});
     ASSERT_TRUE(completed.has_value());
     EXPECT_EQ("completed", completed->message);
-}
-
-TEST_F(WeightGroupLifecycleTest, RecreatedMetadataStartsFreshMemberSelection) {
-    const auto config = MasterServiceConfig::builder()
-                            .set_default_kv_lease_ttl(0)
-                            .set_enable_offload(true)
-                            .set_root_fs_dir("/mnt/ssd")
-                            .build();
-    MasterService service(config);
-    const auto context = PrepareSimpleSegment(service);
-    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
-    const auto ready = PublishReady(service, context.client_id);
-    const auto attach_cold = [&](const std::string& key, uint64_t size) {
-        ASSERT_TRUE(service.PutEnd(context.client_id, key, TenantId::Default(),
-                                   ReplicaType::DISK));
-        AddLocalDiskReplica(service, context.client_id, key, size,
-                            "test_segment");
-    };
-    attach_cold("payload-a", 1024);
-    attach_cold(ManifestKey(), 128);
-    ASSERT_TRUE(service.StartWeightResidencyOperation({
-        .identity = ready.identity,
-        .expected_metadata_generation = ready.metadata_generation,
-        .target_residency = WeightResidencyState::COLD,
-    }));
-    auto& manager = MasterServiceTestPeer::WeightManager(service);
-    const auto initial = manager.ExportSnapshot();
-    ASSERT_EQ(1, manager.ReconcileWeightMetadataStoreOnce(
-                     ready.updated_at_ms + 1, 1));
-
-    // Replace the metadata registry, then let its real sweep observe absence.
-    ASSERT_TRUE(manager.RestoreSnapshot(WeightMetadataSnapshot{}));
-    EXPECT_EQ(0, manager.ReconcileWeightMetadataStoreOnce(
-                     ready.updated_at_ms + 2, 1));
-    // Restore the physical initial state through ordinary object APIs while
-    // the old revision no longer owns the group.
-    ReplicateConfig put;
-    put.replica_num = 1;
-    put.with_hard_pin = true;
-    put.group_ids = std::vector<std::string>{ready.manifest.payload_group_id};
-    for (const auto& key : {std::string("payload-a"), ManifestKey()}) {
-        ASSERT_TRUE(service.Remove(key, TenantId::Default(), true));
-        put.data_type = key == "payload-a" ? ObjectDataType::WEIGHT
-                                           : ObjectDataType::METADATA;
-        const uint64_t size = key == "payload-a" ? 1024 : 128;
-        PutCompletedObject(service, context.client_id, key, put, size);
-        attach_cold(key, size);
-    }
-    ASSERT_TRUE(manager.RestoreSnapshot(initial));
-    ASSERT_EQ(1, manager.ReconcileWeightMetadataStoreOnce(
-                     ready.updated_at_ms + 3, 1));
-    const auto payload =
-        service.GetReplicaList("payload-a", TenantId::Default());
-    ASSERT_TRUE(payload);
-    bool payload_has_memory = false;
-    for (const auto& replica : payload->replicas) {
-        payload_has_memory |= replica.is_memory_replica();
-    }
-    EXPECT_FALSE(payload_has_memory);
-    const auto manifest =
-        service.GetReplicaList(ManifestKey(), TenantId::Default());
-    ASSERT_TRUE(manifest);
-    bool manifest_has_memory = false;
-    for (const auto& replica : manifest->replicas) {
-        manifest_has_memory |= replica.is_memory_replica();
-    }
-    EXPECT_TRUE(manifest_has_memory);
 }
 
 TEST_F(WeightGroupLifecycleTest, UnitBudgetBoundsEvictionAndPromotion) {
