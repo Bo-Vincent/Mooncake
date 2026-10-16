@@ -73,6 +73,10 @@ export MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES=1048576
 set +e
 python3 "$SCRIPT_DIR/weight_upsert_tcp_e2e.py" | tee "$LOG_DIR/client.log"
 RC=${PIPESTATUS[0]}
+if [[ "$RC" -eq 0 ]]; then
+  python3 "$SCRIPT_DIR/weight_upsert_tcp_e2e.py" --cancel-only | tee "$LOG_DIR/cancel-client.log"
+  RC=${PIPESTATUS[0]}
+fi
 set -e
 
 if [[ "$RC" -eq 0 ]]; then
