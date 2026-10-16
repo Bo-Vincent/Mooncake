@@ -349,7 +349,6 @@ bool OpLogApplier::ApplyWeightMetadataUpsert(const OpLogEntry& entry) {
             metadata_store_->GetWeightOperation(upsert.operation->operation_id);
         if (!previous ||
             current->operation_id != upsert.operation->operation_id ||
-            current->operation != previous->operation ||
             current->metadata_generation !=
                 previous->fenced_metadata_generation ||
             IsWeightOperationTerminal(previous->message) ||

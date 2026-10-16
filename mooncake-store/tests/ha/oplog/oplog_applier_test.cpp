@@ -349,32 +349,34 @@ TEST_F(OpLogApplierTest, CancelledOperationRejectsLateProgressReplay) {
     StandbyMetadataStore standby;
     OpLogApplier applier(&standby, cluster_id_);
     auto metadata = MakeWeightMetadata(1);
+    metadata.policy = {.preferred_residency = WeightResidencyState::HOT,
+                       .migration_mode = WeightMigrationMode::MANUAL};
     const auto key = MakeWeightRevisionMetadataKey(metadata.identity);
     ASSERT_TRUE(applier.ApplyOpLogEntry(
         MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT, key,
                   SerializeWeightUpsert(metadata))));
     metadata.metadata_generation = 2;
-    metadata.operation = WeightOperationState::EVICTING;
     metadata.operation_id = 9;
     metadata.updated_at_ms = 200;
     WeightResidencyOperation operation{
         .operation_id = 9,
         .identity = metadata.identity,
-        .operation = WeightOperationState::EVICTING,
+        .kind = WeightOperationKind::MIGRATING,
         .target_residency = WeightResidencyState::COLD,
         .fenced_metadata_generation = 2,
         .started_at_ms = 200,
         .updated_at_ms = 200,
-        .processed_members = 0,
-        .total_members = 2,
+        .processed_units = 0,
+        .total_units = 2,
+        .processed_bytes = 0,
+        .total_bytes = 2048,
     };
     const auto active_payload = SerializeWeightUpsert(metadata, operation);
     ASSERT_TRUE(applier.ApplyOpLogEntry(
         MakeEntry(2, OpType::WEIGHT_METADATA_UPSERT, key, active_payload)));
     metadata.metadata_generation = 3;
     metadata.availability = WeightAvailabilityState::DELETING;
-    metadata.operation = WeightOperationState::NONE;
-    metadata.operation_id = 0;
+    metadata.operation_id.reset();
     metadata.updated_at_ms = 300;
     operation.message = kWeightOperationCancelledMessage;
     operation.updated_at_ms = 300;
@@ -409,6 +411,7 @@ TEST_F(OpLogApplierTest, CancelledOperationRejectsLateProgressReplay) {
     metadata.updated_at_ms = 400;
     metadata.availability = WeightAvailabilityState::DELETED;
     metadata.residency = WeightResidencyState::ABSENT;
+    metadata.observed_hot_ratio = 0.0;
     ASSERT_TRUE(applier.ApplyOpLogEntry(
         MakeEntry(4, OpType::WEIGHT_METADATA_UPSERT, key,
                   SerializeWeightUpsert(metadata))));
@@ -423,29 +426,33 @@ TEST_F(OpLogApplierTest, CancelledOperationRejectsLateProgressReplay) {
 }
 
 TEST_F(OpLogApplierTest, RejectsCancellationThatChangesPendingOperation) {
-    for (const std::string changed : {"operation_id", "target", "progress"}) {
+    for (const std::string changed :
+         {"operation_id", "target", "progress", "bytes"}) {
         SCOPED_TRACE(changed);
         StandbyMetadataStore standby;
         OpLogApplier applier(&standby, cluster_id_);
         auto metadata = MakeWeightMetadata(1);
+        metadata.policy = {.preferred_residency = WeightResidencyState::HOT,
+                           .migration_mode = WeightMigrationMode::MANUAL};
         const auto key = MakeWeightRevisionMetadataKey(metadata.identity);
         ASSERT_TRUE(applier.ApplyOpLogEntry(
             MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT, key,
                       SerializeWeightUpsert(metadata))));
         metadata.metadata_generation = 2;
         metadata.updated_at_ms = 200;
-        metadata.operation = WeightOperationState::EVICTING;
         metadata.operation_id = 9;
         WeightResidencyOperation operation{
             .operation_id = 9,
             .identity = metadata.identity,
-            .operation = WeightOperationState::EVICTING,
+            .kind = WeightOperationKind::MIGRATING,
             .target_residency = WeightResidencyState::COLD,
             .fenced_metadata_generation = 2,
             .started_at_ms = 200,
             .updated_at_ms = 200,
-            .processed_members = 0,
-            .total_members = 2,
+            .processed_units = 0,
+            .total_units = 2,
+            .processed_bytes = 0,
+            .total_bytes = 2048,
         };
         ASSERT_TRUE(applier.ApplyOpLogEntry(
             MakeEntry(2, OpType::WEIGHT_METADATA_UPSERT, key,
@@ -455,16 +462,17 @@ TEST_F(OpLogApplierTest, RejectsCancellationThatChangesPendingOperation) {
         metadata.metadata_generation = 3;
         metadata.updated_at_ms = 300;
         metadata.availability = WeightAvailabilityState::DELETING;
-        metadata.operation = WeightOperationState::NONE;
-        metadata.operation_id = 0;
+        metadata.operation_id.reset();
         operation.message = kWeightOperationCancelledMessage;
         operation.updated_at_ms = 300;
         if (changed == "operation_id") {
             operation.operation_id = 10;
         } else if (changed == "target") {
             operation.target_residency = WeightResidencyState::HOT;
+        } else if (changed == "progress") {
+            operation.processed_units = 1;
         } else {
-            operation.processed_members = 1;
+            operation.processed_bytes = 1;
         }
         ReplayDiagnosticSink sink;
         EXPECT_FALSE(applier.ApplyOpLogEntry(
@@ -491,18 +499,22 @@ TEST_F(OpLogApplierTest, RejectsCancellationWithoutPriorOperation) {
     OpLogApplier applier(&standby, cluster_id_);
     const auto before = standby.SnapshotWeightMetadata();
     auto metadata = MakeWeightMetadata(1);
+    metadata.policy = {.preferred_residency = WeightResidencyState::HOT,
+                       .migration_mode = WeightMigrationMode::MANUAL};
     metadata.availability = WeightAvailabilityState::DELETING;
     ASSERT_TRUE(ValidateWeightRevisionMetadata(metadata).ok());
     WeightResidencyOperation operation{
         .operation_id = 9,
         .identity = metadata.identity,
-        .operation = WeightOperationState::REHYDRATING,
+        .kind = WeightOperationKind::MIGRATING,
         .target_residency = WeightResidencyState::HOT,
         .fenced_metadata_generation = 0,
         .started_at_ms = 100,
         .updated_at_ms = 101,
-        .processed_members = 0,
-        .total_members = 2,
+        .processed_units = 0,
+        .total_units = 2,
+        .processed_bytes = 0,
+        .total_bytes = 2048,
         .cursor = {},
         .message = kWeightOperationCancelledMessage,
     };

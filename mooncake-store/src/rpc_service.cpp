@@ -1958,8 +1958,7 @@ WrappedMasterService::BeginWeightUpsert(const BeginWeightUpsertRequest& request,
     return WithWeightRequestTenant(
         request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
         [this](const auto& bound) {
-            return master_service_.GetWeightStoreManager().BeginWeightUpsert(
-                bound);
+            return master_service_.BeginWeightUpsert(bound);
         });
 }
 
@@ -1969,8 +1968,7 @@ WrappedMasterService::CommitWeightUpsert(
     return WithWeightRequestTenant(
         request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
         [this](const auto& bound) {
-            return master_service_.GetWeightStoreManager().CommitWeightUpsert(
-                bound);
+            return master_service_.CommitWeightUpsert(bound);
         });
 }
 
@@ -1980,8 +1978,7 @@ WrappedMasterService::AbortWeightUpsert(const AbortWeightUpsertRequest& request,
     return WithWeightRequestTenant(
         request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
         [this](const auto& bound) {
-            return master_service_.GetWeightStoreManager().AbortWeightUpsert(
-                bound);
+            return master_service_.AbortWeightUpsert(bound);
         });
 }
 
@@ -1991,8 +1988,7 @@ WrappedMasterService::GetWeightLineage(const GetWeightLineageRequest& request,
     return WithWeightRequestTenant(
         request, tenant_id, master_service_.IsTenantQuotaEnabled(), false,
         [this](const auto& bound) {
-            return master_service_.GetWeightStoreManager().GetWeightLineage(
-                bound);
+            return master_service_.GetWeightLineage(bound);
         });
 }
 
@@ -2042,8 +2038,7 @@ WrappedMasterService::UpdateWeightPolicy(
     return WithWeightRequestTenant(
         request, tenant_id, master_service_.IsTenantQuotaEnabled(), true,
         [this](const auto& bound) {
-            return master_service_.GetWeightStoreManager().UpdateWeightPolicy(
-                bound);
+            return master_service_.UpdateWeightPolicy(bound);
         });
 }
 

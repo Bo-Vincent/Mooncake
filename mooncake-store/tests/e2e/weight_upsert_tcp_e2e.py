@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import os
 from pathlib import Path
@@ -186,7 +187,7 @@ def _run_replacements(client, store, identity, payload_key, payload, suffix):
     print("put-first and delete-first replacement PASSED", flush=True)
 
 
-def _run_lifecycle(client, store, suffix: str) -> None:
+def _run_lifecycle(client, store, suffix: str, *, cancel_only=False) -> None:
     identity = ("default", "e2e", f"lifecycle-{suffix}", "main", 1)
     prefix = "/".join(str(part) for part in identity[1:])
     manifest_key = f"weights/{prefix}/manifest"
@@ -264,14 +265,24 @@ def _run_lifecycle(client, store, suffix: str) -> None:
     released = client.release_weight_revision_lease("default", lease.lease_id)
     assert released[1:] == (0, 0), released
 
-    def wait_for(residency):
-        deadline = time.monotonic() + BACKGROUND_CONVERGENCE_TIMEOUT_S
+    def wait_for(
+        residency,
+        operation_id,
+        timeout_s=BACKGROUND_CONVERGENCE_TIMEOUT_S,
+    ):
+        deadline = time.monotonic() + timeout_s
         last_metadata = None
         while time.monotonic() < deadline:
             result = _require_success(
                 client.get_weight_revision(*identity),
                 "query residency",
             ).metadata
+            operation = _require_success(
+                client.query_weight_operation(identity[0], operation_id),
+                "query migration",
+            )
+            if operation.message == "cancelled":
+                raise AssertionError(f"migration {operation_id} was cancelled")
             last_metadata = {
                 "generation": result.metadata_generation,
                 "availability": result.availability,
@@ -279,18 +290,24 @@ def _run_lifecycle(client, store, suffix: str) -> None:
                 "operation_id": result.operation_id,
                 "observed_hot_ratio": result.observed_hot_ratio,
             }
-            if result.residency == residency and result.operation_id is None:
+            if (
+                operation.message == "completed"
+                and result.availability == store.WeightAvailabilityState.READY
+                and result.residency == residency
+                and result.operation_id is None
+            ):
                 return result
             time.sleep(0.2)
         raise AssertionError(
             f"residency did not converge to {residency}; last metadata={last_metadata}"
         )
 
-    for target, hot_count in (
+    targets = (
         (store.WeightResidencyState.COLD, 0),
         (store.WeightResidencyState.HOT, 2),
         (store.WeightResidencyState.MIXED, 1),
-    ):
+    )
+    for target, hot_count in () if cancel_only else targets:
         current = _require_success(client.get_weight_revision(*identity), "get policy")
         updated = _require_success(
             client.update_weight_policy(
@@ -313,7 +330,7 @@ def _run_lifecycle(client, store, suffix: str) -> None:
             "start migration",
         )
         assert operation.operation_id != 0
-        observed = wait_for(target)
+        observed = wait_for(target, operation.operation_id)
         assert observed.availability == store.WeightAvailabilityState.READY
         replicas = client.batch_get_replica_desc(list(payloads) + [manifest_key])
         actual_hot = sum(
@@ -332,10 +349,55 @@ def _run_lifecycle(client, store, suffix: str) -> None:
     current = _require_success(
         client.get_weight_revision(*identity), "get before delete"
     )
+    if cancel_only:
+        pending = _require_success(
+            client.start_weight_residency_operation(
+                *identity,
+                current.metadata.metadata_generation,
+                int(store.WeightResidencyState.COLD),
+                None,
+            ),
+            "start migration before cancellation",
+        )
+        # This client has no SSD worker, so COLD cannot complete on any tick.
+        deadline = time.monotonic() + BACKGROUND_CONVERGENCE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            stalled = _require_success(
+                client.query_weight_operation(identity[0], pending.operation_id),
+                "query stalled migration",
+            )
+            assert stalled.message not in ("completed", "cancelled")
+            if stalled.message == "cold replica write failed":
+                break
+            time.sleep(0.2)
+        else:
+            raise AssertionError("migration did not observe unavailable SSD worker")
+        current = _require_success(
+            client.get_weight_revision(*identity), "get stalled revision"
+        )
+        assert current.metadata.operation_id == pending.operation_id
+        assert current.metadata.residency == store.WeightResidencyState.HOT
     _require_success(
         client.delete_weight_revision(*identity, current.metadata.metadata_generation),
         "delete revision",
     )
+    if cancel_only:
+        cancelled = _require_success(
+            client.query_weight_operation(identity[0], pending.operation_id),
+            "query cancelled migration",
+        )
+        assert cancelled.message == "cancelled"
+        assert cancelled.target_residency == pending.target_residency
+        assert cancelled.target_hot_ratio == pending.target_hot_ratio
+        assert cancelled.processed_units == stalled.processed_units
+        assert cancelled.processed_bytes == stalled.processed_bytes
+        try:
+            wait_for(pending.target_residency, pending.operation_id, timeout_s=1)
+        except AssertionError as exc:
+            assert "cancelled" in str(exc), str(exc)
+        else:
+            raise AssertionError("cancelled migration was reported as successful")
+        print("stalled migration cancellation PASSED", flush=True)
     deadline = time.monotonic() + BACKGROUND_CONVERGENCE_TIMEOUT_S
     last_metadata = None
     while time.monotonic() < deadline:
@@ -359,7 +421,7 @@ def _run_lifecycle(client, store, suffix: str) -> None:
     print("lifecycle lease, policy, migration, delete PASSED", flush=True)
 
 
-def run() -> int:
+def run(*, cancel_only=False) -> int:
     store = _require_store()
     master = os.getenv("MOONCAKE_MASTER", "127.0.0.1:50051")
     metadata = os.getenv("MOONCAKE_TE_META_DATA_SERVER", "P2PHANDSHAKE")
@@ -376,7 +438,7 @@ def run() -> int:
         "",
         master,
         None,
-        True,
+        not cancel_only,
     )
     print(f"setup_ret {setup_ret}", flush=True)
     if setup_ret != 0:
@@ -397,6 +459,9 @@ def run() -> int:
     affinity_digest = hashlib.sha256(b"rank-0").hexdigest()
 
     try:
+        if cancel_only:
+            _run_lifecycle(client, store, suffix, cancel_only=True)
+            return 0
         importing = _require_success(
             client.begin_weight_import(
                 tenant,
@@ -568,4 +633,6 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(run())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cancel-only", action="store_true")
+    sys.exit(run(cancel_only=parser.parse_args().cancel_only))

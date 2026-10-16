@@ -171,8 +171,8 @@ removal produces the retained `DELETED`/`ABSENT` tombstone.
 For an incomplete revision, residency describes the readable members still present;
 `DEGRADED` reports the missing required members. Missing members alone do not
 mean the remaining objects span multiple storage tiers.
-`observed_hot_ratio` divides observed payload bytes with memory replicas by
-observed payload bytes, excluding the resident manifest. Completeness still
+`observed_hot_ratio` divides readable payload bytes with memory replicas by
+readable payload bytes, excluding the resident manifest. Completeness still
 requires the manifest's full payload count, byte count, hash, and affinities;
 a partial revision cannot complete migration merely by reaching its target ratio.
 
@@ -288,8 +288,11 @@ per-object primitives:
 - deletion blocks new leases, waits for live leases, removes payload objects,
   removes the manifest last, verifies absence, and retains a tombstone.
 
-An explicit COLD request requires a readable cold copy of every member at
-admission; otherwise it returns `NOT_READY`. An explicit delete may cancel a
+The member-based PR3 protocol requires existing cold copies at COLD admission.
+This affinity-aware integration instead queues payload offload for both MANUAL
+and AUTO migration and keeps the manifest resident in memory. Progress depends
+on available offload and promotion resources; admission does not guarantee
+convergence in every deployment. An explicit delete may cancel a
 pending residency operation, including one stalled by missing replicas or
 promotion capacity. After the ordinary generation and lease checks, cancellation
 and `DELETING` publish together in one durable record, before physical removal.

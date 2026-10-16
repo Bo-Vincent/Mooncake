@@ -348,6 +348,16 @@ TEST_F(WeightReconciliationTest, ConfiguredIdleTimeoutControlsAbandonment) {
         .identity = Identity("configured-idle"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
@@ -368,12 +378,23 @@ TEST_F(WeightReconciliationTest, AcceptedPutStartRefreshesImportInactivity) {
         .identity = Identity("active-start"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     ReplicateConfig config;
     config.replica_num = 1;
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
     ASSERT_TRUE(service.PutStart(context.client_id, "active-start-payload",
@@ -394,11 +415,22 @@ TEST_F(WeightReconciliationTest, AcceptedPutEndRefreshesImportInactivity) {
         .identity = Identity("active-end"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     ReplicateConfig config;
     config.replica_num = 1;
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
     ASSERT_TRUE(service.PutStart(context.client_id, "active-end-payload",
@@ -427,11 +459,22 @@ TEST_F(WeightReconciliationTest,
         .identity = Identity("active-upsert"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     ReplicateConfig config;
     config.replica_num = 1;
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
     PutCompletedObject(service, context.client_id, "active-upsert-payload",
@@ -658,12 +701,23 @@ TEST_F(WeightReconciliationTest,
         .identity = Identity("idle-retries"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     };
     const auto importing = service.BeginWeightImport(request);
     ASSERT_TRUE(importing);
     ReplicateConfig config;
     config.replica_num = 1;
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
     PutCompletedObject(service, context.client_id, "idle-retries-payload",
@@ -699,7 +753,7 @@ TEST_F(WeightReconciliationTest, UnreadableMemberDoesNotChangeHotResidency) {
     {
         MasterServiceTestPeer::MetadataAccessorRW member(
             &service, MasterServiceTestPeer::ObjectIdentity{
-                          TenantId::Default(), "unreadable-payload"});
+                          TenantId::Default(), ManifestKey(ready.identity)});
         ASSERT_TRUE(member.Exists());
         member.Get().VisitReplicas(
             [](const Replica&) { return true; },
@@ -718,6 +772,16 @@ TEST_F(WeightReconciliationTest, RestoredImportGetsFullInactivityGrace) {
         .identity = Identity("restored-import"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     auto snapshot =
