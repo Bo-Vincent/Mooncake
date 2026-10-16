@@ -11,7 +11,7 @@ MASTER_HOST=${MASTER_RPC%:*}
 MASTER_PORT=${MASTER_RPC##*:}
 
 MASTER_BIN="$BUILD_DIR/mooncake-store/src/mooncake_master"
-STORE_SO=$(ls "$BUILD_DIR"/mooncake-integration/store.cpython-*.so 2>/dev/null | head -1 || true)
+STORE_SO=$(ls "$BUILD_DIR"/mooncake-integration/_store.cpython-*.so 2>/dev/null | head -1 || true)
 MASTER_PID=""
 
 cleanup() {
@@ -28,9 +28,14 @@ if [[ ! -x "$MASTER_BIN" ]]; then
   exit 2
 fi
 if [[ -z "$STORE_SO" ]]; then
-  echo "missing store python module under $BUILD_DIR/mooncake-integration" >&2
+  echo "missing _store python module under $BUILD_DIR/mooncake-integration" >&2
   exit 3
 fi
+
+STORE_SO="$(cd -- "$(dirname -- "$STORE_SO")" && pwd)/$(basename -- "$STORE_SO")"
+NATIVE_NAMESPACE=$(mktemp -d "$LOG_DIR/native-namespace.XXXXXX")
+mkdir -p "$NATIVE_NAMESPACE/mooncake"
+ln -s "$STORE_SO" "$NATIVE_NAMESPACE/mooncake/$(basename -- "$STORE_SO")"
 
 "$MASTER_BIN" \
   --rpc_address="$MASTER_HOST" \
@@ -51,7 +56,9 @@ if ! kill -0 "$MASTER_PID" >/dev/null 2>&1; then
   exit 4
 fi
 
-export PYTHONPATH="$BUILD_DIR/mooncake-integration${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO_ROOT/python:$NATIVE_NAMESPACE"
+export MOONCAKE_STORE_BACKEND=cpp
+export MOONCAKE_E2E_STORE_SO="$STORE_SO"
 export LD_LIBRARY_PATH="$BUILD_DIR/mooncake-store/src:$BUILD_DIR/mooncake-common:$BUILD_DIR/mooncake-transfer-engine/src${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export MOONCAKE_PROTOCOL=tcp
 export MOONCAKE_MASTER="$MASTER_RPC"
