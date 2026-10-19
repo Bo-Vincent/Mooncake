@@ -38,9 +38,8 @@ struct StandbyObjectMetadata {
     ObjectDataType data_type{
         ObjectDataType::UNKNOWN};                  // Data type classification
     struct_pack::compatible<bool, 1> hard_pinned;  // Eviction protection
-    struct_pack::compatible<std::string, 3> residency_affinity_id;
-
     struct_pack::compatible<std::string, 2> session_id;
+    struct_pack::compatible<std::string, 3> residency_affinity_id;
 
     StandbyObjectMetadata() = default;
 
@@ -108,9 +107,8 @@ struct MetadataPayload {
     struct_pack::compatible<std::string, 1> group_id;      // Tenant group
     struct_pack::compatible<ObjectDataType, 1> data_type;  // Data type
     struct_pack::compatible<bool, 1> hard_pinned;          // Hard pin state
-    struct_pack::compatible<std::string, 3> residency_affinity_id;
-
     struct_pack::compatible<std::string, 2> session_id;
+    struct_pack::compatible<std::string, 3> residency_affinity_id;
 
     YLT_REFL(MetadataPayload, client_id, size, replicas, group_id, data_type,
              hard_pinned, session_id, residency_affinity_id);

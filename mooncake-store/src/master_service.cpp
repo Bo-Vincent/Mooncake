@@ -1773,8 +1773,7 @@ MasterService::EvictManagedWeightMembersToCold(
         const uint64_t after_charge = CompletedMemoryQuotaCharge(metadata);
         if (enable_multi_tenants_ && before_charge > after_charge) {
             auto released = metadata.quota_ledger.ReleaseCommitted(
-                accessor.QuotaAccount(),
-                before_charge - after_charge);
+                accessor.QuotaAccount(), before_charge - after_charge);
             LogTenantQuotaLedgerError(released, "release_committed", tenant_id,
                                       member_key);
         }
@@ -3765,13 +3764,13 @@ tl::expected<void, ErrorCode> MasterService::PublishRestoredObjects(
             // writer held off, so this is a key the objects name twice.
             return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
         }
-        const route::Generation generation = accessor.Publish(
-            standby_meta.client_id, now, standby_meta.size,
-            std::move(object.replicas), std::nullopt,
-            standby_meta.hard_pinned.value_or(false), standby_meta.data_type,
-            standby_meta.group_id,
-            standby_meta.residency_affinity_id.value_or(""), object.tenant_id,
-            object.user_key);
+        const route::Generation generation =
+            accessor.Publish(standby_meta.client_id, now, standby_meta.size,
+                             std::move(object.replicas), std::nullopt,
+                             standby_meta.hard_pinned.value_or(false),
+                             standby_meta.data_type, standby_meta.group_id,
+                             standby_meta.residency_affinity_id.value_or(""),
+                             object.tenant_id, object.user_key);
         auto& metadata = accessor.Get();
         metadata.session_id = standby_meta.session_id.value_or("");
         if (!standby_meta.group_id.empty()) {
@@ -5280,8 +5279,7 @@ auto MasterService::InsertMetadata(
 auto MasterService::AllocateAndInsertMetadata(
     MetadataAccessorRW& accessor, const UUID& client_id, uint64_t value_length,
     const ReplicateConfig& config, const std::string& writer_host_id,
-    const std::string& group_id,
-    const std::string& residency_affinity_id,
+    const std::string& group_id, const std::string& residency_affinity_id,
     const std::chrono::system_clock::time_point& now,
     const ResolvedSoftPinRequest& soft_pin_request,
     std::optional<std::chrono::system_clock::time_point>
@@ -5307,9 +5305,10 @@ auto MasterService::AllocateAndInsertMetadata(
     }
 
     auto insert_result = InsertMetadata(
-        accessor, client_id, value_length, config, group_id, residency_affinity_id, now,
-        soft_pin_request, std::move(allocation_result.value()),
-        pending_quota_charge, std::move(committed_soft_pin_timeout));
+        accessor, client_id, value_length, config, group_id,
+        residency_affinity_id, now, soft_pin_request,
+        std::move(allocation_result.value()), pending_quota_charge,
+        std::move(committed_soft_pin_timeout));
     if (!insert_result) {
         ReleaseTenantQuota(accessor.QuotaAccount(), pending_quota_charge);
     }
@@ -5480,11 +5479,13 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(plan.error());
     }
     std::optional<std::unique_lock<std::mutex>> weight_group_operation_lock;
-    if (!plan->group_id.empty() && weight_manager_.IsManagedGroup(plan->group_id)) {
-        weight_group_operation_lock.emplace(weight_manager_.LockGroup(
-            object_id.tenant_id, plan->group_id));
+    if (!plan->group_id.empty() &&
+        weight_manager_.IsManagedGroup(plan->group_id)) {
+        weight_group_operation_lock.emplace(
+            weight_manager_.LockGroup(object_id.tenant_id, plan->group_id));
         if (!weight_manager_.AllowsGroupMemberMutation(plan->group_id)) {
-            return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+            return tl::make_unexpected(
+                ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
         }
     }
 
@@ -5536,8 +5537,8 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
         return AllocateAndInsertMetadata(
             accessor, client_id, slice_length, config, plan->writer_host_id,
-            plan->group_id, plan->residency_affinity_id, now, plan->soft_pin_request, std::nullopt,
-            dfs_allocation_failed);
+            plan->group_id, plan->residency_affinity_id, now,
+            plan->soft_pin_request, std::nullopt, dfs_allocation_failed);
     };
 
     // Tenant over-quota remains a background-eviction concern. Bucket-count
@@ -5793,7 +5794,8 @@ auto MasterService::AddReplicaForRetainedClient(const UUID& client_id,
             client_id, std::chrono::system_clock::now(),
             replica.get_descriptor().get_local_disk_descriptor().object_size,
             std::vector<Replica>{}, std::nullopt, false,
-            ObjectDataType::UNKNOWN, std::string{}, std::string{}, object_id.tenant_id, key);
+            ObjectDataType::UNKNOWN, std::string{}, std::string{},
+            object_id.tenant_id, key);
     }
     auto& metadata = accessor.Get();
     const auto previous_kv_media = KvMediaSnapshot(metadata);
@@ -6064,11 +6066,13 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(plan.error());
     }
     std::optional<std::unique_lock<std::mutex>> weight_group_operation_lock;
-    if (!plan->group_id.empty() && weight_manager_.IsManagedGroup(plan->group_id)) {
-        weight_group_operation_lock.emplace(weight_manager_.LockGroup(
-            object_id.tenant_id, plan->group_id));
+    if (!plan->group_id.empty() &&
+        weight_manager_.IsManagedGroup(plan->group_id)) {
+        weight_group_operation_lock.emplace(
+            weight_manager_.LockGroup(object_id.tenant_id, plan->group_id));
         if (!weight_manager_.AllowsGroupMemberMutation(plan->group_id)) {
-            return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+            return tl::make_unexpected(
+                ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
         }
     }
     const std::string& writer_host_id = plan->writer_host_id;
@@ -6082,7 +6086,6 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
     std::string allocation_residency_affinity_id = residency_affinity_id;
     std::optional<std::chrono::system_clock::time_point>
         allocation_committed_soft_pin_timeout;
-    std::optional<WeightStoreManager::ImportWriteGuard> inherited_import_write;
     auto admit = [&](bool* dfs_allocation_failed)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
         auto now = std::chrono::system_clock::now();
@@ -6097,13 +6100,36 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
             // whether or not the key holds an object, so a replacement is
             // published under the same lock that took the old object down
             // and no other writer of the key lands in between.
-            MetadataAccessorRW accessor(this, object_id,
-                                        MetadataAccessorRW::CreateKey{});
+            MetadataAccessorRW accessor(
+                this, object_id,
+                MetadataAccessorRW::CreateKey{.cleanup_invalid = false});
             if (auto admitted = ChargeTenantQuota(accessor.QuotaAccount(), 0);
                 !admitted) {
                 return tl::make_unexpected(admitted.error());
             }
 
+            // Group membership is immutable while an object exists, including
+            // when stale replicas need cleanup.
+            if (accessor.IsPublished() && config.group_ids.has_value() &&
+                accessor.Get().group_id != group_id) {
+                LOG(ERROR) << "key=" << key
+                           << ", error=group_membership_is_immutable";
+                return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            }
+
+            // Managed writes must acquire the group lock before the shard
+            // lock. Require an explicit group before any stale cleanup.
+            if (accessor.IsPublished() && !weight_group_operation_lock &&
+                weight_manager_.IsManagedGroup(accessor.Get().group_id)) {
+                return tl::make_unexpected(
+                    ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+            }
+
+            // Cleanup follows membership validation to preserve rejected
+            // writes.
+            if (accessor.IsPublished()) {
+                CleanupInvalidMemoryReplicas(accessor);
+            }
             // --- Step 0: stale handle cleanup ---
             if (auto cleaned = CleanupStaleBeforeWrite(
                     "UpsertStart(stale cleanup)", accessor, retaining_clients);
@@ -6116,32 +6142,11 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 auto& metadata = accessor.Get();
                 auto& state = accessor.GetState();
 
-                // Reject if the caller tries to change group membership.
-                // Group membership is immutable while an object exists.
-                if (config.group_ids.has_value() &&
-                    metadata.group_id != group_id) {
-                    LOG(ERROR) << "key=" << key
-                               << ", error=group_membership_is_immutable";
-                    return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
-                }
                 if (config.residency_affinity_ids.has_value() &&
                     metadata.residency_affinity_id != residency_affinity_id) {
                     LOG(ERROR) << "key=" << key
                                << ", error=residency_affinity_is_immutable";
                     return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
-                }
-
-                // Upsert may inherit the existing group when the request omits
-                // group_ids. Admit that write without reversing group/shard
-                // locks.
-                if (!weight_group_operation_lock &&
-                    !metadata.group_id.empty()) {
-                    auto tracked = weight_manager_.TrackImportWrite(
-                        object_id.tenant_id, metadata.group_id);
-                    if (!tracked) {
-                        return tl::make_unexpected(tracked.error());
-                    }
-                    inherited_import_write.emplace(std::move(*tracked));
                 }
 
                 // Reject if a Copy/Move task is actively reading this key's
@@ -6236,7 +6241,8 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 VLOG(1) << "key=" << key << ", action=upsert_start_case_a";
                 auto result = AllocateAndInsertMetadata(
                     accessor, client_id, slice_length, allocation_config,
-                    writer_host_id, allocation_group_id, allocation_residency_affinity_id, now, soft_pin_request,
+                    writer_host_id, allocation_group_id,
+                    allocation_residency_affinity_id, now, soft_pin_request,
                     allocation_committed_soft_pin_timeout,
                     dfs_allocation_failed);
                 if (result) {
@@ -6371,7 +6377,8 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
 
                 allocation_group_id = metadata.group_id;
                 allocation_session_id = metadata.session_id;
-                allocation_residency_affinity_id = metadata.residency_affinity_id;
+                allocation_residency_affinity_id =
+                    metadata.residency_affinity_id;
                 const auto previous_kv_media = KvMediaSnapshot(metadata);
                 TenantQuotaLedger replacement_charge;
                 auto* quota_account = accessor.QuotaAccount();
@@ -6452,7 +6459,8 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                         replacement_replicas.has_value()
                             ? InsertMetadata(
                                   accessor, client_id, slice_length,
-                                  allocation_config, allocation_group_id, allocation_residency_affinity_id, now,
+                                  allocation_config, allocation_group_id,
+                                  allocation_residency_affinity_id, now,
                                   soft_pin_request,
                                   std::move(*replacement_replicas),
                                   replacement_pending_quota_charge,
@@ -6460,7 +6468,9 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                             : AllocateAndInsertMetadata(
                                   accessor, client_id, slice_length,
                                   allocation_config, writer_host_id,
-                                  allocation_group_id, allocation_residency_affinity_id, now, soft_pin_request,
+                                  allocation_group_id,
+                                  allocation_residency_affinity_id, now,
+                                  soft_pin_request,
                                   allocation_committed_soft_pin_timeout,
                                   dfs_allocation_failed);
                 if (!allocate_result) {
@@ -6529,9 +6539,6 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
     }
     if (result && weight_group_operation_lock) {
         weight_manager_.RecordImportWrite(object_id.tenant_id, group_id);
-    }
-    if (result && inherited_import_write) {
-        inherited_import_write->Accept();
     }
     return result;
 }
@@ -7754,8 +7761,7 @@ tl::expected<void, ErrorCode> MasterService::CheckRemovable(
 MasterService::RemoveResult MasterService::RemoveTenantObjects(
     const TenantId& tenant_id, bool force,
     std::chrono::system_clock::time_point now,
-    const std::function<bool(const std::string& key)>& matches_key,
-    const std::function<void(const ObjectMetadata&)>& on_remove) {
+    const std::function<bool(const std::string& key)>& matches_key) {
     RemoveResult result;
     const auto removable = [&](const std::string& key,
                                const ObjectMetadata& metadata,
@@ -7795,9 +7801,6 @@ MasterService::RemoveResult MasterService::RemoveTenantObjects(
             result.skipped_object = true;
             continue;
         }
-        if (on_remove) {
-            on_remove(metadata);
-        }
         const int64_t freed =
             metadata.TotalLength() *
             metadata.CountReplicas(&Replica::fn_is_memory_replica);
@@ -7832,11 +7835,9 @@ auto MasterService::RemoveByRegex(const std::string& regex_pattern,
     std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
     const RemoveResult result = RemoveTenantObjects(
         ResolveRequestTenantId(tenant_id), force,
-        std::chrono::system_clock::now(),
-        [&pattern](const std::string& key) {
+        std::chrono::system_clock::now(), [&pattern](const std::string& key) {
             return std::regex_search(key, pattern);
-        },
-        nullptr);
+        });
 
     VLOG(1) << "action=remove_by_regex, pattern=" << regex_pattern
             << ", removed_count=" << result.removed_count;
@@ -7863,7 +7864,7 @@ long MasterService::RemoveAll(bool force) {
     // Remove per object so managed weights and concurrent imports survive.
     VisitTenants([&](const TenantId& tenant_id) {
         const RemoveResult result =
-            RemoveTenantObjects(tenant_id, force, now, nullptr, nullptr);
+            RemoveTenantObjects(tenant_id, force, now, nullptr);
         removed_count += result.removed_count;
         total_freed_size += result.freed_bytes;
         // Record the tenant only once the walk actually reached an object. A
@@ -7915,8 +7916,8 @@ long MasterService::RemoveAll(const TenantId& tenant_id, bool force) {
     // that never existed looks empty, and under HA+oplog the erase is deferred
     // to the durable callback so a full wipe still looks non-empty. Count what
     // the walk actually did instead.
-    const RemoveResult result = RemoveTenantObjects(
-        normalized_tenant, force, now, nullptr, nullptr);
+    const RemoveResult result =
+        RemoveTenantObjects(normalized_tenant, force, now, nullptr);
     if (kv_remove_all_tenant_hook_) {
         kv_remove_all_tenant_hook_(normalized_tenant);
     }
@@ -8361,12 +8362,12 @@ void MasterService::RunShardDfsEviction() {
                     });
                 const bool managed_weight =
                     weight_manager_.IsManagedGroup(metadata.group_id);
-                accepted[i] =
-                    !managed_weight && !candidate_is_processing &&
-                    !accessor.InProcessing() &&
-                    !metadata.IsHardPinned() && metadata.IsLeaseExpired(now) &&
-                    (!IsSoftPinActive(metadata, now) ||
-                     allow_evict_soft_pinned_objects_);
+                accepted[i] = !managed_weight && !candidate_is_processing &&
+                              !accessor.InProcessing() &&
+                              !metadata.IsHardPinned() &&
+                              metadata.IsLeaseExpired(now) &&
+                              (!IsSoftPinActive(metadata, now) ||
+                               allow_evict_soft_pinned_objects_);
                 if (!accepted[i]) continue;
 
                 // A missing descriptor was accepted above and is already

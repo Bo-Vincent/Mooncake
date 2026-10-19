@@ -36,6 +36,47 @@ struct LegacyBatchOpLogSnapshotObjectChunk {
     YLT_REFL(LegacyBatchOpLogSnapshotObjectChunk, chunk_index, objects);
 };
 
+struct SessionStandbyObjectMetadata {
+    UUID client_id{0, 0};
+    uint64_t size{0};
+    std::vector<Replica::Descriptor> replicas;
+    std::string group_id;
+    ObjectDataType data_type{ObjectDataType::UNKNOWN};
+    struct_pack::compatible<bool, 1> hard_pinned;
+    struct_pack::compatible<std::string, 2> session_id;
+
+    YLT_REFL(SessionStandbyObjectMetadata, client_id, size, replicas, group_id,
+             data_type, hard_pinned, session_id);
+};
+
+struct SessionStandbyObjectEntry {
+    std::string tenant_id{"default"};
+    std::string key;
+    SessionStandbyObjectMetadata metadata;
+
+    YLT_REFL(SessionStandbyObjectEntry, tenant_id, key, metadata);
+};
+
+struct SessionBatchOpLogSnapshotObjectChunk {
+    uint64_t chunk_index{0};
+    std::vector<SessionStandbyObjectEntry> objects;
+
+    YLT_REFL(SessionBatchOpLogSnapshotObjectChunk, chunk_index, objects);
+};
+
+struct SessionMetadataPayload {
+    UUID client_id;
+    uint64_t size{0};
+    std::vector<Replica::Descriptor> replicas;
+    struct_pack::compatible<std::string, 1> group_id;
+    struct_pack::compatible<ObjectDataType, 1> data_type;
+    struct_pack::compatible<bool, 1> hard_pinned;
+    struct_pack::compatible<std::string, 2> session_id;
+
+    YLT_REFL(SessionMetadataPayload, client_id, size, replicas, group_id,
+             data_type, hard_pinned, session_id);
+};
+
 }  // namespace
 
 TEST(BatchOpLogSnapshotCodecTest, SegmentsRoundTrip) {
@@ -101,6 +142,56 @@ TEST(BatchOpLogSnapshotCodecTest, OldObjectChunkDefaultsHardPinnedToFalse) {
     ASSERT_TRUE(decoded) << decoded.error();
     EXPECT_FALSE(decoded->objects[0].metadata.hard_pinned.value_or(false));
     EXPECT_FALSE(decoded->objects[0].metadata.session_id.has_value());
+}
+
+TEST(BatchOpLogSnapshotCodecTest,
+     SessionV2ChunkPreservesSessionWithoutAffinity) {
+    SessionStandbyObjectMetadata metadata;
+    metadata.client_id = {1, 2};
+    metadata.size = 8192;
+    metadata.group_id = "group";
+    metadata.hard_pinned = true;
+    metadata.session_id = "main-session";
+    SessionBatchOpLogSnapshotObjectChunk chunk{0,
+                                               {{"tenant", "key", metadata}}};
+    auto bytes = struct_pack::serialize(chunk);
+    std::vector<uint8_t> encoded(bytes.begin(), bytes.end());
+
+    auto decoded = DecodeBatchOpLogSnapshotObjectChunk(encoded, 0, 1);
+
+    ASSERT_TRUE(decoded) << decoded.error();
+    ASSERT_EQ(decoded->objects.size(), 1u);
+    EXPECT_EQ(decoded->objects[0].metadata.session_id.value_or(""),
+              "main-session");
+    EXPECT_TRUE(decoded->objects[0].metadata.hard_pinned.value_or(false));
+    EXPECT_FALSE(
+        decoded->objects[0].metadata.residency_affinity_id.has_value());
+}
+
+TEST(BatchOpLogSnapshotCodecTest, SessionV2PayloadUpgradesToAffinityV3) {
+    SessionMetadataPayload old_payload;
+    old_payload.client_id = {1, 2};
+    old_payload.size = 8192;
+    old_payload.group_id = "group";
+    old_payload.data_type = ObjectDataType::WEIGHT;
+    old_payload.hard_pinned = true;
+    old_payload.session_id = "main-session";
+    auto bytes = struct_pack::serialize(old_payload);
+
+    auto decoded = struct_pack::deserialize<MetadataPayload>(bytes);
+
+    ASSERT_TRUE(decoded);
+    auto metadata = decoded->ToStandbyMetadata();
+    EXPECT_EQ(metadata.session_id.value_or(""), "main-session");
+    EXPECT_EQ(metadata.group_id, "group");
+    EXPECT_TRUE(metadata.hard_pinned.value_or(false));
+    EXPECT_TRUE(metadata.residency_affinity_id.value_or("").empty());
+    decoded->residency_affinity_id = "affinity";
+    auto upgraded = struct_pack::deserialize<MetadataPayload>(
+        struct_pack::serialize(*decoded));
+    ASSERT_TRUE(upgraded);
+    EXPECT_EQ(upgraded->session_id.value_or(""), "main-session");
+    EXPECT_EQ(upgraded->residency_affinity_id.value_or(""), "affinity");
 }
 
 TEST(BatchOpLogSnapshotCodecTest, RejectsTruncatedArtifacts) {

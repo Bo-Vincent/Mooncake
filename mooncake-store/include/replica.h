@@ -128,14 +128,13 @@ struct ReplicateConfig {
     // eviction treats the group as a unit (all-or-none). Object routing is
     // always hash(tenant, key) and is decoupled from groups.
     std::optional<std::vector<std::string>> group_ids{};
-    // Optional per-key opaque IDs. Keys with the same non-empty ID form one
-    // indivisible unit for weight residency planning.
-    std::optional<std::vector<std::string>> residency_affinity_ids{};
-
     // Per-key write attribution, independent of key identity and eviction
     // groups. Compatible field keeps pre-session RPC payloads readable in both
     // directions.
     struct_pack::compatible<std::vector<std::string>, 1> session_ids;
+    // Optional per-key opaque IDs. Keys with the same non-empty ID form one
+    // indivisible unit for weight residency planning.
+    struct_pack::compatible<std::vector<std::string>, 2> residency_affinity_ids;
 
     bool ValidSessionIds(size_t key_count) const {
         return !session_ids ||
