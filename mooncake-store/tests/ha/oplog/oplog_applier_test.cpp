@@ -390,7 +390,7 @@ TEST_F(OpLogApplierTest, CancelledOperationRejectsLateProgressReplay) {
     EXPECT_NE(metadata.residency, operation.target_residency);
     {
         auto conflicting = operation;
-        ++conflicting.processed_members;
+        ++conflicting.processed_bytes;
         ReplayDiagnosticSink sink;
         EXPECT_FALSE(applier.ApplyOpLogEntry(
             MakeEntry(4, OpType::WEIGHT_METADATA_UPSERT, key,

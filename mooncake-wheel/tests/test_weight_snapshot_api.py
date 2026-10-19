@@ -10,6 +10,18 @@ from mooncake.reshard.weight.store import WeightStore, WeightStoreWriter
 
 
 class TestWeightSnapshotApi(unittest.TestCase):
+    def test_native_config_preserves_session_and_affinity_properties(self) -> None:
+        config = native_store.ReplicateConfig()
+        self.assertIsNone(config.session_ids)
+        self.assertIsNone(config.residency_affinity_ids)
+        config.session_ids = ["session"]
+        config.residency_affinity_ids = ["affinity"]
+        self.assertEqual(config.session_ids, ["session"])
+        self.assertEqual(config.residency_affinity_ids, ["affinity"])
+        config.residency_affinity_ids = None
+        self.assertIsNone(config.residency_affinity_ids)
+        self.assertEqual(config.session_ids, ["session"])
+
     def test_native_weight_metadata_exposes_access_recency(self) -> None:
         self.assertTrue(
             hasattr(native_store.WeightRevisionMetadata, "last_accessed_at_ms")

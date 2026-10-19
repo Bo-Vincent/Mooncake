@@ -537,6 +537,16 @@ TEST_F(WeightReconciliationTest,
         .identity = Identity("upsert-deleting"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     ReplicateConfig config;
@@ -544,6 +554,7 @@ TEST_F(WeightReconciliationTest,
     config.data_type = ObjectDataType::WEIGHT;
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
+    config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
     PutCompletedObject(service, context.client_id, "upsert-deleting-payload",
                        config, 1024);
     const auto deleting = service.AbortWeightImport({
@@ -595,6 +606,16 @@ TEST_F(WeightReconciliationTest,
         .identity = Identity("upsert-importing"),
         .expected_payload_count = 1,
         .expected_logical_bytes = 1024,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = std::string(64, 'c'),
+            },
     });
     ASSERT_TRUE(importing);
     ReplicateConfig config;
@@ -602,6 +623,7 @@ TEST_F(WeightReconciliationTest,
     config.data_type = ObjectDataType::WEIGHT;
     config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
+    config.residency_affinity_ids = std::vector<std::string>{"affinity-a"};
     PutCompletedObject(service, context.client_id, "upsert-importing-payload",
                        config, 1024);
     config.group_ids.reset();
@@ -631,6 +653,16 @@ TEST_F(WeightReconciliationTest,
             .identity = Identity("upsert-other"),
             .expected_payload_count = 1,
             .expected_logical_bytes = 1024,
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 1,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
         ASSERT_TRUE(importing);
         const auto key =

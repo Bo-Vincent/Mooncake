@@ -188,10 +188,10 @@ def test_upload_rejects_foreign_registration_lease_without_consuming_it() -> Non
     other_store = InMemoryStore()
     other = _raw_store(other_store)
     sources = source_manifests(dp=1, tp=1)
-    plan = owner.plan_upload(sources.placement, sources.bindings)
+    plan = owner._weight_put_plan(sources.placement, sources.bindings)
     guards = allocation_guards_for_bindings((sources.binding,))
     fragment = sources.binding.fragments[0]
-    lease = owner.register_weight_buffers(
+    lease = owner._register_weight_buffers(
         sources.binding,
         fragment_ids=(fragment.fragment_id,),
         allocation_guards=guards,
@@ -201,7 +201,7 @@ def test_upload_rejects_foreign_registration_lease_without_consuming_it() -> Non
 
     try:
         with pytest.raises(WeightStoreError, match="different Store"):
-            other.upload(
+            other._weight_put_payload(
                 plan,
                 sources.placement,
                 sources.binding,
@@ -214,7 +214,7 @@ def test_upload_rejects_foreign_registration_lease_without_consuming_it() -> Non
         assert token.released_states == []
         assert owner_store.registered == {fragment.address}
 
-        receipts = owner.upload(
+        receipts = owner._weight_put_payload(
             plan,
             sources.placement,
             sources.binding,
@@ -233,8 +233,8 @@ def test_upload_rejects_foreign_registration_lease_without_consuming_it() -> Non
 def test_load_rejects_foreign_registration_lease_without_consuming_it() -> None:
     owner_store, staging = make_weight_store()
     sources = source_manifests(dp=1, tp=1)
-    upload_plan = staging.plan_upload(sources.placement, sources.bindings)
-    manifest = staging.commit_upload(
+    upload_plan = staging._weight_put_plan(sources.placement, sources.bindings)
+    manifest = staging._weight_put_commit(
         upload_plan, upload_all(staging, upload_plan, sources)
     )
     owner = _raw_store(owner_store)
@@ -242,11 +242,11 @@ def test_load_rejects_foreign_registration_lease_without_consuming_it() -> None:
     other_store.objects.update(owner_store.objects)
     other = _raw_store(other_store)
     target = target_manifests(dp=1, tp=1)[0]
-    plan = owner.plan_load(manifest, target.placement, target.bindings)
+    plan = owner._weight_get_plan(manifest, target.placement, target.bindings)
     guards = allocation_guards_for_bindings((target.binding,))
     fragment = target.binding.fragments[0]
     initial_data = bytes(fragment.owner)
-    lease = owner.register_weight_buffers(
+    lease = owner._register_weight_buffers(
         target.binding,
         fragment_ids=(fragment.fragment_id,),
         allocation_guards=guards,
@@ -256,7 +256,7 @@ def test_load_rejects_foreign_registration_lease_without_consuming_it() -> None:
 
     try:
         with pytest.raises(WeightStoreError, match="different Store"):
-            other.load(
+            other._weight_get_payload(
                 plan,
                 target.placement,
                 target.binding,
@@ -271,7 +271,7 @@ def test_load_rejects_foreign_registration_lease_without_consuming_it() -> None:
         assert token.released_states == []
         assert owner_store.registered == {fragment.address}
 
-        owner.load(
+        owner._weight_get_payload(
             plan,
             target.placement,
             target.binding,

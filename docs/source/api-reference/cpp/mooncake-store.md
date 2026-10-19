@@ -107,8 +107,8 @@ start an operation and observe it through revision and operation queries.
 
 `QueryWeightOperation` returns a terminal operation when its `message` is
 `"completed"` or `"cancelled"`. Call `IsWeightOperationTerminal(operation.message)`
-to check both terminal outcomes. Cancellation preserves the original `operation`
-type (`EVICTING` or `REHYDRATING`), target, and progress; the operation type alone
+to check both terminal outcomes. Cancellation preserves the original `kind`
+(`MIGRATING` or `REPAIRING`), target, and progress; the operation kind alone
 does not indicate whether work is still running.
 
 Upserts of existing managed weight payload or manifest members must explicitly

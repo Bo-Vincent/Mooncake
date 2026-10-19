@@ -96,10 +96,12 @@ TEST(SessionTagTest, RpcCompatibilityAndBatchValidation) {
         struct_pack::serialize(legacy));
     ASSERT_TRUE(decoded);
     EXPECT_FALSE(decoded->session_ids);
+    EXPECT_FALSE(decoded->residency_affinity_ids);
     EXPECT_EQ(decoded->group_ids, legacy.group_ids);
 
     auto config = Tagged("session");
     config.group_ids = legacy.group_ids;
+    config.residency_affinity_ids = std::vector<std::string>{"affinity"};
     auto old_reader = struct_pack::deserialize<LegacyReplicateConfig>(
         struct_pack::serialize(config));
     ASSERT_TRUE(old_reader);
@@ -108,8 +110,13 @@ TEST(SessionTagTest, RpcCompatibilityAndBatchValidation) {
         struct_pack::serialize(config));
     ASSERT_TRUE(new_reader);
     EXPECT_EQ(new_reader->SessionId(), "session");
+    ASSERT_TRUE(new_reader->residency_affinity_ids);
+    EXPECT_EQ(*new_reader->residency_affinity_ids,
+              (std::vector<std::string>{"affinity"}));
     config.session_ids = std::vector<std::string>{"a", "", "b"};
     config.group_ids = std::vector<std::string>{"g1", "g2", "g3"};
+    config.residency_affinity_ids =
+        std::vector<std::string>{"affinity-a", "", "affinity-b"};
     EXPECT_TRUE(config.ValidSessionIds(3));
     EXPECT_FALSE(config.ValidSessionIds(2));
     config.dfs_replica_num = 2;
@@ -123,6 +130,9 @@ TEST(SessionTagTest, RpcCompatibilityAndBatchValidation) {
         EXPECT_EQ(key_config.SessionId(), config.session_ids->at(i));
         ASSERT_EQ(key_config.group_ids->size(), 1);
         EXPECT_EQ(key_config.group_ids->front(), config.group_ids->at(i));
+        ASSERT_EQ(key_config.residency_affinity_ids->size(), 1);
+        EXPECT_EQ(key_config.residency_affinity_ids->front(),
+                  config.residency_affinity_ids->at(i));
         EXPECT_EQ(key_config.preferred_segment, "selected-segment");
         EXPECT_EQ(key_config.dfs_replica_num, 2);
         EXPECT_EQ(key_config.soft_pin_action, SoftPinAction::ENABLE);
@@ -130,6 +140,7 @@ TEST(SessionTagTest, RpcCompatibilityAndBatchValidation) {
     }
     EXPECT_EQ(config.session_ids->size(), 3);
     EXPECT_EQ(config.group_ids->size(), 3);
+    EXPECT_EQ(config.residency_affinity_ids->size(), 3);
     EXPECT_TRUE(config.preferred_segment.empty());
     EXPECT_TRUE(Tagged(std::string(256, 'x')).ValidSessionIds(1));
     EXPECT_FALSE(Tagged(std::string(257, 'x')).ValidSessionIds(1));
