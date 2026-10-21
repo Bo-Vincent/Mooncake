@@ -327,7 +327,6 @@ void RailMonitor::abandonRecoveryProbe(uint64_t token) {
                            });
     if (it == rail_states_.end()) return;
     auto& st = it->second;
-    if (st.active_probe_token != token) return;
 
     st.active_probe_token = 0;
     st.probe_in_flight = false;
