@@ -16,12 +16,6 @@ WeightStoreMemoryPressure MasterStoreBackend::GetMemoryPressure() const {
     };
 }
 
-void MasterStoreBackend::UnregisterGroupMember(const TenantId& tenant_id,
-                                               const std::string& key,
-                                               const std::string& group_id) {
-    master_.UnregisterGroupMember(tenant_id, key, group_id);
-}
-
 bool MasterStoreBackend::QueueManagedWeightMemberOffload(
     const WeightRevisionMetadata& revision, const std::string& key) {
     return master_.QueueManagedWeightMemberOffload(revision, key);

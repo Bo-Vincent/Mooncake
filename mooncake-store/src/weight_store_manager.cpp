@@ -682,10 +682,6 @@ WeightMetadataStore::Result<void> WeightStoreManager::RemoveWeightMembers(
             // Keep the manifest until every payload removal has succeeded.
             return tl::make_unexpected(WeightManagementError::BUSY);
         }
-        if (!removed) {
-            backend_.UnregisterGroupMember(tenant_id, key,
-                                           revision.manifest.payload_group_id);
-        }
     }
     return {};
 }

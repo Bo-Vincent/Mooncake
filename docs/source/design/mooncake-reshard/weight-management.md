@@ -29,6 +29,11 @@ invented or active operations silently discarded.
 
 ## Authority Model
 
+The integration preserves the main branch's best-effort HCA hint fields in
+`ReplicateConfig` before the residency-affinity extension, including per-key
+selection and subset filtering. This is wire/configuration interoperability;
+it does not add HCA-aware scheduling to this integration branch.
+
 Three records have distinct authority:
 
 | Authority | Location | Owns | Does not own |

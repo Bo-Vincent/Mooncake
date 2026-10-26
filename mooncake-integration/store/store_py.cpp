@@ -2394,6 +2394,7 @@ PYBIND11_MODULE(_store, m) {
                std::optional<std::vector<std::string>> ids) {
                 config.residency_affinity_ids.reset();
                 if (ids) config.residency_affinity_ids = std::move(*ids);
+            })
         .def_property(
             "preferred_hca_names",
             [](const ReplicateConfig &config)

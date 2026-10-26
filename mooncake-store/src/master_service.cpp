@@ -1691,7 +1691,7 @@ void MasterService::EvictManagedWeightMembersToCold(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
     if (weight_manager_.HasActiveLease(revision.identity,
-                                      revision.metadata_generation, now_ms)) {
+                                       revision.metadata_generation, now_ms)) {
         return;
     }
     const TenantId tenant_id(revision.identity.tenant_id);
@@ -1724,8 +1724,7 @@ void MasterService::EvictManagedWeightMembersToCold(
         }
         ObjectMetadata& metadata = hold->metadata();
         if (metadata.group_id != revision.manifest.payload_group_id ||
-            metadata.data_type != ObjectDataType::WEIGHT ||
-            !metadata.IsLeaseExpired()) {
+            metadata.data_type != ObjectDataType::WEIGHT) {
             continue;
         }
         const bool has_cold =
@@ -5140,8 +5139,7 @@ auto MasterService::AllocateAndInsertMetadata(
     }
 
     return InsertMetadata(accessor, client_id, value_length, config, group_id,
-                          residency_affinity_id,
-                          now, soft_pin_request,
+                          residency_affinity_id, now, soft_pin_request,
                           std::move(allocation_result.value()),
                           std::move(committed_soft_pin_timeout));
 }
@@ -5221,7 +5219,7 @@ auto MasterService::PrepareWriteStart(
     VLOG(1) << "key=" << key << ", value_length=" << slice_length
             << ", config=" << config << ", action=" << action << "_begin";
 
-    if (!config.ValidSessionIds(1)) {
+    if (!config.ValidSessionIds(1) || !config.HasValidKeyHints(1)) {
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
     auto group_id = GetGroupIdForKey(config, 1, 0);
@@ -5923,7 +5921,6 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
             }
 
-            // Managed writes must acquire the group lock before the shard
             if (accessor.IsPublished() && config.residency_affinity_ids &&
                 accessor.Get().residency_affinity_id != residency_affinity_id) {
                 return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -6306,15 +6303,6 @@ MasterService::BatchUpsertStart(const UUID& client_id,
     if (!config.HasValidKeyHints(keys.size())) {
         LOG(ERROR)
             << "BatchUpsertStart: per-key hint count does not match keys";
-        return std::vector<
-            tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>(
-            keys.size(), tl::make_unexpected(ErrorCode::INVALID_PARAMS));
-    }
-    if (config.residency_affinity_ids.has_value() &&
-        config.residency_affinity_ids->size() != keys.size()) {
-        LOG(ERROR) << "BatchUpsertStart: residency_affinity_ids.size()="
-                   << config.residency_affinity_ids->size()
-                   << " != keys.size()=" << keys.size();
         return std::vector<
             tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>(
             keys.size(), tl::make_unexpected(ErrorCode::INVALID_PARAMS));

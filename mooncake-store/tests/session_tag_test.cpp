@@ -72,6 +72,27 @@ struct LegacyMetadataPayload {
     struct_pack::compatible<bool, 1> hard_pinned;
 };
 
+// Main's RPC shape reserves extension versions 2 and 3 for HCA hints.
+struct HcaReplicateConfig {
+    size_t replica_num{1};
+    size_t nof_replica_num{0};
+    size_t dfs_replica_num{0};
+    SoftPinAction soft_pin_action{SoftPinAction::PRESERVE};
+    std::optional<uint64_t> soft_pin_ttl_ms;
+    bool with_hard_pin{false};
+    std::vector<std::string> preferred_segments;
+    std::string preferred_segment;
+    std::vector<std::string> preferred_nof_segments;
+    bool prefer_alloc_in_same_node{false};
+    ObjectDataType data_type{ObjectDataType::UNKNOWN};
+    std::string host_id;
+    std::optional<std::vector<std::string>> group_ids;
+    struct_pack::compatible<std::vector<std::string>, 1> session_ids;
+    struct_pack::compatible<std::vector<std::string>, 2> preferred_hca_names;
+    struct_pack::compatible<std::vector<std::vector<std::string>>, 3>
+        per_key_preferred_hca_names;
+};
+
 std::string SessionTag(MasterService& service, const std::string& key) {
     MasterServiceTestPeer::MetadataAccessorRO access(
         &service, MasterServiceTestPeer(service).MakeObjectIdentityForRequest(
@@ -86,6 +107,74 @@ ReplicateConfig Tagged(std::string id) {
     return config;
 }
 }  // namespace
+
+TEST(SessionTagTest, ResidencyAffinityDoesNotAliasHcaWireExtensions) {
+    HcaReplicateConfig hca;
+    hca.session_ids = std::vector<std::string>{"session"};
+    hca.preferred_hca_names = std::vector<std::string>{"mlx5_0"};
+    hca.per_key_preferred_hca_names =
+        std::vector<std::vector<std::string>>{{"mlx5_1"}};
+    auto integration_reader =
+        struct_pack::deserialize<ReplicateConfig>(struct_pack::serialize(hca));
+    ASSERT_TRUE(integration_reader);
+    EXPECT_EQ(integration_reader->session_ids, hca.session_ids);
+    EXPECT_EQ(integration_reader->preferred_hca_names, hca.preferred_hca_names);
+    EXPECT_EQ(integration_reader->per_key_preferred_hca_names,
+              hca.per_key_preferred_hca_names);
+    EXPECT_FALSE(integration_reader->residency_affinity_ids);
+
+    ReplicateConfig weight;
+    weight.session_ids = std::vector<std::string>{"session"};
+    weight.residency_affinity_ids = std::vector<std::string>{"tensor-0"};
+    auto main_reader = struct_pack::deserialize<HcaReplicateConfig>(
+        struct_pack::serialize(weight));
+    ASSERT_TRUE(main_reader);
+    EXPECT_EQ(main_reader->session_ids, weight.session_ids);
+    EXPECT_FALSE(main_reader->preferred_hca_names);
+    EXPECT_FALSE(main_reader->per_key_preferred_hca_names);
+
+    weight.preferred_hca_names = *hca.preferred_hca_names;
+    weight.per_key_preferred_hca_names = *hca.per_key_preferred_hca_names;
+    auto roundtrip = struct_pack::deserialize<ReplicateConfig>(
+        struct_pack::serialize(weight));
+    ASSERT_TRUE(roundtrip);
+    EXPECT_EQ(roundtrip->session_ids, weight.session_ids);
+    EXPECT_EQ(roundtrip->preferred_hca_names, weight.preferred_hca_names);
+    EXPECT_EQ(roundtrip->per_key_preferred_hca_names,
+              weight.per_key_preferred_hca_names);
+    EXPECT_EQ(roundtrip->residency_affinity_ids, weight.residency_affinity_ids);
+    main_reader = struct_pack::deserialize<HcaReplicateConfig>(
+        struct_pack::serialize(weight));
+    ASSERT_TRUE(main_reader);
+    EXPECT_EQ(main_reader->session_ids, weight.session_ids);
+    EXPECT_EQ(main_reader->preferred_hca_names, weight.preferred_hca_names);
+    EXPECT_EQ(main_reader->per_key_preferred_hca_names,
+              weight.per_key_preferred_hca_names);
+}
+
+TEST(SessionTagTest, HcaHintsFollowKeySubsetAndSingleKeySelection) {
+    ReplicateConfig config;
+    config.group_ids = std::vector<std::string>{"g0", "g1", "g2"};
+    config.session_ids = std::vector<std::string>{"s0", "s1", "s2"};
+    config.residency_affinity_ids = std::vector<std::string>{"u0", "u1", "u2"};
+    config.preferred_hca_names = std::vector<std::string>{"request-hca"};
+    config.per_key_preferred_hca_names =
+        std::vector<std::vector<std::string>>{{"hca0"}, {}, {"hca2"}};
+    EXPECT_TRUE(config.HasValidKeyHints(3));
+    EXPECT_FALSE(config.HasValidKeyHints(2));
+    auto subset = config.ForKeySubset({2, 0});
+    EXPECT_EQ(*subset.group_ids, (std::vector<std::string>{"g2", "g0"}));
+    EXPECT_EQ(*subset.session_ids, (std::vector<std::string>{"s2", "s0"}));
+    EXPECT_EQ(*subset.residency_affinity_ids,
+              (std::vector<std::string>{"u2", "u0"}));
+    EXPECT_EQ(*subset.per_key_preferred_hca_names,
+              (std::vector<std::vector<std::string>>{{"hca2"}, {"hca0"}}));
+    EXPECT_EQ(subset.preferred_hca_names, config.preferred_hca_names);
+    auto single = subset.ForSingleKey(1);
+    EXPECT_EQ(*single.preferred_hca_names, (std::vector<std::string>{"hca0"}));
+    EXPECT_FALSE(single.per_key_preferred_hca_names);
+    EXPECT_EQ(*single.residency_affinity_ids, (std::vector<std::string>{"u0"}));
+}
 
 TEST(SessionTagTest, RpcCompatibilityAndBatchValidation) {
     EXPECT_EQ(struct_pack::get_type_code<ReplicateConfig>(),
@@ -232,6 +321,27 @@ TEST_F(MasterServiceTest, SessionTagSurvivesAddingDiskReplica) {
     Replica disk(client, 1024, "local://session", ReplicaStatus::COMPLETE);
     ASSERT_TRUE(service.AddReplica(client, "key", TenantId::Default(), disk));
     EXPECT_EQ(SessionTag(service, "key"), "writer");
+}
+
+TEST_F(MasterServiceTest, RejectsMismatchedPerKeyHcaHints) {
+    MasterService service;
+    const auto client = PrepareSimpleSegment(service).client_id;
+    ReplicateConfig config;
+    config.per_key_preferred_hca_names =
+        std::vector<std::vector<std::string>>{{"hca0"}};
+    auto results = service.BatchUpsertStart(
+        client, {"a", "b"}, TenantId::Default(), {1024, 1024}, config);
+    ASSERT_EQ(results.size(), 2u);
+    for (const auto& result : results) {
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
+    }
+    config.per_key_preferred_hca_names =
+        std::vector<std::vector<std::string>>{};
+    auto result =
+        service.PutStart(client, "a", TenantId::Default(), 1024, config);
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
 }
 
 TEST_F(MasterServiceTest, SessionTagCommitsAndSurvivesUpsertReplacement) {
