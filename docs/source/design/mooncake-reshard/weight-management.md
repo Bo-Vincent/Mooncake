@@ -299,6 +299,13 @@ and `DELETING` publish together in one durable record, before physical removal.
 Operation queries retain the original target and progress with message
 `cancelled`; they never report cancellation as successful convergence.
 
+Bucket offload batches keep their initial coalescing opportunity. If no new
+tasks arrive, the next heartbeat retries the carried tail and flushes it through
+the existing replay path. This also applies to ordinary KV offloads: a small
+tail no longer waits indefinitely for unrelated traffic. Fresh tasks for a
+carried key take precedence over its old size and task; no new configuration
+flag is required.
+
 Generic `BatchEvict`, quota eviction, explicit remove, and cleanup paths skip
 managed groups. Only the weight lifecycle path may change their aggregate
 residency or availability.
