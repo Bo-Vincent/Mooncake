@@ -1724,7 +1724,8 @@ void MasterService::EvictManagedWeightMembersToCold(
         }
         ObjectMetadata& metadata = hold->metadata();
         if (metadata.group_id != revision.manifest.payload_group_id ||
-            metadata.data_type != ObjectDataType::WEIGHT) {
+            metadata.data_type != ObjectDataType::WEIGHT ||
+            !metadata.IsLeaseExpired()) {
             continue;
         }
         const bool has_cold =

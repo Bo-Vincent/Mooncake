@@ -1559,6 +1559,77 @@ TEST_F(WeightGroupLifecycleTest,
     EXPECT_TRUE(manifest_has_memory);
 }
 
+TEST_F(WeightGroupLifecycleTest, PublicKvReadLeasePreventsPhysicalDemotion) {
+    MasterServiceConfig config;
+    config.default_kv_lease_ttl = 60'000;
+    config.enable_offload = true;
+    config.offload_on_evict = true;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    auto ready = PublishReady(service, context.client_id);
+    AddLocalDiskReplica(service, context.client_id, "payload-a", 1024,
+                        "test_segment");
+    auto payload = service.GetReplicaList("payload-a", TenantId::Default());
+    ASSERT_TRUE(payload.has_value());
+    ASSERT_TRUE(std::any_of(
+        payload->replicas.begin(), payload->replicas.end(),
+        [](const auto& replica) { return replica.is_memory_replica(); }));
+
+    auto operation = service.StartWeightResidencyOperation(
+        StartWeightResidencyOperationRequest{
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::COLD,
+        });
+    ASSERT_TRUE(operation.has_value());
+    auto pending = service.ReconcileWeightRevision(
+        ReconcileWeightRevisionRequest{.identity = ready.identity});
+    ASSERT_TRUE(pending.has_value());
+    EXPECT_EQ(WeightResidencyState::HOT, pending->residency);
+    EXPECT_TRUE(pending->operation_id.has_value());
+    payload = service.GetReplicaList("payload-a", TenantId::Default());
+    ASSERT_TRUE(payload.has_value());
+    EXPECT_TRUE(std::any_of(
+        payload->replicas.begin(), payload->replicas.end(),
+        [](const auto& replica) { return replica.is_memory_replica(); }));
+}
+
+TEST_F(WeightGroupLifecycleTest, ColdOperationCompletesAfterReadLeaseExpires) {
+    MasterServiceConfig config;
+    config.default_kv_lease_ttl = 100;
+    config.enable_offload = true;
+    config.offload_on_evict = true;
+    MasterService service(config);
+    const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    const auto ready = PublishReady(service, context.client_id);
+    AddLocalDiskReplica(service, context.client_id, "payload-a", 1024,
+                        "test_segment");
+    ASSERT_TRUE(service.GetReplicaList("payload-a", TenantId::Default()));
+    const auto started = service.StartWeightResidencyOperation({
+        .identity = ready.identity,
+        .expected_metadata_generation = ready.metadata_generation,
+        .target_residency = WeightResidencyState::COLD,
+    });
+    ASSERT_TRUE(started);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto observed =
+        service.ReconcileWeightRevision({.identity = ready.identity});
+    ASSERT_TRUE(observed);
+    EXPECT_FALSE(observed->operation_id.has_value());
+    EXPECT_EQ(WeightResidencyState::COLD, observed->residency);
+    const auto members = GetWeightGroupResidencyForTest(
+        service, ready.identity, ready.manifest.payload_group_id);
+    ASSERT_EQ(2u, members.size());
+    for (const auto& member : members) {
+        if (member.data_type == ObjectDataType::WEIGHT) {
+            EXPECT_FALSE(member.has_memory);
+            EXPECT_TRUE(member.has_cold);
+        }
+    }
+}
+
 TEST_F(WeightGroupLifecycleTest,
        UnreadablePayloadDoesNotDiluteReadableHotResidency) {
     MasterService service;
