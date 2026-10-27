@@ -774,7 +774,7 @@ TEST(ObjectRouteDeathTest, PublishOfAnotherKeysMetadataAborts) {
             (void)guard.Publish(UUID{1, 2}, write_time, 128,
                                 std::vector<Replica>{}, std::nullopt, false,
                                 ObjectDataType::UNKNOWN, std::string(),
-                                std::string(), TenantId(), std::string("k2"));
+                                TenantId(), std::string("k2"));
         },
         "of an object keyed k2");
 }

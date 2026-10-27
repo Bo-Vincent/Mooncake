@@ -57,7 +57,6 @@
 #include "eviction/evictor.h"
 #include "eviction/offloading_reclaimer.h"
 #include "eviction/report_observers.h"
-#include "weight_residency_planner.h"
 
 namespace mooncake {
 
@@ -3547,13 +3546,12 @@ tl::expected<void, ErrorCode> MasterService::PublishRestoredObjects(
             // writer held off, so this is a key the objects name twice.
             return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
         }
-        const route::Generation generation =
-            accessor.Publish(standby_meta.client_id, now, standby_meta.size,
-                             std::move(object.replicas), std::nullopt,
-                             standby_meta.hard_pinned.value_or(false),
-                             standby_meta.data_type, standby_meta.group_id,
-                             standby_meta.residency_affinity_id.value_or(""),
-                             object.tenant_id, object.user_key);
+        const route::Generation generation = accessor.Publish(
+            standby_meta.client_id, now, standby_meta.size,
+            std::move(object.replicas), std::nullopt,
+            standby_meta.hard_pinned.value_or(false), standby_meta.data_type,
+            standby_meta.group_id, object.tenant_id, object.user_key,
+            standby_meta.residency_affinity_id.value_or(""));
         auto& metadata = accessor.Get();
         metadata.MutablePart(0).SetChecksum(standby_meta.object_checksum);
         metadata.session_id = standby_meta.session_id.value_or("");
@@ -5099,7 +5097,7 @@ auto MasterService::InsertMetadata(
     accessor.Publish(client_id, now, value_length, std::move(replicas),
                      std::move(committed_soft_pin_timeout),
                      config.with_hard_pin, config.data_type, group_id,
-                     residency_affinity_id, tenant_id, key);
+                     tenant_id, key, residency_affinity_id);
     auto& metadata = accessor.Get();
     metadata.BeginSessionTag(config.SessionId(), eligible_replica_ids);
     metadata.BeginSoftPinAction(soft_pin_request,
@@ -5617,8 +5615,7 @@ auto MasterService::AddReplicaForRetainedClient(const UUID& client_id,
             client_id, std::chrono::system_clock::now(),
             replica.get_descriptor().get_local_disk_descriptor().object_size,
             std::vector<Replica>{}, std::nullopt, false,
-            ObjectDataType::UNKNOWN, std::string{}, std::string{},
-            object_id.tenant_id, key);
+            ObjectDataType::UNKNOWN, std::string{}, object_id.tenant_id, key);
     }
     auto& metadata = accessor.Get();
     const auto previous_kv_media = KvMediaSnapshot(metadata);
@@ -6019,6 +6016,8 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                     // effectively does not exist — fall through to Case A.
                     if (!metadata.HasReplica(&Replica::fn_is_completed)) {
                         allocation_session_id = metadata.session_id;
+                        allocation_residency_affinity_id =
+                            metadata.residency_affinity_id;
                         allocation_committed_soft_pin_timeout =
                             metadata.GetCommittedSoftPinTimeout();
                         if (allocation_committed_soft_pin_timeout &&

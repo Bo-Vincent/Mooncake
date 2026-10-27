@@ -137,7 +137,7 @@ struct ReplicateConfig {
     // Batch hints follow the key order; an empty entry means no preference.
     struct_pack::compatible<std::vector<std::vector<std::string>>, 3>
         per_key_preferred_hca_names;
-    // Per-key opaque IDs define indivisible units for weight residency.
+    // Per-key opaque residency affinity metadata.
     struct_pack::compatible<std::vector<std::string>, 4> residency_affinity_ids;
 
     bool HasValidKeyHints(size_t key_count) const {

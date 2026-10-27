@@ -52,8 +52,7 @@ class LeaseEvictionIndexTest : public ::testing::Test {
         replicas.emplace_back(allocator_->allocate(128), status);
         (void)guard.Publish(UUID{1, 2}, Clock::time_point{}, 128,
                             std::move(replicas), std::nullopt, hard_pinned,
-                            ObjectDataType::UNKNOWN, group_id, std::string(),
-                            TenantId(), key);
+                            ObjectDataType::UNKNOWN, group_id, TenantId(), key);
     }
 
     static void SetDeadline(const ObjectMetadata& metadata,

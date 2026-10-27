@@ -21,12 +21,6 @@ bool MasterStoreBackend::QueueManagedWeightMemberOffload(
     return master_.QueueManagedWeightMemberOffload(revision, key);
 }
 
-void MasterStoreBackend::EvictManagedWeightMembersToCold(
-    const WeightRevisionMetadata& revision,
-    const std::vector<std::string>& keys) {
-    master_.EvictManagedWeightMembersToCold(revision, keys);
-}
-
 bool MasterStoreBackend::CanPublishWeightMutations() const {
     return master_.weight_management_mutations_enabled_;
 }
@@ -52,6 +46,12 @@ tl::expected<void, ErrorCode> MasterStoreBackend::RemoveObject(
     const std::string& key, const TenantId& tenant_id, bool force,
     bool allow_managed_weight) {
     return master_.RemoveObject(key, tenant_id, force, allow_managed_weight);
+}
+
+void MasterStoreBackend::EvictManagedWeightMembersToCold(
+    const WeightRevisionMetadata& revision,
+    const std::vector<std::string>& member_keys) {
+    master_.EvictManagedWeightMembersToCold(revision, member_keys);
 }
 
 bool MasterStoreBackend::IsOpLogEnabled() const {
