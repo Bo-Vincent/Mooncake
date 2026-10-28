@@ -42,9 +42,9 @@ the launching shell's environment does not reconfigure running workers.
 | --- | --- | --- |
 | `MC_ADAPTIVE_CONGESTION_CONTROL_MIN_WINDOW_BYTES` | `4194304` (4 MiB) | Lower bound for the normal adaptive window. |
 | `MC_ADAPTIVE_CONGESTION_CONTROL_MAX_WINDOW_BYTES` | `67108864` (64 MiB) | Upper bound for the normal adaptive window. |
-| `MC_ADAPTIVE_CONGESTION_CONTROL_TARGET_DRAIN_US` | `2000` | Target estimated queue-drain time, in microseconds. |
-| `MC_ADAPTIVE_CONGESTION_CONTROL_HIGH_PRESSURE_EPOCHS` | `2` | Consecutive high-pressure epochs before shrinking the window. |
-| `MC_ADAPTIVE_CONGESTION_CONTROL_LOW_PRESSURE_EPOCHS` | `3` | Consecutive low-pressure epochs before growing the window. |
+| `MC_ADAPTIVE_CONGESTION_CONTROL_TARGET_DRAIN_US` | `2000` | Parsed for configuration compatibility; not used by the current window policy. |
+| `MC_ADAPTIVE_CONGESTION_CONTROL_HIGH_PRESSURE_EPOCHS` | `2` | Parsed for configuration compatibility; not used by the current window policy. |
+| `MC_ADAPTIVE_CONGESTION_CONTROL_LOW_PRESSURE_EPOCHS` | `3` | Parsed for configuration compatibility; not used by the current window policy. |
 
 Byte and time settings must be positive decimal integers; the minimum window
 must not exceed the maximum. Epoch counts must fit in 32 bits. Invalid
@@ -63,9 +63,22 @@ it drains. The window is not an absolute transfer-size limit.
 
 ## Pressure and recovery
 
-The shared controller tracks healthy or congested pressure. Sustained pressure
-reduces the window; successful low-pressure epochs increase it. It does not
-maintain a second hard-error threshold, quarantine timer, or recovery probe.
+Ordinary backlog and estimated drain time do not shrink the window or prevent
+growth. The adapters no longer collect additional rate/backlog samples for this
+controller; existing transport and QoS accounting is unchanged. An epoch with
+successful completions and no explicit error grows the
+window by one quarter of the configured minimum, up to the maximum. Explicit
+congestion or receiver-pressure feedback halves the affected window once per
+epoch, bounded by the minimum, and takes precedence over successful completions.
+
+Timeout, fatal, local-configuration and remote-metadata root errors prevent
+growth for the affected domain in that epoch without classifying them as
+congestion. Operation, QP and route errors do not veto healthy sibling routes
+through the shared device; CQ, port and device errors also veto device growth.
+A subsequent clean successful epoch can grow again. Derived flush completions
+and poller-stall observations do not independently veto growth.
+
+The controller does not maintain a second hard-error threshold, quarantine timer, or recovery probe.
 Classic TE's existing rail/context availability and TENT's `RailMonitor` own
 those transport recovery decisions, with their existing thresholds and timing.
 
