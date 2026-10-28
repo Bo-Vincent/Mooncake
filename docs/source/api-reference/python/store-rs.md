@@ -45,6 +45,11 @@ This mode:
 - supports routed writes, replication policy, segment lifecycle, metrics, and tracing
 - is the normal path for Python clients that should behave like store-rs nodes
 
+Real-mode `put(...)` dispatches one complete `PutRequest` through the Rust
+single-object write API. It preserves the tenant, domain, object set, and
+replication policy and records one `put` operation. Batch writes retain their
+separate `batch_put` metrics.
+
 Registered-buffer batch restores are best-effort per item in the Python compatibility layer. If
 the fast batch restore path fails because one route is missing or one storage owner is unavailable,
 the dispatcher retries the missed entries one by one and returns a per-key status: positive byte
