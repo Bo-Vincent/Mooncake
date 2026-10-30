@@ -1003,7 +1003,8 @@ class FileStorageTest : public ::testing::Test {
         std::free(seg_ptr);
     }
     void RunBatchPutHealWipeScenario(const std::string& data_path,
-                                     bool with_key_metadata = false) {
+                                     bool with_key_metadata = false,
+                                     bool with_affinity_only = false) {
         std::filesystem::path master_root =
             std::filesystem::path(data_path) / "heal_master_batch";
         std::filesystem::create_directories(master_root);
@@ -1099,6 +1100,10 @@ class FileStorageTest : public ::testing::Test {
         }
         ReplicateConfig cfg;
         cfg.replica_num = 1;
+        if (with_affinity_only) {
+            cfg.residency_affinity_ids =
+                std::vector<std::string>{"fresh-unit", "unit-a", "unit-b"};
+        }
         if (with_key_metadata) {
             cfg.session_ids =
                 std::vector<std::string>{"fresh", "wiped-a", "wiped-b"};
@@ -2155,6 +2160,11 @@ TEST_F(FileStorageTest,
 TEST_F(FileStorageTest,
        SessionAndHcaBatchPutAfterPhysicalWipeHealsDanglingLocalDiskReplica) {
     RunBatchPutHealWipeScenario(data_path, true);
+}
+
+TEST_F(FileStorageTest,
+       AffinityOnlyBatchPutAfterPhysicalWipeHealsDanglingLocalDiskReplica) {
+    RunBatchPutHealWipeScenario(data_path, false, true);
 }
 
 }  // namespace mooncake
