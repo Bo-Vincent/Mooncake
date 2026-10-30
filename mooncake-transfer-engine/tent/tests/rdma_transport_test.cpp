@@ -359,6 +359,9 @@ class RdmaTransportTestPeer {
     static WorkerContext& workerContext(Workers& workers, size_t i) {
         return workers.worker_context_[i];
     }
+    static size_t workerCount(const Workers& workers) {
+        return workers.num_workers_;
+    }
 
     static const Topology* railLocalTopology(Workers& workers,
                                              const std::string& machine_id) {
@@ -3770,7 +3773,9 @@ class RdmaWorkersSharedQpTest : public ::testing::Test {
 
     void cancelQueuedRetries() {
         if (!workers_) return;
-        for (int lane_id = 0; lane_id < 2; ++lane_id) {
+        for (size_t lane_id = 0;
+             lane_id < RdmaTransportTestPeer::workerCount(*workers_);
+             ++lane_id) {
             auto& lane =
                 RdmaTransportTestPeer::workerContext(*workers_, lane_id);
             for (int priority = PRIO_HIGH; priority <= PRIO_LOW; ++priority) {
@@ -4020,7 +4025,7 @@ void RdmaWorkersAvoidTest::exerciseLegacyRailRecovery(bool observe) {
                        &std::get<MemorySegmentDesc>(remote->detail).topology),
                    "", &config, static_cast<uint64_t>(target_))
             .ok());
-    for (int i = 0; i < 3; ++i) monitor->markFailed(kDev, kDev);
+    for (int i = 0; i < 3; ++i) monitor->markFailed(kDev, kDev, 0);
     auto* rail = monitor.get();
     worker.rails[remote->machine_id] = std::move(monitor);
 
@@ -5204,9 +5209,10 @@ TEST(RdmaWorkersRecoveryProbeTest, CancelledOwnerReleasesProbeToSibling) {
     auto local = topologyWithRdmaNics(2);
     auto remote_initial = topologyWithRdmaNics(2);
     auto remote_refreshed = topologyWithRdmaNics(2);
-    RailMonitor rail;
+    auto rail_owner = std::make_shared<RailMonitor>();
+    auto& rail = *rail_owner;
     ASSERT_TRUE(rail.load(local, remote_initial).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_TRUE(rail.load(local, remote_refreshed).ok());
 
     uint64_t owner_token = 0;
@@ -5232,7 +5238,7 @@ TEST(RdmaWorkersRecoveryProbeTest, CancelledOwnerReleasesProbeToSibling) {
     // ownership remains token-based and must return to the original pair.
     slice->source_dev_id = 1;
     slice->target_dev_id = 1;
-    slice->rail_monitor = &rail;
+    slice->rail_monitor = rail_owner;
     slice->rail_probe_token = owner_token;
 
     EXPECT_TRUE(

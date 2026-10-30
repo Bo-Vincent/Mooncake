@@ -15,6 +15,8 @@
 #ifndef TENT_TYPES_H
 #define TENT_TYPES_H
 
+#include "mooncake_te_build_config.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>

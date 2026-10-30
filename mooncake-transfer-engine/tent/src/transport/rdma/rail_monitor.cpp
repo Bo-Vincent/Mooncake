@@ -64,8 +64,8 @@ bool sameRailLayout(const Topology* a, const Topology* b) {
 
 Status RailMonitor::load(std::shared_ptr<const Topology> local,
                          std::shared_ptr<const Topology> remote,
-                         const std::string& rail_topo_json,
-                         const Config* conf, uint64_t remote_snapshot_key) {
+                         const std::string& rail_topo_json, const Config* conf,
+                         uint64_t remote_snapshot_key) {
     std::lock_guard<std::mutex> guard(mutex_);
     const bool first_load = !ready_;
     auto snapshot = remote_snapshots_.find(remote_snapshot_key);
@@ -211,6 +211,7 @@ bool RailMonitor::admit(int local_nic, int remote_nic, uint64_t& probe_token) {
     auto& st = it->second;
     auto arm_probe = [&] {
         st.probe_in_flight = true;
+        st.metadata_probe = false;
         st.active_probe_token = allocateProbeToken();
         probe_token = st.active_probe_token;
     };
@@ -266,6 +267,7 @@ void RailMonitor::cancelProbe(int local_nic, int remote_nic,
     if (st.probe_in_flight && st.active_probe_token == probe_token) {
         st.probe_in_flight = false;
         st.active_probe_token = 0;
+        st.metadata_probe = false;
         // Revert a Half-Open trial to expired-Open so the next admit() re-arms
         // a fresh trial. A plain Open probe just clears its flag.
         st.half_open = false;
@@ -282,8 +284,7 @@ uint64_t RailMonitor::allocateProbeToken() {
 }
 
 bool RailMonitor::tryRecoveryProbe(int local_nic, int remote_nic,
-                                   uint64_t& token,
-                                   bool* probe_in_progress) {
+                                   uint64_t& token, bool* probe_in_progress) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (probe_in_progress) *probe_in_progress = false;
     if (!recovery_probe_enabled_) return false;
@@ -293,7 +294,7 @@ bool RailMonitor::tryRecoveryProbe(int local_nic, int remote_nic,
     if (!st.paused()) return false;
 
     if (token != 0) {
-        if (token == st.active_probe_token) return true;
+        if (st.metadata_probe && token == st.active_probe_token) return true;
         if (probe_in_progress)
             *probe_in_progress =
                 st.active_probe_token != 0 || st.probe_in_flight;
@@ -310,6 +311,7 @@ bool RailMonitor::tryRecoveryProbe(int local_nic, int remote_nic,
 
     st.last_probe_generation = metadata_generation_;
     st.probe_in_flight = true;
+    st.metadata_probe = true;
     st.active_probe_token = allocateProbeToken();
     token = st.active_probe_token;
     LOG(INFO) << "Rail recovery probe admitted: local_nic=" << local_nic
@@ -328,10 +330,12 @@ void RailMonitor::abandonRecoveryProbe(uint64_t token) {
     if (it == rail_states_.end()) return;
     auto& st = it->second;
 
+    const bool metadata_probe = st.metadata_probe;
     st.active_probe_token = 0;
     st.probe_in_flight = false;
+    st.metadata_probe = false;
     st.half_open = false;
-    if (st.last_probe_generation == metadata_generation_ &&
+    if (metadata_probe && st.last_probe_generation == metadata_generation_ &&
         metadata_generation_ > 0) {
         st.last_probe_generation = metadata_generation_ - 1;
     }
@@ -341,18 +345,6 @@ void RailMonitor::markFailed(int local_nic, int remote_nic,
                              uint64_t probe_token) {
     std::lock_guard<std::mutex> guard(mutex_);
     auto it = rail_states_.find(std::make_pair(local_nic, remote_nic));
-    if (probe_token != 0 && (it == rail_states_.end() ||
-                             it->second.active_probe_token != probe_token)) {
-        auto owner = std::find_if(rail_states_.begin(), rail_states_.end(),
-                                  [probe_token](const auto& entry) {
-                                      return entry.second.active_probe_token ==
-                                             probe_token;
-                                  });
-        // A late WC may arrive after the token was already cleared by
-        // cooldown or another success. In that case the reported pair still
-        // receives the real failure, matching the token-free path.
-        if (owner != rail_states_.end()) it = owner;
-    }
     if (it == rail_states_.end()) return;
     auto& st = it->second;
     // A stale probe completion cannot be counted as a new failure cycle or
@@ -375,6 +367,7 @@ void RailMonitor::markFailed(int local_nic, int remote_nic,
     if (probe_token != 0 && st.probe_in_flight) {
         st.probe_in_flight = false;
         st.active_probe_token = 0;
+        st.metadata_probe = false;
         if (st.half_open) {
             st.half_open = false;
             st.cooldown *= 2;
@@ -456,6 +449,8 @@ void RailMonitor::markRecovered(int local_nic, int remote_nic,
     if (probe_token != 0 && st.probe_in_flight) {
         st.probe_in_flight = false;
         st.active_probe_token = 0;
+        st.metadata_probe = false;
+        st.last_probe_generation = metadata_generation_;
         st.half_open = false;
         st.error_count = 0;
         st.resume_time = {};

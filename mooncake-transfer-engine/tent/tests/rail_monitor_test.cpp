@@ -115,7 +115,7 @@ TEST(RailMonitorHealthSnapshotTest, ReadsPreserveMetadataProbeOwnership) {
     Config config;
     config.set(RailMonitor::kCfgProbeIntervalSecs, 20);
     ASSERT_TRUE(rail.load(local, remote, "", &config).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     uint64_t previous = 20'000'000'000ULL;
     for (int i = 0; i < 10; ++i) {
         const auto health = rail.healthSnapshot(0, 0);
@@ -125,7 +125,8 @@ TEST(RailMonitorHealthSnapshotTest, ReadsPreserveMetadataProbeOwnership) {
         EXPECT_LE(health.retry_after_ns, previous);
         previous = health.retry_after_ns;
     }
-    EXPECT_FALSE(rail.admit(0, 0));
+    uint64_t blocked_token = 0;
+    EXPECT_FALSE(rail.admit(0, 0, blocked_token));
     auto refreshed = makeSingleNicTopology("mlx5_1");
     ASSERT_TRUE(rail.load(local, refreshed).ok());
     for (int i = 0; i < 10; ++i)
@@ -144,7 +145,7 @@ TEST(RailMonitorHealthSnapshotTest, ExpiryReadsDoNotArmTrialOrRecover) {
     ASSERT_TRUE(rail.load(makeSingleNicTopology("mlx5_0"),
                           makeSingleNicTopology("mlx5_1"), "", &config)
                     .ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     for (int i = 0; i < 10; ++i) {
         const auto health = rail.healthSnapshot(0, 0);
         EXPECT_TRUE(health.paused);
@@ -152,10 +153,12 @@ TEST(RailMonitorHealthSnapshotTest, ExpiryReadsDoNotArmTrialOrRecover) {
         EXPECT_EQ(health.retry_after_ns, 0u);
         EXPECT_FALSE(rail.isAvailable(0, 0));
     }
-    ASSERT_TRUE(rail.admit(0, 0));
+    uint64_t admitted_token = 0;
+    ASSERT_TRUE(rail.admit(0, 0, admitted_token));
     EXPECT_TRUE(rail.healthSnapshot(0, 0).probe_in_progress);
-    EXPECT_FALSE(rail.admit(0, 0));
-    rail.markRecovered(0, 0);
+    uint64_t blocked_token = 0;
+    EXPECT_FALSE(rail.admit(0, 0, blocked_token));
+    rail.markRecovered(0, 0, admitted_token);
     EXPECT_FALSE(rail.healthSnapshot(0, 0).paused);
     EXPECT_FALSE(rail.healthSnapshot(0, 0).probe_in_progress);
     EXPECT_EQ(rail.healthSnapshot(0, 0).retry_after_ns, 0u);
@@ -531,7 +534,7 @@ TEST(RailMonitorRecoveryProbeTest,
     // A snapshot observed while the rail is healthy cannot recover a later
     // failure. Recovery evidence must be newer than the pause transition.
     ASSERT_TRUE(rail.load(local, remote_before_pause).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     uint64_t probe_token = 0;
@@ -551,7 +554,7 @@ TEST(RailMonitorRecoveryProbeTest,
     auto remote_refreshed = makeSingleNicTopology("mlx5_1");
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local, remote_initial).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     ASSERT_TRUE(rail.load(local, remote_refreshed).ok());
@@ -586,17 +589,18 @@ TEST(RailMonitorRecoveryProbeTest, TimeProbeBlocksMetadataProbeUntilReleased) {
     cfg.set(RailMonitor::kCfgProbeIntervalSecs, 0);
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local, remote_initial, "", &cfg).ok());
-    rail.markFailed(0, 0);
+    rail.markFailed(0, 0, 0);
     ASSERT_TRUE(rail.load(local, remote_refreshed, "", &cfg).ok());
 
-    ASSERT_TRUE(rail.admit(0, 0));
+    uint64_t time_token = 0;
+    ASSERT_TRUE(rail.admit(0, 0, time_token));
     uint64_t token = 0;
     bool probe_in_progress = false;
     EXPECT_FALSE(rail.tryRecoveryProbe(0, 0, token, &probe_in_progress));
     EXPECT_EQ(token, 0u);
     EXPECT_TRUE(probe_in_progress);
 
-    rail.cancelProbe(0, 0);
+    rail.cancelProbe(0, 0, time_token);
     EXPECT_TRUE(rail.tryRecoveryProbe(0, 0, token));
     EXPECT_NE(token, 0u);
 }
@@ -610,15 +614,16 @@ TEST(RailMonitorRecoveryProbeTest, MetadataProbeBlocksTimeProbeUntilReleased) {
     cfg.set(RailMonitor::kCfgProbeIntervalSecs, 0);
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local, remote_initial, "", &cfg).ok());
-    rail.markFailed(0, 0);
+    rail.markFailed(0, 0, 0);
     ASSERT_TRUE(rail.load(local, remote_refreshed, "", &cfg).ok());
 
     uint64_t token = 0;
     ASSERT_TRUE(rail.tryRecoveryProbe(0, 0, token));
-    EXPECT_FALSE(rail.admit(0, 0));
+    uint64_t time_token = 0;
+    EXPECT_FALSE(rail.admit(0, 0, time_token));
 
     rail.abandonRecoveryProbe(token);
-    EXPECT_TRUE(rail.admit(0, 0));
+    EXPECT_TRUE(rail.admit(0, 0, time_token));
 }
 
 TEST(RailMonitorRecoveryProbeTest,
@@ -629,7 +634,7 @@ TEST(RailMonitorRecoveryProbeTest,
     auto remote_next = makeSingleNicTopology("mlx5_1");
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local, remote_initial).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     ASSERT_TRUE(rail.load(local, remote_refreshed).ok());
@@ -662,7 +667,7 @@ TEST(RailMonitorRecoveryProbeTest, SuccessfulProbeRecoversPausedRail) {
     auto remote_refreshed = makeSingleNicTopology("mlx5_1");
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local, remote_initial).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     ASSERT_TRUE(rail.load(local, remote_refreshed).ok());
@@ -670,7 +675,7 @@ TEST(RailMonitorRecoveryProbeTest, SuccessfulProbeRecoversPausedRail) {
     ASSERT_TRUE(rail.tryRecoveryProbe(0, 0, probe_token));
     EXPECT_FALSE(rail.isAvailable(0, 0));
 
-    rail.markRecovered(0, 0);
+    rail.markRecovered(0, 0, probe_token);
     EXPECT_TRUE(rail.isAvailable(0, 0));
 }
 
@@ -680,7 +685,7 @@ TEST(RailMonitorRecoveryProbeTest, LocalSnapshotDoesNotRearmProbe) {
     auto remote = makeSingleNicTopology("mlx5_1");
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local_initial, remote).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     ASSERT_TRUE(rail.load(local_refreshed, remote).ok());
@@ -701,7 +706,7 @@ TEST(RailMonitorRecoveryProbeTest, ExistingSegmentSnapshotDoesNotRearmProbe) {
     ASSERT_TRUE(rail.load(local, remote_second, "", nullptr,
                           /*remote_snapshot_key=*/2)
                     .ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     // Alternating back to a snapshot that was already observed before the
@@ -722,7 +727,7 @@ TEST(RailMonitorRecoveryProbeTest, DisabledProbePreservesCooldownBehavior) {
     cfg.set(RailMonitor::kCfgRecoveryProbeEnabled, false);
     RailMonitor rail;
     ASSERT_TRUE(rail.load(local, remote_initial, "", &cfg).ok());
-    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0);
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
     ASSERT_FALSE(rail.isAvailable(0, 0));
 
     ASSERT_TRUE(rail.load(local, remote_refreshed, "", &cfg).ok());
@@ -730,6 +735,83 @@ TEST(RailMonitorRecoveryProbeTest, DisabledProbePreservesCooldownBehavior) {
     EXPECT_FALSE(rail.tryRecoveryProbe(0, 0, probe_token));
     EXPECT_EQ(probe_token, 0u);
     EXPECT_FALSE(rail.isAvailable(0, 0));
+}
+
+TEST(RailMonitorRecoveryProbeTest, AbandonedMetadataProbeReturnsGeneration) {
+    auto local = makeSingleNicTopology("mlx5_0");
+    RailMonitor rail;
+    ASSERT_TRUE(rail.load(local, makeSingleNicTopology("mlx5_1")).ok());
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
+    ASSERT_TRUE(rail.load(local, makeSingleNicTopology("mlx5_1")).ok());
+    uint64_t first = 0;
+    ASSERT_TRUE(rail.tryRecoveryProbe(0, 0, first));
+    rail.abandonRecoveryProbe(first);
+    uint64_t second = 0;
+    ASSERT_TRUE(rail.tryRecoveryProbe(0, 0, second));
+    EXPECT_NE(first, second);
+    rail.abandonRecoveryProbe(first);
+    EXPECT_TRUE(rail.healthSnapshot(0, 0).probe_in_progress);
+    rail.markRecovered(0, 0, first);
+    rail.markFailed(0, 0, first);
+    EXPECT_TRUE(rail.healthSnapshot(0, 0).probe_in_progress);
+    rail.markRecovered(0, 0, second);
+    EXPECT_TRUE(rail.isAvailable(0, 0));
+}
+
+TEST(RailMonitorRecoveryProbeTest, PostedCancellationConsumesGeneration) {
+    auto local = makeSingleNicTopology("mlx5_0");
+    RailMonitor rail;
+    ASSERT_TRUE(rail.load(local, makeSingleNicTopology("mlx5_1")).ok());
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
+    ASSERT_TRUE(rail.load(local, makeSingleNicTopology("mlx5_1")).ok());
+    uint64_t token = 0;
+    ASSERT_TRUE(rail.tryRecoveryProbe(0, 0, token));
+    rail.cancelProbe(0, 0, token);
+    uint64_t next = 0;
+    EXPECT_FALSE(rail.tryRecoveryProbe(0, 0, next));
+    EXPECT_FALSE(rail.healthSnapshot(0, 0).probe_in_progress);
+}
+
+TEST(RailMonitorRecoveryProbeTest, AbandonedTimerProbeDoesNotReturnGeneration) {
+    auto local = makeSingleNicTopology("mlx5_0");
+    Config config;
+    config.set(RailMonitor::kCfgProbeIntervalSecs, 0);
+    RailMonitor rail;
+    ASSERT_TRUE(
+        rail.load(local, makeSingleNicTopology("mlx5_1"), "", &config).ok());
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
+    uint64_t token = 0;
+    ASSERT_TRUE(rail.admit(0, 0, token));
+    uint64_t wrong_kind = token;
+    EXPECT_FALSE(rail.tryRecoveryProbe(0, 0, wrong_kind));
+    rail.abandonRecoveryProbe(token);
+    uint64_t metadata_token = 0;
+    EXPECT_FALSE(rail.tryRecoveryProbe(0, 0, metadata_token));
+    EXPECT_FALSE(rail.healthSnapshot(0, 0).probe_in_progress);
+}
+
+TEST(RailMonitorRecoveryProbeTest, LayoutReloadCannotReuseOldProbeToken) {
+    auto local = makeSingleNicTopology("mlx5_0");
+    Config config;
+    config.set(RailMonitor::kCfgProbeIntervalSecs, 0);
+    RailMonitor rail;
+    ASSERT_TRUE(
+        rail.load(local, makeSingleNicTopology("mlx5_1"), "", &config).ok());
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
+    uint64_t old_token = 0;
+    ASSERT_TRUE(rail.admit(0, 0, old_token));
+    ASSERT_TRUE(rail.load(local, makeSingleNicTopology("mlx5_2")).ok());
+    for (int i = 0; i < 3; ++i) rail.markFailed(0, 0, 0);
+    uint64_t new_token = 0;
+    ASSERT_TRUE(rail.admit(0, 0, new_token));
+    EXPECT_NE(old_token, new_token);
+    rail.markFailed(0, 0, old_token);
+    rail.markRecovered(0, 0, old_token);
+    rail.cancelProbe(0, 0, old_token);
+    rail.abandonRecoveryProbe(old_token);
+    EXPECT_TRUE(rail.healthSnapshot(0, 0).probe_in_progress);
+    rail.markRecovered(0, 0, new_token);
+    EXPECT_TRUE(rail.isAvailable(0, 0));
 }
 
 TEST(RailMonitorRecoverTest, CooldownDoesNotCarryOverAfterRecovery) {

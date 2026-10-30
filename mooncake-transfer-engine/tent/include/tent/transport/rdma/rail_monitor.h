@@ -95,7 +95,7 @@ class RailMonitor {
     // Read-only evidence from the existing recovery policy.
     HealthSnapshot healthSnapshot(int local_nic, int remote_nic) const;
 
-    // Mutating admit: the ONLY path that arms a probe/trial. Returns true when
+    // Timer-based admission. Returns true when
     // a transfer may use this rail -- Closed (no-op), or an exploratory probe /
     // Half-Open trial. Sets probe_in_flight for paused rails so a second probe
     // cannot race the first while it is on the wire. Callers that select a rail
@@ -118,11 +118,9 @@ class RailMonitor {
     bool tryRecoveryProbe(int local_nic, int remote_nic, uint64_t &token,
                           bool *probe_in_progress = nullptr);
 
-    // Return ownership when the admitted slice is cancelled or rejected
-    // before post, allowing another slice to use the same fresh snapshot.
+    // Release a timer or metadata probe rejected before post. Only metadata
+    // probes return their generation, allowing reuse of the fresh snapshot.
     void abandonRecoveryProbe(uint64_t token);
-
-
     // Uses the same token contract as markFailed().
     void markRecovered(int local_nic, int remote_nic, uint64_t probe_token);
 
@@ -172,6 +170,7 @@ class RailMonitor {
         std::chrono::steady_clock::time_point last_probe_time{};
         bool half_open = false;
         bool probe_in_flight = false;
+        bool metadata_probe = false;
         uint64_t last_probe_generation = 0;
         uint64_t active_probe_token = 0;
 

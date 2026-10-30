@@ -4,9 +4,9 @@ orphan: true
 
 # Adaptive Congestion Control: Shared Core and Startup Configuration
 
-Classic TE RDMA connects the shared pressure/window controller to worker
-admission and completion feedback. TENT transport integration remains a separate
-follow-up. The build option and runtime mode both default to `off`.
+Classic TE and TENT RDMA connect the shared pressure/window controller to worker
+admission and completion feedback. The build option and runtime mode both
+default to `off`.
 
 The core tracks in-flight bytes, adapts byte windows using completion feedback,
 and fences permits by generation. It does not own failure detection,
@@ -18,7 +18,12 @@ it does not create a second health/recovery state machine.
 
 `MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL` defaults to `OFF`. When enabled,
 the shared core target is available to Classic TE and TENT builds. Each Classic
-RDMA worker pool snapshots the environment during construction.
+RDMA worker pool and TENT RDMA worker snapshot the environment during
+construction.
+
+TENT's metadata-fenced rail recovery has a separate
+`transports/rdma/rail_recovery_probe_enabled` switch. Disabling adaptive
+admission does not disable the transport's existing health and recovery policy.
 
 Installed headers read this build setting from `mooncake_te_build_config.h` so
 their public layouts match the library. Consumers do not need to define the

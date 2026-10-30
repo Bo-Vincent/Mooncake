@@ -486,7 +486,7 @@ class Workers {
     bool deadline_bw_arbitration_ = false;
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
     adaptive_congestion_control::Config congestion_control_config_;
-    std::vector<std::unique_ptr<adaptive_congestion_control::DomainState>>
+    std::vector<std::shared_ptr<adaptive_congestion_control::DomainState>>
         congestion_control_devices_;
     std::mutex congestion_control_routes_mutex_;
     std::unordered_map<

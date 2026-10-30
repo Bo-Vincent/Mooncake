@@ -275,12 +275,47 @@ TEST(TentAdaptiveCongestionControlTest,
 }
 
 TEST(TentAdaptiveCongestionControlTest, EndpointUsesOneSharedRouteState) {
-    TentRdmaCongestionControlRoute first(testConfig());
-    TentRdmaCongestionControlRoute second(testConfig());
+    auto first = std::make_shared<TentRdmaCongestionControlRoute>(testConfig());
+    auto second =
+        std::make_shared<TentRdmaCongestionControlRoute>(testConfig());
     RdmaEndPoint endpoint;
 
-    EXPECT_EQ(endpoint.bindCongestionRoute(&first), &first);
-    EXPECT_EQ(endpoint.bindCongestionRoute(&second), &first);
+    EXPECT_EQ(endpoint.bindCongestionRoute(first.get()), first.get());
+    auto* bound = endpoint.bindCongestionRoute(second.get());
+    EXPECT_EQ(bound, first.get());
+    auto retained = bound->shared_from_this();
+    std::weak_ptr<TentRdmaCongestionControlRoute> weak = first;
+    first.reset();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_EQ(retained.get(), bound);
+}
+
+TEST(TentAdaptiveCongestionControlTest, PostedSliceRetainsRouteAndDevice) {
+    auto route = std::make_shared<TentRdmaCongestionControlRoute>(testConfig());
+    auto device = std::make_shared<adaptive_congestion_control::DomainState>(
+        testConfig(), 1);
+    route->device_owner = device;
+    std::weak_ptr<TentRdmaCongestionControlRoute> weak_route = route;
+    std::weak_ptr<adaptive_congestion_control::DomainState> weak_device =
+        device;
+    {
+        RdmaSlice slice;
+        slice.congestion_control_route_owner = route;
+        adaptive_congestion_control::PathHandle path{device.get(),
+                                                     &route->domain, 1, 1};
+        ASSERT_EQ(acquireTentCongestionControlAttempt(slice, route.get(), path,
+                                                      128, 7),
+                  adaptive_congestion_control::Decision::kAllow);
+        route.reset();
+        device.reset();
+        EXPECT_FALSE(weak_route.expired());
+        EXPECT_FALSE(weak_device.expired());
+        EXPECT_TRUE(completeTentCongestionControlAttempt(
+            slice, adaptive_congestion_control::OutcomeClass::kDerivedFlush,
+            adaptive_congestion_control::FailureScope::kOperation));
+    }
+    EXPECT_TRUE(weak_route.expired());
+    EXPECT_TRUE(weak_device.expired());
 }
 
 TEST(TentAdaptiveCongestionControlTest,

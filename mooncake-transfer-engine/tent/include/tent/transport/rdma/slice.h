@@ -39,12 +39,14 @@ namespace tent {
 struct RdmaSlice;
 class RailMonitor;
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
-struct TentRdmaCongestionControlRoute {
+struct TentRdmaCongestionControlRoute
+    : std::enable_shared_from_this<TentRdmaCongestionControlRoute> {
     explicit TentRdmaCongestionControlRoute(
         const adaptive_congestion_control::Config& config)
         : domain(config, 1) {}
 
     adaptive_congestion_control::DomainState domain;
+    std::shared_ptr<adaptive_congestion_control::DomainState> device_owner;
     std::atomic<uint32_t> endpoint_generation{0};
 };
 #endif
@@ -236,6 +238,8 @@ struct RdmaSlice {
     std::atomic<uint64_t> rail_probe_token{0};
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
     TentRdmaCongestionControlRoute* congestion_control_route = nullptr;
+    std::shared_ptr<TentRdmaCongestionControlRoute>
+        congestion_control_route_owner;
     adaptive_congestion_control::Permit congestion_control_permit;
     uint32_t congestion_control_endpoint_generation = 0;
     std::atomic<bool> congestion_control_observed_blocked{false};
