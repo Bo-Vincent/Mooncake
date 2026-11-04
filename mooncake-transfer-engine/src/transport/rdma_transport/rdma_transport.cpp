@@ -1452,14 +1452,6 @@ Status RdmaTransport::submitTransferTask(
             }
 
             if (nr_slices >= kSubmitWatermark) {
-#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
-                auto observation = std::atomic_load_explicit(
-                    &task.congestion_observation, std::memory_order_acquire);
-                if (observation)
-                    observation->extendAttempt(
-                        1,
-                        __atomic_load_n(&task.slice_count, __ATOMIC_ACQUIRE));
-#endif
                 for (auto &entry : slices_to_post)
                     entry.first->submitPostSend(entry.second);
                 slices_to_post.clear();
@@ -1470,15 +1462,6 @@ Status RdmaTransport::submitTransferTask(
         }
     }
 
-#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
-    for (auto *task : task_list) {
-        auto observation = std::atomic_load_explicit(
-            &task->congestion_observation, std::memory_order_acquire);
-        if (observation)
-            observation->extendAttempt(
-                1, __atomic_load_n(&task->slice_count, __ATOMIC_ACQUIRE));
-    }
-#endif
     for (auto &entry : slices_to_post)
         if (!entry.second.empty()) entry.first->submitPostSend(entry.second);
     return Status::OK();
