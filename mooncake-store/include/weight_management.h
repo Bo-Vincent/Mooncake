@@ -234,6 +234,25 @@ struct WeightAffinitySummary {
 };
 YLT_REFL(WeightAffinitySummary, affinity_count, affinity_digest);
 
+inline bool IsValidWeightPayloadLayout(
+    const std::vector<WeightAffinityMappingEntry>& layout,
+    uint64_t payload_count, uint64_t logical_bytes,
+    const WeightAffinitySummary& summary) {
+    if (layout.empty()) return true;
+    uint64_t bytes = 0;
+    std::set<std::string> affinities;
+    for (const auto& entry : layout) {
+        if (entry.size > std::numeric_limits<uint64_t>::max() - bytes)
+            return false;
+        bytes += entry.size;
+        affinities.insert(entry.affinity_id);
+    }
+    return layout.size() == payload_count && bytes == logical_bytes &&
+           affinities.size() == summary.affinity_count &&
+           ComputeWeightAffinityMappingSha256(layout) ==
+               summary.affinity_digest;
+}
+
 struct WeightRevisionMetadata {
     WeightRevisionIdentity identity;
     WeightManifestReference manifest;
@@ -334,12 +353,13 @@ struct WeightUpsertImportSummary {
     uint64_t expected_logical_bytes{0};
     std::optional<WeightStoragePolicy> policy;
     WeightAffinitySummary affinity_summary;
+    std::vector<WeightAffinityMappingEntry> payload_layout;
 
     friend bool operator==(const WeightUpsertImportSummary&,
                            const WeightUpsertImportSummary&) = default;
 };
 YLT_REFL(WeightUpsertImportSummary, payload_group_id, expected_payload_count,
-         expected_logical_bytes, policy, affinity_summary);
+         expected_logical_bytes, policy, affinity_summary, payload_layout);
 
 struct WeightUpsertClaim {
     std::string request_id;
@@ -745,6 +765,9 @@ inline WeightValidationResult ValidateWeightLineageMetadata(
         (import.policy.has_value() &&
          !ValidateWeightStoragePolicy(*import.policy).ok()) ||
         !ValidateWeightAffinitySummary(import.affinity_summary).ok() ||
+        !IsValidWeightPayloadLayout(
+            import.payload_layout, import.expected_payload_count,
+            import.expected_logical_bytes, import.affinity_summary) ||
         (import.policy.value_or(WeightStoragePolicy{}).preferred_residency ==
              WeightResidencyState::MIXED &&
          import.affinity_summary.affinity_count < 2)) {

@@ -125,6 +125,37 @@ TEST(WeightMetadataStoreTest, UpsertClaimIsCasFencedAndIdempotent) {
     EXPECT_EQ(WeightManagementError::BUSY, competing.error());
 }
 
+TEST(WeightMetadataStoreTest, UpsertLayoutSurvivesSnapshotAndFencesRetries) {
+    WeightMetadataStore store;
+    auto request = UpsertRequest();
+    request.import.payload_layout = {
+        {"a", 1024, "a"}, {"b", 1024, "b"}, {"c", 2048, "c"}};
+    request.import.affinity_summary.affinity_digest =
+        ComputeWeightAffinityMappingSha256(request.import.payload_layout);
+    auto prepared = store.PrepareBeginUpsert(request, 300);
+    ASSERT_TRUE(prepared);
+    ASSERT_TRUE(store.Publish(*prepared));
+    const auto snapshot = store.ExportSnapshot();
+    WeightMetadataStore restored;
+    ASSERT_TRUE(restored.RestoreSnapshot(snapshot));
+    const auto lineage =
+        restored.GetLineage(ToWeightLineageIdentity(request.base_identity));
+    ASSERT_TRUE(lineage);
+    ASSERT_TRUE(lineage->latest_claim);
+    EXPECT_EQ(request.import.payload_layout,
+              lineage->latest_claim->import.payload_layout);
+    auto retry = restored.PrepareBeginUpsert(request, 301);
+    ASSERT_TRUE(retry);
+    EXPECT_TRUE(retry->no_op);
+    request.import.payload_layout.front().affinity_id = "swapped";
+    EXPECT_FALSE(restored.PrepareBeginUpsert(request, 302));
+    auto corrupted = snapshot;
+    corrupted.lineages->front()
+        .latest_claim->import.payload_layout.front()
+        .size++;
+    EXPECT_FALSE(WeightMetadataStore{}.RestoreSnapshot(corrupted));
+}
+
 TEST(WeightMetadataStoreTest, UpsertClaimRejectsNonIncreasingGeneration) {
     WeightMetadataStore metadata_store;
     auto request = UpsertRequest();
@@ -136,14 +167,15 @@ TEST(WeightMetadataStoreTest, UpsertClaimRejectsNonIncreasingGeneration) {
     EXPECT_EQ(WeightManagementError::STALE_GENERATION, prepared.error());
 }
 
-TEST(WeightMetadataStoreTest, LineageSnapshotRoundTripsAndV2DefaultsEmpty) {
+TEST(WeightMetadataStoreTest,
+     LineageSnapshotRoundTripsAndRejectsEarlierSchemas) {
     WeightMetadataStore metadata_store;
     auto claim = metadata_store.PrepareBeginUpsert(UpsertRequest(), 300);
     ASSERT_TRUE(claim.has_value());
     ASSERT_TRUE(metadata_store.Publish(*claim).has_value());
 
     auto snapshot = metadata_store.ExportSnapshot();
-    ASSERT_EQ(3, snapshot.schema_version);
+    ASSERT_EQ(4, snapshot.schema_version);
     ASSERT_TRUE(snapshot.lineages.has_value());
     ASSERT_EQ(1, snapshot.lineages->size());
     WeightMetadataStore restored;
@@ -151,14 +183,14 @@ TEST(WeightMetadataStoreTest, LineageSnapshotRoundTripsAndV2DefaultsEmpty) {
     EXPECT_EQ(snapshot.lineages->front(),
               restored.GetLineage(snapshot.lineages->front().identity).value());
 
-    snapshot.schema_version = 2;
-    snapshot.lineages = std::vector<WeightLineageMetadata>{};
-    ASSERT_TRUE(restored.RestoreSnapshot(snapshot).has_value());
-    EXPECT_FALSE(
-        restored.GetLineage(ToWeightLineageIdentity(Identity())).has_value());
+    for (const auto version : {2u, 3u}) {
+        snapshot.schema_version = version;
+        EXPECT_FALSE(restored.RestoreSnapshot(snapshot).has_value());
+        EXPECT_EQ(1, restored.ExportSnapshot().lineages->size());
+    }
 }
 
-TEST(WeightMetadataStoreTest, DeserializesLegacyV2SnapshotBytes) {
+TEST(WeightMetadataStoreTest, RejectsDeserializedLegacyV2SnapshotBytes) {
     const auto bytes = struct_pack::serialize(LegacyWeightMetadataSnapshotV2{});
     WeightMetadataSnapshot decoded;
     ASSERT_EQ(struct_pack::errc::ok,
@@ -166,7 +198,7 @@ TEST(WeightMetadataStoreTest, DeserializesLegacyV2SnapshotBytes) {
     EXPECT_EQ(2, decoded.schema_version);
     EXPECT_FALSE(decoded.lineages.has_value());
     WeightMetadataStore restored;
-    EXPECT_TRUE(restored.RestoreSnapshot(decoded).has_value());
+    EXPECT_FALSE(restored.RestoreSnapshot(decoded).has_value());
 }
 
 TEST(WeightMetadataStoreTest, RejectsCorruptedLineageSnapshotRecords) {

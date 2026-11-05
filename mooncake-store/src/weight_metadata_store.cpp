@@ -59,6 +59,7 @@ bool SameUpsertRequest(const WeightUpsertClaim& claim,
                    .expected_logical_bytes = import.expected_logical_bytes,
                    .policy = import.policy,
                    .affinity_summary = import.affinity_summary,
+                   .payload_layout = import.payload_layout,
                };
 }
 
@@ -252,24 +253,10 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
         request.affinity_summary.affinity_count < 2) {
         return tl::make_unexpected(WeightManagementError::POLICY_UNSATISFIABLE);
     }
-    if (!request.payload_layout.empty()) {
-        uint64_t bytes = 0;
-        std::unordered_set<std::string> affinities;
-        for (const auto& entry : request.payload_layout) {
-            if (entry.size > std::numeric_limits<uint64_t>::max() - bytes) {
-                return tl::make_unexpected(
-                    WeightManagementError::INVALID_ARGUMENT);
-            }
-            bytes += entry.size;
-            affinities.insert(entry.affinity_id);
-        }
-        if (request.payload_layout.size() != request.expected_payload_count ||
-            bytes != request.expected_logical_bytes ||
-            affinities.size() != request.affinity_summary.affinity_count ||
-            ComputeWeightAffinityMappingSha256(request.payload_layout) !=
-                request.affinity_summary.affinity_digest) {
-            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
-        }
+    if (!IsValidWeightPayloadLayout(
+            request.payload_layout, request.expected_payload_count,
+            request.expected_logical_bytes, request.affinity_summary)) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
 
     std::lock_guard lock(mutex_);
@@ -697,6 +684,10 @@ WeightMetadataStore::PrepareBeginUpsert(const BeginWeightUpsertRequest& request,
         (request.import.policy.has_value() &&
          !ValidateWeightStoragePolicy(*request.import.policy).ok()) ||
         !ValidateWeightAffinitySummary(request.import.affinity_summary).ok() ||
+        !IsValidWeightPayloadLayout(request.import.payload_layout,
+                                    request.import.expected_payload_count,
+                                    request.import.expected_logical_bytes,
+                                    request.import.affinity_summary) ||
         (request.import.policy.value_or(WeightStoragePolicy{})
                  .preferred_residency == WeightResidencyState::MIXED &&
          request.import.affinity_summary.affinity_count < 2)) {
@@ -766,6 +757,7 @@ WeightMetadataStore::PrepareBeginUpsert(const BeginWeightUpsertRequest& request,
                             request.import.expected_logical_bytes,
                         .policy = request.import.policy,
                         .affinity_summary = request.import.affinity_summary,
+                        .payload_layout = request.import.payload_layout,
                     },
                 .created_at_ms = now_ms,
                 .updated_at_ms = now_ms,
@@ -2014,8 +2006,7 @@ WeightMetadataSnapshot WeightMetadataStore::ExportSnapshot() const {
 
 tl::expected<void, WeightManagementError> ValidateWeightMetadataSnapshot(
     const WeightMetadataSnapshot& snapshot) {
-    if ((snapshot.schema_version != 2 &&
-         snapshot.schema_version != kWeightMetadataSchemaVersion) ||
+    if (snapshot.schema_version != kWeightMetadataSchemaVersion ||
         snapshot.next_lease_id == 0 || snapshot.next_operation_id == 0) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }

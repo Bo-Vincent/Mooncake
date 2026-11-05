@@ -14,7 +14,7 @@
 
 namespace mooncake {
 
-inline constexpr uint32_t kWeightMetadataSchemaVersion = 3;
+inline constexpr uint32_t kWeightMetadataSchemaVersion = 4;
 
 struct WeightResidencyObservation {
     WeightResidencyState residency{WeightResidencyState::UNKNOWN};

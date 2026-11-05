@@ -1426,6 +1426,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                                 claim.import.expected_logical_bytes,
                             .policy = claim.import.policy,
                             .affinity_summary = claim.import.affinity_summary,
+                            .payload_layout = claim.import.payload_layout,
                         },
                         now_ms, true);
                     if (import && PersistAndPublishWeightMutation(*import)) {
@@ -1534,6 +1535,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                             claim.import.expected_logical_bytes,
                         .policy = claim.import.policy,
                         .affinity_summary = claim.import.affinity_summary,
+                        .payload_layout = claim.import.payload_layout,
                     },
                     now_ms, true);
                 if (!imported || !PersistAndPublishWeightMutation(*imported)) {

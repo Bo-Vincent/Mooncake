@@ -344,7 +344,7 @@ metadata records.
 PR3 replay supports its legacy metadata-only payload and its operation envelope.
 The affinity-aware integration schema described here accepts its own operation
 envelope and rejects earlier weight-state schemas, including PR3 snapshots and
-lease records. Schema 2 to schema 3 retains the compatible lineage extension;
+lease records. Schema 4 includes the durable import layout and rejects schema 2 and 3;
 this does not migrate the earlier member-based operation format. A migration
 from PR3 must be designed and validated separately before release.
 The `cancelled` terminal message also requires upgraded readers before writers
