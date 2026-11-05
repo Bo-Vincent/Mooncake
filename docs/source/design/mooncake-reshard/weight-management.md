@@ -17,15 +17,19 @@ automatic migration, and operation reconciliation with HA recovery. The managed
 Python `WeightStore` facade provides the upload and replacement lifecycle; C++
 callers can use the same management interfaces directly.
 
-The PR3 lifecycle schema supports its earlier metadata-only OpLog writer.
-The later integration schema adds mandatory residency-affinity metadata and
-different operation progress units. It does not inherit that wire migration:
-old metadata, operation envelopes, snapshots, and bare lease records are
-rejected without advancing replay or partially publishing state. Its existing
-schema-2 snapshots remain readable by schema 3 through the compatible lineage
-extension. Migration from PR3 requires a separate design and acceptance run
-before the integration schema is released; missing affinity data must not be
-invented or active operations silently discarded.
+This development-stage change replaces the earlier persistence format directly.
+Weight snapshots use schema 4; earlier snapshots and metadata-only OpLog
+records are rejected. There is no migration or compatibility decoder. New
+operation envelopes and snapshots retain atomic publication and replay.
+
+Imports declare an affinity count and physical mapping digest. Each payload object carries an
+opaque residency-affinity ID, and all objects with that ID move as one unit.
+The manifest remains in memory. Mixed planning chooses complete affinities;
+it never splits an affinity to reach the requested hot-byte ratio. Observed
+ratios divide readable memory payload bytes by the total logical payload bytes,
+including missing members. Background migration spends one work item per
+payload action; deletion spends one per object and shares its remaining budget with
+the following reconciliation pass.
 
 ## Authority Model
 
@@ -151,7 +155,12 @@ segments. The manifest is hard-pinned during import and stored as
 After publication, the manifest key, manifest SHA-256, payload group ID,
 payload-key SHA-256, payload count, and logical byte count are immutable.
 The Master validates object type, exact group membership, count, logical
-bytes, and the digest of sorted payload keys. It deliberately does not parse
+bytes, the digest of sorted payload keys, and the digest of the actual
+payload-to-affinity mapping. The mapping digest is SHA-256 over the prefix
+`weight-affinity-mapping-v1\n`, followed by records sorted by UTF-8 key bytes.
+Each record encodes key, decimal object size, and affinity ID as
+`<UTF-8-byte-length>:<value>\n`. Duplicate keys and empty mapping fields are
+rejected. It deliberately does not parse
 the tensor manifest body. A consumer must verify the stored manifest's identity
 and SHA-256 before planning tensor ranges.
 
@@ -173,26 +182,15 @@ replica. DRAM eviction changes residency but does not by itself make a revision
 unavailable. Missing required members produce `DEGRADED`; complete physical
 removal produces the retained `DELETED`/`ABSENT` tombstone.
 
-For an incomplete revision, residency describes the readable members still present;
-`DEGRADED` reports the missing required members. Missing members alone do not
-mean the remaining objects span multiple storage tiers.
-`observed_hot_ratio` divides readable payload bytes with memory replicas by
-readable payload bytes, excluding the resident manifest. Completeness still
-requires the manifest's full payload count, byte count, hash, and affinities;
-a partial revision cannot complete migration merely by reaching its target ratio.
+`HOT` requires every required payload to have a readable memory replica.
+An incomplete revision with partial memory coverage reports `DEGRADED/MIXED`;
+its hot ratio still uses the full declared logical size as the denominator.
 
-Each background pass shares a work budget across revisions and upsert cleanup.
-Deletion spends one item per member and removes the manifest last. Migration
-spends one item per complete affinity, which may contain multiple members;
-this is not a strict bound on backend member calls. Manifest promotion is a
-separate control item. Pending affinities rotate so subsequent passes can
-schedule other units. The per-round member and byte limits remain soft bounds
-for an indivisible first affinity. Weight work runs on its dedicated worker.
-Lineage and revision sweeps alternate priority and share any remaining budget.
-A separate lineage cursor prevents a blocked retirement from monopolizing later
-lineages. Revision cleanup retains its existing rotation and memory-pressure
-priority ordering. Cursors are local scheduling hints and do not change durable
-operation progress.
+Each background pass shares member and byte budgets across revisions and upsert
+cleanup. Manifest promotion is a separate control item. The byte limit permits
+one oversized first member to make progress. Lineage and revision sweeps
+alternate priority; a separate lineage cursor prevents blocked retirement from
+monopolizing later lineages. Cursors remain local scheduling hints.
 
 Commit, abort, lease acquisition, operation start, and deletion check the
 caller's `expected_metadata_generation`. Lease renewal and release use the
@@ -316,11 +314,22 @@ managed groups. Only the weight lifecycle path may change their aggregate
 residency or availability.
 
 Reconciliation runs on a dedicated Master worker, not the general task-cleanup
-thread, and is not exposed as a client RPC. A background pass shares bounded
-work items across revisions, as defined above. This bounds selected units,
-not individual migration member calls, durable-write latency, or metadata scans.
+thread, and is not exposed as a client RPC. A background pass shares a bounded
+number of payload migration or member deletion actions across revisions. A
+per-member cursor lets a large affinity span multiple passes. Its memory
+replicas are released only after every cold replica in that affinity is ready.
+This bounds physical action attempts,
+not the time required for a durable write or the cost of observing group metadata.
 Clients use operation and revision queries to observe convergence. The operation
 `cursor` reports progress; it is not a client-controlled resume token.
+
+For at most 32 affinity units, MIXED planning finds an exact closest nonempty
+proper subset using meet-in-the-middle search. Each half has at most 65,536
+states. Larger layouts use a deterministic O(n log n) approximation. Let `T`
+be target hot bytes, `S` total bytes, `m` the smallest affinity, and `M` the
+largest affinity. The absolute byte error is at most
+`max(M / 2, m - T, T - (S - m))`. This is a granularity bound, not a claim of
+global optimality for large layouts. The planner never splits an affinity.
 
 ## Recovery and HA Rollout
 
