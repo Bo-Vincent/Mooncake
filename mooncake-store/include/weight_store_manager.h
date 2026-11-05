@@ -159,6 +159,8 @@ class WeightStoreManager {
     PersistAndPublishWeightLeaseMutation(const WeightLeaseMutation& mutation);
     WeightMetadataStore::Result<WeightRevisionMetadata>
     PersistAndPublishWeightMutation(const WeightMetadataMutation& mutation);
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    PersistAndPublishWeightImport(const WeightMetadataMutation& mutation);
     std::unique_lock<std::mutex> LockGroup(
         const WeightRevisionIdentity& identity);
     WeightMetadataStore::Result<WeightResidencyObservation>

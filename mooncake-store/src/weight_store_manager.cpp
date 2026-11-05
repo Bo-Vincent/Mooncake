@@ -280,17 +280,7 @@ WeightStoreManager::BeginWeightImport(const BeginWeightImportRequest& request) {
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
-    auto activity = PrepareImportActivity(*mutation->next);
-    if (!activity) return tl::make_unexpected(activity.error());
-    auto importing = PersistAndPublishWeightMutation(*mutation);
-    if (importing && !mutation->no_op) {
-        std::lock_guard lock(import_activity_mutex_);
-        import_activity_[TenantId(importing->identity.tenant_id)
-                             .MakeScopedKey(
-                                 importing->manifest.payload_group_id)] =
-            std::move(*activity);
-    }
-    return importing;
+    return PersistAndPublishWeightImport(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
@@ -469,6 +459,22 @@ WeightStoreManager::ValidateWeightGroupForCommit(
         .hot_ratio = ratio,
         .preferred_placement_satisfied = preferred_placement_satisfied,
     };
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
+WeightStoreManager::PersistAndPublishWeightImport(
+    const WeightMetadataMutation& mutation) {
+    auto activity = PrepareImportActivity(*mutation.next);
+    if (!activity) return tl::make_unexpected(activity.error());
+    auto importing = PersistAndPublishWeightMutation(mutation);
+    if (importing && !mutation.no_op) {
+        std::lock_guard lock(import_activity_mutex_);
+        import_activity_[TenantId(importing->identity.tenant_id)
+                             .MakeScopedKey(
+                                 importing->manifest.payload_group_id)] =
+            std::move(*activity);
+    }
+    return importing;
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
@@ -1429,10 +1435,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                             .payload_layout = claim.import.payload_layout,
                         },
                         now_ms, true);
-                    if (import && PersistAndPublishWeightMutation(*import)) {
-                        if (!import->no_op) {
-                            RegisterImportActivity(*import->next);
-                        }
+                    if (import && PersistAndPublishWeightImport(*import)) {
                         ++actions;
                     }
                     continue;
@@ -1538,11 +1541,8 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
                         .payload_layout = claim.import.payload_layout,
                     },
                     now_ms, true);
-                if (!imported || !PersistAndPublishWeightMutation(*imported)) {
+                if (!imported || !PersistAndPublishWeightImport(*imported)) {
                     continue;
-                }
-                if (!imported->no_op) {
-                    RegisterImportActivity(*imported->next);
                 }
             }
             ++actions;
@@ -1830,6 +1830,10 @@ WeightStoreManager::BeginWeightUpsert(const BeginWeightUpsertRequest& request) {
     if (!import) {
         return tl::make_unexpected(import.error());
     }
+    auto activity = PrepareImportActivity(*import->next);
+    if (!activity) {
+        return tl::make_unexpected(activity.error());
+    }
     auto claim = weight_metadata_.PrepareBeginUpsert(normalized, now_ms);
     if (!claim) {
         return tl::make_unexpected(claim.error());
@@ -1881,11 +1885,7 @@ WeightStoreManager::BeginWeightUpsert(const BeginWeightUpsertRequest& request) {
     if (!import) {
         return tl::make_unexpected(import.error());
     }
-    auto importing = PersistAndPublishWeightMutation(*import);
-    if (importing && !import->no_op) {
-        RegisterImportActivity(*importing);
-    }
-    return importing;
+    return PersistAndPublishWeightImport(*import);
 }
 
 WeightMetadataStore::Result<WeightLineageMetadata>
