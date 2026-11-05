@@ -158,23 +158,6 @@ class ManagedInMemoryStore(InMemoryStore):
         self.catalog[identity] = deleting
         return deleting, 0, 0
 
-    def reconcile_weight_revision(self, *args):
-        identity = self._identity(args)
-        current = self.catalog[identity]
-        if current.availability is not WeightAvailabilityState.DELETING:
-            return current, 0, 0
-        deleted = replace(
-            current,
-            availability=WeightAvailabilityState.DELETED,
-            residency=WeightResidencyState.ABSENT,
-            operation_id=None,
-            observed_hot_ratio=0.0,
-            metadata_generation=current.metadata_generation + 1,
-            updated_at_ms=current.updated_at_ms + 1,
-        )
-        self.catalog[identity] = deleted
-        return deleted, 0, 0
-
     def _start_operation(
         self,
         current: WeightRevisionMetadata,
@@ -519,9 +502,10 @@ def test_weight_management_crud_and_operation_facade() -> None:
         mixed_hot_ratio=0.25,
         expected_metadata_generation=updated.metadata_generation,
     )
-    assert weight_store.weight_get_operation(
-        operation.operation_id, tenant_id="tenant-a"
-    ) == operation
+    assert (
+        weight_store.weight_get_operation(operation.operation_id, tenant_id="tenant-a")
+        == operation
+    )
 
     migrated = raw.complete_operation(operation.operation_id)
 

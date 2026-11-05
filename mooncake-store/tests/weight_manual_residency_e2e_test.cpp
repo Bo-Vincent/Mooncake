@@ -71,8 +71,10 @@ class WeightManualResidencyE2ETest : public ::testing::Test {
             .payload_group_id = {},
             .expected_payload_count = 4,
             .expected_logical_bytes = 4 * kBytes,
-            .policy = WeightStoragePolicy{.preferred_residency =
-                                              WeightResidencyState::HOT},
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL},
             .affinity_summary = {.affinity_count = 2,
                                  .affinity_digest = std::string(64, 'c')},
         });
@@ -182,28 +184,6 @@ TEST_F(WeightManualResidencyE2ETest,
         ASSERT_NO_FATAL_FAILURE(Migrate(target));
         ASSERT_NO_FATAL_FAILURE(ExpectPayloads());
     }
-}
-
-TEST_F(WeightManualResidencyE2ETest, RejectsAutomaticPolicyAtImport) {
-    auto rejected = reader_->begin_weight_import({
-        .identity = Identity(),
-        .payload_group_id = {},
-        .expected_payload_count = 4,
-        .expected_logical_bytes = 4 * kBytes,
-        .policy =
-            WeightStoragePolicy{
-                .preferred_residency = WeightResidencyState::HOT,
-                .migration_mode = WeightMigrationMode::AUTO},
-        .affinity_summary = {.affinity_count = 2,
-                             .affinity_digest = std::string(64, 'c')},
-    });
-    ASSERT_TRUE(rejected.has_value());
-    ASSERT_FALSE(rejected->has_value());
-    EXPECT_EQ(rejected->error(), WeightManagementError::INVALID_ARGUMENT);
-    auto absent = reader_->get_weight_revision({.identity = Identity()});
-    ASSERT_TRUE(absent.has_value());
-    ASSERT_FALSE(absent->has_value());
-    EXPECT_EQ(absent->error(), WeightManagementError::NOT_FOUND);
 }
 
 class WeightManualResidencyNoDiskTest : public WeightManualResidencyE2ETest {

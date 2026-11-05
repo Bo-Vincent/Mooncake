@@ -120,11 +120,39 @@ TEST(WeightManagementContractTest, RejectsInvalidStoragePolicyEnums) {
               static_cast<int>(WeightManagementError::POLICY_UNSATISFIABLE));
     auto policy = WeightStoragePolicy{};
     EXPECT_TRUE(ValidateWeightStoragePolicy(policy).ok());
-    EXPECT_EQ(WeightMigrationMode::MANUAL, policy.migration_mode);
-    policy.migration_mode = WeightMigrationMode::AUTO;
-    EXPECT_FALSE(ValidateWeightStoragePolicy(policy).ok());
     policy.migration_mode = static_cast<WeightMigrationMode>(255);
     EXPECT_FALSE(ValidateWeightStoragePolicy(policy).ok());
+}
+
+TEST(WeightManagementContractTest, DefinesGenerationAwareUpsertContract) {
+    EXPECT_EQ(0, static_cast<int>(WeightUpsertMode::PUT_FIRST));
+    EXPECT_EQ(1, static_cast<int>(WeightUpsertMode::DELETE_FIRST));
+
+    const WeightLineageIdentity lineage{
+        .tenant_id = "tenant-a",
+        .name_space = "production",
+        .resource_id = "llama-70b",
+        .revision = "step-100",
+    };
+    EXPECT_TRUE(ValidateWeightLineageIdentity(lineage).ok());
+    EXPECT_EQ(lineage, ToWeightLineageIdentity(ValidIdentity()));
+    EXPECT_FALSE(MakeWeightLineageMetadataKey(lineage).empty());
+}
+
+TEST(WeightManagementContractTest, ParsesWeightPolicyConfigStrictly) {
+    EXPECT_EQ(WeightResidencyState::HOT, ParseWeightResidencyTarget("hot"));
+    EXPECT_EQ(WeightResidencyState::COLD, ParseWeightResidencyTarget("cold"));
+    EXPECT_EQ(WeightResidencyState::MIXED, ParseWeightResidencyTarget("mixed"));
+    EXPECT_FALSE(ParseWeightResidencyTarget("HOT").has_value());
+    EXPECT_FALSE(ParseWeightResidencyTarget("unknown").has_value());
+    EXPECT_EQ("mixed", WeightResidencyTargetName(WeightResidencyState::MIXED));
+
+    EXPECT_EQ(WeightMigrationMode::PINNED, ParseWeightMigrationMode("pinned"));
+    EXPECT_EQ(WeightMigrationMode::MANUAL, ParseWeightMigrationMode("manual"));
+    EXPECT_EQ(WeightMigrationMode::AUTO, ParseWeightMigrationMode("auto"));
+    EXPECT_FALSE(ParseWeightMigrationMode("AUTO").has_value());
+    EXPECT_FALSE(ParseWeightMigrationMode("automatic").has_value());
+    EXPECT_EQ("manual", WeightMigrationModeName(WeightMigrationMode::MANUAL));
 }
 
 TEST(WeightManagementContractTest, EnforcesStateCombinationAndOperationIds) {
@@ -217,63 +245,6 @@ TEST(WeightManagementContractTest, RestrictsAvailabilityTransitions) {
         IsValidWeightAvailabilityTransition(State::DELETED, State::READY));
     EXPECT_FALSE(
         IsValidWeightAvailabilityTransition(State::READY, State::READY));
-}
-
-TEST(WeightManagementContractTest, ValidatesIntrinsicOperationShape) {
-    WeightResidencyOperation valid{
-        .kind = WeightOperationKind::MIGRATING,
-        .target_residency = WeightResidencyState::HOT,
-        .processed_units = 1,
-        .total_units = 2,
-        .processed_bytes = 128,
-        .total_bytes = 256,
-    };
-    EXPECT_TRUE(IsValidWeightOperationShape(valid));
-    auto operation = valid;
-    operation.kind = WeightOperationKind::REPAIRING;
-    EXPECT_TRUE(IsValidWeightOperationShape(operation));
-    operation.kind = static_cast<WeightOperationKind>(255);
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    for (const auto target :
-         {WeightResidencyState::UNKNOWN, WeightResidencyState::ABSENT}) {
-        operation = valid;
-        operation.target_residency = target;
-        EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    }
-    for (const auto ratio :
-         {0.0, 1.0, -0.1, std::numeric_limits<double>::infinity(),
-          std::numeric_limits<double>::quiet_NaN()}) {
-        operation = valid;
-        operation.target_residency = WeightResidencyState::MIXED;
-        operation.target_hot_ratio = ratio;
-        EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    }
-    operation = valid;
-    operation.target_residency = WeightResidencyState::MIXED;
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation.target_hot_ratio = 0.5;
-    EXPECT_TRUE(IsValidWeightOperationShape(operation));
-    operation.target_residency = WeightResidencyState::COLD;
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation.target_hot_ratio.reset();
-    EXPECT_TRUE(IsValidWeightOperationShape(operation));
-    operation = valid;
-    operation.total_units = 0;
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation = valid;
-    operation.total_bytes = 0;
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation = valid;
-    operation.processed_units = operation.total_units + 1;
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation = valid;
-    operation.processed_bytes = operation.total_bytes + 1;
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation = valid;
-    operation.cursor = std::string(1, '\0');
-    EXPECT_FALSE(IsValidWeightOperationShape(operation));
-    operation.cursor = "affinity-a";
-    EXPECT_TRUE(IsValidWeightOperationShape(operation));
 }
 
 TEST(WeightManagementContractTest, RoundTripsWireEnumsAndMetadata) {

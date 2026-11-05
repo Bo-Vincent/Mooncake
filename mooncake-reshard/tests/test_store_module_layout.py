@@ -216,8 +216,21 @@ def test_unmanaged_entrypoints_are_not_exported() -> None:
     assert not hasattr(WeightStoreWriter, "write_tensor")
     assert not hasattr(WeightStoreWriter, "plan")
     assert isinstance(WeightStoreWriter.identity, property)
+    assert isinstance(WeightStoreWriter.request_id, property)
 
 
+def test_weight_upsert_public_signature_is_generation_aware() -> None:
+    assert tuple(signature(WeightStore.weight_upsert).parameters) == (
+        "self",
+        "snapshot",
+        "adapter",
+        "replacing",
+        "expected_metadata_generation",
+        "mode",
+        "tenant_id",
+        "policy",
+        "request_id",
+    )
 
 
 def test_store_rejects_binding_for_different_placement_digest() -> None:

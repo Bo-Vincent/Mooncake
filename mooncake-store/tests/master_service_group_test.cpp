@@ -139,6 +139,20 @@ TEST_F(MasterServiceTest, ResidencyAffinityBatchOrderAndInvalidCounts) {
     EXPECT_EQ(ErrorCode::INVALID_PARAMS, upsert.error());
 }
 
+TEST_F(MasterServiceTest, RemoveAllDoesNotRequestClientWideDiskClear) {
+    MasterService service(
+        MasterServiceConfig::builder().set_enable_offload(true).build());
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
+    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+    EXPECT_EQ(0, service.RemoveAll(true));
+    auto global_clear = service.PollRemoveAll(context.client_id);
+    ASSERT_TRUE(global_clear.has_value());
+    EXPECT_FALSE(*global_clear);
+    EXPECT_EQ(0, service.RemoveAll(TenantId::Default(), true));
+    auto tenant_clear = service.PollRemoveAll(context.client_id);
+    ASSERT_TRUE(tenant_clear.has_value());
+    EXPECT_FALSE(*tenant_clear);
+}
 TEST_F(MasterServiceTest, RemoveAllPreservesManagedGroupImportedDuringScan) {
     MasterService service;
     const auto context = PrepareSimpleSegment(service);
@@ -183,9 +197,13 @@ TEST_F(MasterServiceTest, RemoveAllPreservesManagedGroupImportedDuringScan) {
             .policy =
                 WeightStoragePolicy{
                     .preferred_residency = WeightResidencyState::HOT,
-                    .migration_mode = WeightMigrationMode::MANUAL},
-            .affinity_summary = {.affinity_count = 1,
-                                 .affinity_digest = std::string(64, 'a')},
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
+            .affinity_summary =
+                WeightAffinitySummary{
+                    .affinity_count = 1,
+                    .affinity_digest = std::string(64, 'c'),
+                },
         });
         if (importing) {
             ReplicateConfig config;
@@ -193,7 +211,8 @@ TEST_F(MasterServiceTest, RemoveAllPreservesManagedGroupImportedDuringScan) {
             config.group_ids =
                 std::vector<std::string>{importing->manifest.payload_group_id};
             config.data_type = ObjectDataType::WEIGHT;
-            config.residency_affinity_ids = std::vector<std::string>{"payload"};
+            config.residency_affinity_ids =
+                std::vector<std::string>{payload_key};
             PutCompletedObject(service, client_id, payload_key, config, 1024);
             config.data_type = ObjectDataType::METADATA;
             config.residency_affinity_ids.reset();

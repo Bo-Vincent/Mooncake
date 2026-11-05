@@ -15,6 +15,7 @@ from .snapshot import (
     WeightSnapshotDescriptor,
     _require_nonempty_string,
 )
+from .upsert import WeightUpsertContext
 
 if TYPE_CHECKING:
     from .store import WeightStore
@@ -38,8 +39,30 @@ class WeightStoreWriter:
             adapter,
             tenant_id=tenant_id,
             policy=policy,
+            upsert=None,
         )
 
+    @classmethod
+    def _for_upsert(
+        cls,
+        weight_store: WeightStore,
+        snapshot: WeightSnapshotDescriptor,
+        adapter: WeightSnapshotAdapter,
+        *,
+        tenant_id: str,
+        policy: Optional[WeightStoragePolicy],
+        upsert: WeightUpsertContext,
+    ) -> WeightStoreWriter:
+        writer = cls.__new__(cls)
+        writer._initialize(
+            weight_store,
+            snapshot,
+            adapter,
+            tenant_id=tenant_id,
+            policy=policy,
+            upsert=upsert,
+        )
+        return writer
 
     def _initialize(
         self,
@@ -49,6 +72,7 @@ class WeightStoreWriter:
         *,
         tenant_id: str,
         policy: Optional[WeightStoragePolicy],
+        upsert: Optional[WeightUpsertContext],
     ) -> None:
         self._weight_store = weight_store
         self.snapshot = snapshot
@@ -57,13 +81,23 @@ class WeightStoreWriter:
         self._placement = self._source.placement
         self._bindings = tuple(self._source.bindings)
         self._validate_source_identity()
-        self._plan = weight_store._begin_weight_put(
-            self._placement,
-            self._bindings,
-            namespace=snapshot.namespace,
-            tenant_id=tenant_id,
-            policy=policy,
-        )
+        self._upsert = upsert
+        if upsert is None:
+            self._plan = weight_store._begin_weight_put(
+                self._placement,
+                self._bindings,
+                namespace=snapshot.namespace,
+                tenant_id=tenant_id,
+                policy=policy,
+            )
+        else:
+            self._plan = weight_store._begin_weight_upsert(
+                self._placement,
+                self._bindings,
+                namespace=snapshot.namespace,
+                policy=policy,
+                context=upsert,
+            )
         self._binding_by_participant = {
             binding.participant_id: binding for binding in self._bindings
         }
@@ -98,6 +132,11 @@ class WeightStoreWriter:
             raise WeightStoreError("weight writer has no revision identity")
         return identity
 
+    @property
+    def request_id(self) -> Optional[str]:
+        """Return the durable replacement request ID for an upsert writer."""
+
+        return None if self._upsert is None else self._upsert.request_id
 
     def weight_put_tensor(
         self,
@@ -175,11 +214,19 @@ class WeightStoreWriter:
         if set(self._required_by_participant) != self._flushed_participants:
             self.abort()
             raise WeightStoreError("Weight snapshot has unflushed participants")
-        manifest = self._weight_store._weight_put_commit(
-            self._plan,
-            self._receipts,
-            on_commit_decision_may_exist=self._mark_commit_decision_may_exist,
-        )
+        if self._upsert is None:
+            manifest = self._weight_store._weight_put_commit(
+                self._plan,
+                self._receipts,
+                on_commit_decision_may_exist=self._mark_commit_decision_may_exist,
+            )
+        else:
+            manifest = self._weight_store._weight_upsert_commit(
+                self._plan,
+                self._receipts,
+                self._upsert,
+                on_commit_decision_may_exist=self._mark_commit_decision_may_exist,
+            )
         self._closed = True
         self._committed = True
         return manifest
@@ -194,7 +241,14 @@ class WeightStoreWriter:
                 "Weight snapshot commit decision may exist; retry commit instead"
             )
         if self._receipts or self._plan.management_identity is not None:
-            self._weight_store._weight_put_abort(self._plan, self._receipts)
+            if self._upsert is None:
+                self._weight_store._weight_put_abort(self._plan, self._receipts)
+            else:
+                self._weight_store._weight_upsert_abort(
+                    self._plan,
+                    self._receipts,
+                    self._upsert,
+                )
         self._closed = True
 
     def _mark_commit_decision_may_exist(self) -> None:

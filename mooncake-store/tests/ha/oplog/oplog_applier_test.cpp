@@ -460,7 +460,7 @@ TEST_F(OpLogApplierTest, CancelledOperationRejectsLateProgressReplay) {
     EXPECT_NE(metadata.residency, operation.target_residency);
     {
         auto conflicting = operation;
-        ++conflicting.processed_units;
+        ++conflicting.processed_bytes;
         ReplayDiagnosticSink sink;
         EXPECT_FALSE(applier.ApplyOpLogEntry(
             MakeEntry(4, OpType::WEIGHT_METADATA_UPSERT, key,
@@ -738,16 +738,6 @@ TEST_F(OpLogApplierTest, RejectsPr3OperationWireShapesWithoutMutation) {
         EXPECT_FALSE(DecodeBatchOpLogSnapshotWeightMetadata(bytes));
         EXPECT_EQ(before, standby.SnapshotWeightMetadata());
     }
-}
-
-TEST_F(OpLogApplierTest, AcceptsUnchangedWeightLeaseWireShape) {
-    StandbyMetadataStore standby;
-    OpLogApplier applier(&standby, cluster_id_);
-    const auto current = MakeWeightMetadata(1);
-    ASSERT_TRUE(applier.ApplyOpLogEntry(
-        MakeEntry(1, OpType::WEIGHT_METADATA_UPSERT,
-                  MakeWeightRevisionMetadataKey(current.identity),
-                  SerializeWeightUpsert(current))));
     const WeightRevisionLease lease{.lease_id = 1,
                                     .identity = current.identity,
                                     .holder = "old-reader",
@@ -757,11 +747,11 @@ TEST_F(OpLogApplierTest, AcceptsUnchangedWeightLeaseWireShape) {
         struct_pack::serialize<struct_pack::sp_config::ENABLE_TYPE_INFO>(lease);
     ASSERT_EQ(105u, lease_bytes.size());
     ASSERT_EQ(0xddba1156u, XXH32(lease_bytes.data(), lease_bytes.size(), 0));
-    EXPECT_TRUE(applier.ApplyOpLogEntry(
+    EXPECT_FALSE(applier.ApplyOpLogEntry(
         MakeEntry(2, OpType::WEIGHT_LEASE_UPSERT, MakeWeightLeaseMetadataKey(1),
                   std::string(lease_bytes.begin(), lease_bytes.end()))));
-    EXPECT_EQ(3u, applier.GetExpectedSequenceId());
-    EXPECT_EQ(lease, standby.GetWeightLease(1));
+    EXPECT_EQ(2u, applier.GetExpectedSequenceId());
+    EXPECT_EQ(before, standby.SnapshotWeightMetadata());
 }
 
 TEST_F(OpLogApplierTest, PublishesWeightOperationAtomicallyToSnapshotReaders) {
@@ -1488,6 +1478,60 @@ TEST_F(OpLogApplierTest, TestApplySegmentOperations_Mixed) {
     auto info3 = registry.GetSegment("192.168.1.3:12345");
     ASSERT_TRUE(info3.has_value());
     EXPECT_EQ(8192u, info3->capacity);
+}
+
+TEST_F(OpLogApplierTest, AppliesWeightLineageWithCasOrdering) {
+    const auto base = MakeWeightIdentity();
+    auto target = base;
+    target.weight_generation = 8;
+    const WeightLineageMetadata lineage{
+        .identity = ToWeightLineageIdentity(base),
+        .lineage_metadata_generation = 1,
+        .committed_weight_generation = base.weight_generation,
+        .latest_claim =
+            WeightUpsertClaim{
+                .request_id = "request-1",
+                .base_identity = base,
+                .target_identity = target,
+                .mode = WeightUpsertMode::PUT_FIRST,
+                .phase = WeightUpsertPhase::PREPARING_TARGET,
+                .expected_base_metadata_generation = 2,
+                .import =
+                    WeightUpsertImportSummary{
+                        .payload_group_id = MakeWeightPayloadGroupId(target),
+                        .expected_payload_count = 1,
+                        .expected_logical_bytes = 1024,
+                        .policy =
+                            WeightStoragePolicy{
+                                .preferred_residency =
+                                    WeightResidencyState::HOT,
+                                .migration_mode = WeightMigrationMode::MANUAL,
+                            },
+                        .affinity_summary =
+                            WeightAffinitySummary{
+                                .affinity_count = 1,
+                                .affinity_digest = std::string(64, 'c'),
+                            },
+                    },
+                .created_at_ms = 100,
+                .updated_at_ms = 100,
+            },
+    };
+    auto entry =
+        MakeEntry(1, OpType::WEIGHT_LINEAGE_UPSERT,
+                  MakeWeightLineageMetadataKey(lineage.identity),
+                  SerializePayload(WeightLineageUpsertOp{.lineage = lineage}));
+    ASSERT_TRUE(applier_->ApplyOpLogEntry(entry));
+    EXPECT_EQ(lineage,
+              mock_metadata_store_->GetWeightLineage(lineage.identity));
+
+    auto stale = lineage;
+    stale.committed_weight_generation = target.weight_generation;
+    entry =
+        MakeEntry(2, OpType::WEIGHT_LINEAGE_UPSERT,
+                  MakeWeightLineageMetadataKey(lineage.identity),
+                  SerializePayload(WeightLineageUpsertOp{.lineage = stale}));
+    EXPECT_FALSE(applier_->ApplyOpLogEntry(entry));
 }
 
 }  // namespace mooncake::test

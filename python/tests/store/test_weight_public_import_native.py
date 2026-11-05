@@ -13,6 +13,8 @@ def test_weight_types_are_available_through_public_store_facade() -> None:
     from mooncake.store import (
         WeightAffinitySummary,
         WeightAvailabilityState,
+        WeightLineageIdentity,
+        WeightLineageMetadata,
         WeightManagementError,
         WeightManifestReference,
         WeightMigrationMode,
@@ -24,11 +26,17 @@ def test_weight_types_are_available_through_public_store_facade() -> None:
         WeightRevisionMetadata,
         WeightRevisionView,
         WeightStoragePolicy,
+        WeightUpsertClaim,
+        WeightUpsertImportSummary,
+        WeightUpsertMode,
+        WeightUpsertPhase,
     )
 
     public_types = (
         WeightAffinitySummary,
         WeightAvailabilityState,
+        WeightLineageIdentity,
+        WeightLineageMetadata,
         WeightManagementError,
         WeightManifestReference,
         WeightMigrationMode,
@@ -40,6 +48,10 @@ def test_weight_types_are_available_through_public_store_facade() -> None:
         WeightRevisionMetadata,
         WeightRevisionView,
         WeightStoragePolicy,
+        WeightUpsertClaim,
+        WeightUpsertImportSummary,
+        WeightUpsertMode,
+        WeightUpsertPhase,
     )
     for public_type in public_types:
         assert public_type.__name__ in store.__all__

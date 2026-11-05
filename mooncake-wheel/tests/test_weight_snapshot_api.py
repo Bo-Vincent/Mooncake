@@ -5,10 +5,23 @@ from __future__ import annotations
 import unittest
 
 import mooncake.store as native_store
+from mooncake.reshard.weight import WeightUpsertMode
 from mooncake.reshard.weight.store import WeightStore, WeightStoreWriter
 
 
 class TestWeightSnapshotApi(unittest.TestCase):
+    def test_native_config_preserves_session_and_affinity_properties(self) -> None:
+        config = native_store.ReplicateConfig()
+        self.assertIsNone(config.session_ids)
+        self.assertIsNone(config.residency_affinity_ids)
+        config.session_ids = ["session"]
+        config.residency_affinity_ids = ["affinity"]
+        self.assertEqual(config.session_ids, ["session"])
+        self.assertEqual(config.residency_affinity_ids, ["affinity"])
+        config.residency_affinity_ids = None
+        self.assertIsNone(config.residency_affinity_ids)
+        self.assertEqual(config.session_ids, ["session"])
+
     def test_native_weight_metadata_exposes_access_recency(self) -> None:
         self.assertTrue(
             hasattr(native_store.WeightRevisionMetadata, "last_accessed_at_ms")
@@ -24,8 +37,11 @@ class TestWeightSnapshotApi(unittest.TestCase):
         store = native_store.MooncakeDistributedStore()
 
         self.assertTrue(callable(WeightStore.weight_put))
+        self.assertTrue(callable(WeightStore.weight_upsert))
         self.assertTrue(callable(WeightStore.weight_update_policy))
         self.assertFalse(hasattr(WeightStore, "weight_update"))
+        self.assertEqual(int(WeightUpsertMode.PUT_FIRST), 0)
+        self.assertEqual(int(WeightUpsertMode.DELETE_FIRST), 1)
         self.assertTrue(issubclass(WeightStoreWriter, object))
 
         for name in (

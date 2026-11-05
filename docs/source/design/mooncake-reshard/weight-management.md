@@ -12,36 +12,33 @@ independent tensor-level management metadata.
 ## Delivery Status
 
 This stage provides Master RPC and C++ client access to revision management,
-managed-group removal protection, lease-fenced deletion, and basic residency
-operation reconciliation with HA recovery. This stage adds configurable
-HOT/COLD/MIXED policies and explicit affinity-aware migration. MANUAL is the
-default mode; PINNED preserves its requested residency. AUTO is recognized but
-rejected by policy validation until its scheduler is delivered. Automatic
-migration, generation replacement, and the managed Python `WeightStore` facade
-remain follow-up work. The upload flow below describes the caller's responsibilities;
-the Python facade is not required to use the C++ interfaces.
+managed-group removal protection, lease-fenced deletion, residency policies,
+automatic migration, and operation reconciliation with HA recovery. The managed
+Python `WeightStore` facade provides the upload and replacement lifecycle; C++
+callers can use the same management interfaces directly.
 
-This development-stage change replaces the earlier persistence format directly.
-Weight snapshots use schema 2; earlier snapshots and metadata-only OpLog
-records are rejected. There is no migration or compatibility decoder. New
-operation envelopes and snapshots retain atomic publication and replay.
-
-Imports declare an affinity count and digest. Each payload object carries an
-opaque residency-affinity ID, and all objects with that ID move as one unit.
-The manifest remains in memory. Mixed planning chooses complete affinities;
-it never splits an affinity to reach the requested hot-byte ratio. Observed
-ratios count readable payload bytes, while availability separately reports
-missing members. Background migration spends one work item per complete
-affinity; deletion spends one per object and shares its remaining budget with
-the following reconciliation pass.
+The PR3 lifecycle schema supports its earlier metadata-only OpLog writer.
+The later integration schema adds mandatory residency-affinity metadata and
+different operation progress units. It does not inherit that wire migration:
+old metadata, operation envelopes, snapshots, and bare lease records are
+rejected without advancing replay or partially publishing state. Its existing
+schema-2 snapshots remain readable by schema 3 through the compatible lineage
+extension. Migration from PR3 requires a separate design and acceptance run
+before the integration schema is released; missing affinity data must not be
+invented or active operations silently discarded.
 
 ## Authority Model
+
+The integration preserves the main branch's best-effort HCA hint fields in
+`ReplicateConfig` before the residency-affinity extension, including per-key
+selection and subset filtering. This is wire/configuration interoperability;
+it does not add HCA-aware scheduling to this integration branch.
 
 Three records have distinct authority:
 
 | Authority | Location | Owns | Does not own |
 | --- | --- | --- | --- |
-| Weight Metadata Store | Store Master memory, HA OpLog, and standby-generated batch OpLog snapshot | exact revision discovery, availability, residency summary, operation progress, revision leases, manifest reference | tensor geometry, payload contents, physical replica addresses |
+| Weight Metadata Store | Store Master memory, HA OpLog, and standby-generated batch OpLog snapshot | exact revision discovery, availability, residency summary, operation progress, revision leases, manifest reference, lineage claims and generation watermarks | tensor geometry, payload contents, physical replica addresses, serving active head |
 | `StoredWeightManifest` | immutable Store `METADATA` object | tensor descriptors and tensor-fragment-to-object-range mapping | lifecycle state, leases, live runtime addresses |
 | Store object metadata | existing per-key Master metadata | replica placement and status in memory, local disk, DFS, or NoF | revision discovery, tensor meaning, serving activation |
 
@@ -92,6 +89,32 @@ Physical work may be partial while an operation is running. The metadata store k
 the operation non-terminal until reconciliation observes the required state
 for every member, or an explicit delete cancels the operation.
 
+Replacement state is keyed by the lineage
+`(tenant_id, namespace, resource_id, revision)`. Its claim and committed
+generation watermark provide ordering, CAS fencing, and recovery. They do not
+identify which generation a serving system has activated.
+
+## Master Components
+
+Weight RPCs use the existing Master server and retain their handler identifiers.
+After tenant binding, the handlers forward to `WeightStoreManager`.
+
+- `WeightStoreManager` owns `WeightMetadataStore`, group/lineage operation locks,
+  policy configuration, and the import, lease, migration, upsert, deletion, and
+  reconciliation workflows.
+- `MasterStoreBackend` implements the narrow `WeightStoreBackend` interface using
+  existing Store group/object observations, replica operations, and durable
+  OpLog append. It does not maintain another copy of object or replica metadata.
+- `MasterService` retains generic Store state, object locks, and the physical
+  operations. Generic put, removal, and eviction paths keep their managed-group
+  and lease/generation guards.
+- Master HA coordinates snapshot export, recovery, and promotion through the
+  manager. Background work and durable callbacks stop before manager destruction.
+
+Operations acquire lineage locks before group locks and then enter the existing
+object-level operations. This is an in-process ownership boundary, not a separate
+service or a new RPC endpoint.
+
 ## Revision Identity and Manifest Location
 
 A revision is addressed by:
@@ -104,6 +127,10 @@ When multi-tenancy is disabled, the Master accepts only the `default` tenant
 for weight imports. It rejects another tenant rather than silently changing
 the revision identity while writing its OpLog entry. With multi-tenancy
 enabled, the identity retains its tenant throughout publication and replay.
+
+The first four fields form the lineage. Generations within a lineage increase
+strictly. A replacement target must be newer than both its base generation and
+the lineage's committed watermark.
 
 Its manifest object key is canonical:
 
@@ -136,7 +163,7 @@ Availability, physical residency, and an in-progress operation are separate:
 | --- | --- | --- |
 | Availability | `IMPORTING`, `READY`, `DEGRADED`, `DELETING`, `DELETED` | whether the complete revision is safe to discover and load |
 | Residency | `UNKNOWN`, `HOT`, `COLD`, `MIXED`, `ABSENT` | observed placement across required group members |
-| Operation | optional operation ID, with `MIGRATING` or `REPAIRING` kind | durable non-terminal group work |
+| Operation | `NONE`, `MIGRATING`, `REPAIRING` | durable non-terminal group work |
 
 The current operation entry point starts `MIGRATING` toward HOT, COLD, or MIXED.
 `REPAIRING` is reserved for a follow-up recovery workflow.
@@ -149,6 +176,23 @@ removal produces the retained `DELETED`/`ABSENT` tombstone.
 For an incomplete revision, residency describes the readable members still present;
 `DEGRADED` reports the missing required members. Missing members alone do not
 mean the remaining objects span multiple storage tiers.
+`observed_hot_ratio` divides readable payload bytes with memory replicas by
+readable payload bytes, excluding the resident manifest. Completeness still
+requires the manifest's full payload count, byte count, hash, and affinities;
+a partial revision cannot complete migration merely by reaching its target ratio.
+
+Each background pass shares a work budget across revisions and upsert cleanup.
+Deletion spends one item per member and removes the manifest last. Migration
+spends one item per complete affinity, which may contain multiple members;
+this is not a strict bound on backend member calls. Manifest promotion is a
+separate control item. Pending affinities rotate so subsequent passes can
+schedule other units. The per-round member and byte limits remain soft bounds
+for an indivisible first affinity. Weight work runs on its dedicated worker.
+Lineage and revision sweeps alternate priority and share any remaining budget.
+A separate lineage cursor prevents a blocked retirement from monopolizing later
+lineages. Revision cleanup retains its existing rotation and memory-pressure
+priority ordering. Cursors are local scheduling hints and do not change durable
+operation progress.
 
 Commit, abort, lease acquisition, operation start, and deletion check the
 caller's `expected_metadata_generation`. Lease renewal and release use the
@@ -156,6 +200,16 @@ lease identity; reconciliation prepares mutations against the generation it
 observes. A stale generation fails with `STALE_GENERATION`. A retry of an
 uncertain import commit with the
 same generation and immutable manifest reference is idempotent.
+
+A lineage has at most one non-terminal replacement claim. The claim records a
+`request_id`, base and target identities, mode, and phase. Retrying the same ID
+with identical arguments resumes that claim; another request cannot create a
+concurrent successor.
+
+Each revision persists a `WeightStoragePolicy` with a preferred residency
+(`HOT`, `COLD`, or `MIXED`), a MIXED hot-byte ratio, and a migration mode
+(`PINNED`, `MANUAL`, or `AUTO`). A per-import policy overrides the Python
+`WeightStore` default, which overrides the Master cluster default.
 
 ## Import and Publication
 
@@ -168,15 +222,6 @@ The managed upload sequence is:
 4. `CommitWeightImport` validates exact group membership and the manifest
    reference, then durably publishes `READY`.
 5. `GetWeightRevision` or bounded `ListWeightRevisions` can discover it.
-
-An import can specify its policy. When omitted, it uses the
-`WeightStoragePolicy` defaults (MIXED, a 0.5 hot ratio, and MANUAL). Commit publishes
-READY with readable HOT payloads; it does not wait for preferred placement.
-For COLD or MIXED preference, that same commit records an initial migration,
-including under MANUAL or PINNED policy. The background worker finishes that
-declared placement asynchronously. MANUAL does not subsequently choose targets
-from memory pressure or access recency; later migrations require explicit
-requests. Policy preference and observed residency are separate query fields.
 
 `READY` is never inferred from key prefixes. An abandoned import is handled by
 the explicit abort/reconciliation policy. `weight_import_idle_timeout_ms`
@@ -206,24 +251,53 @@ remove the last readable replica. Revision leases do not replace framework
 allocation guards, runtime binding generations, or Store's per-object read
 leases; those protect different ownership boundaries.
 
-## Residency, Rehydration, and Deletion
+## Generation Replacement
+
+`WeightStore.weight_upsert(snapshot, adapter, *, replacing,
+expected_metadata_generation, mode=WeightUpsertMode.PUT_FIRST,
+tenant_id="default", policy=None, request_id=None)` creates a writer for a
+higher generation in the same lineage as `replacing`. When `request_id` is
+omitted, `WeightStore` deterministically hashes the canonical base identity,
+target identity, mode, and `expected_metadata_generation`. The same call after
+a lost begin response therefore derives the same ID. An explicit `request_id`
+is used unchanged. This operation replaces one immutable generation with
+another; it is not an in-place overwrite of an ordinary Store key.
+
+`PUT_FIRST` is the default. Store imports the target and publishes it `READY`
+before durably fencing and retiring the base. New base leases and renewals are
+then rejected, existing leases drain, and reconciliation deletes the base. A
+failed target upload or commit leaves the base intact. Peak storage approaches
+two complete revisions.
+
+`DELETE_FIRST` requires the base to have no active lease or lifecycle
+operation. Store fences and deletes the base before allowing target payload
+import. This reduces peak storage, but creates an unavailable interval until
+the target reaches `READY`; a target failure cannot be rolled back to the
+deleted base. HA recovery resumes either mode from the persisted claim phase
+and observed revision/group state.
+
+## Residency, Migration, and Deletion
 
 `StartWeightResidencyOperation` durably records the operation ID, target,
 fenced metadata generation, and progress. Reconciliation then uses existing
 per-object primitives:
 
-- cold migration removes memory replicas only after a readable cold replica exists
-  for each affected member;
-- hot migration queues promotion for every payload affinity and waits until all
-  required members have readable memory replicas;
+- `MIGRATING` to `COLD` or `MIXED` removes memory replicas only after a readable
+  cold replica exists for each affected member;
+- `MIGRATING` to `HOT` queues promotion for every group member and waits until
+  all required members have readable memory replicas;
 - busy or incomplete members keep the operation in progress;
+- loss of required members marks the revision `DEGRADED` while preserving its
+  active operation; progress counters retain their high-water marks, while
+  completion still requires all members to satisfy the target residency;
 - deletion blocks new leases, waits for live leases, removes payload objects,
   removes the manifest last, verifies absence, and retains a tombstone.
 
-An explicit COLD or MIXED request may queue payload offloads before memory
-eviction. Acceptance records pending work, not completion; missing cold copies
-or offload capacity can leave it pending with observable error state. The
-manifest stays in memory. An explicit delete may cancel a
+The member-based PR3 protocol requires existing cold copies at COLD admission.
+This affinity-aware integration instead queues payload offload for both MANUAL
+and AUTO migration and keeps the manifest resident in memory. Progress depends
+on available offload and promotion resources; admission does not guarantee
+convergence in every deployment. An explicit delete may cancel a
 pending residency operation, including one stalled by missing replicas or
 promotion capacity. After the ordinary generation and lease checks, cancellation
 and `DELETING` publish together in one durable record, before physical removal.
@@ -242,26 +316,30 @@ managed groups. Only the weight lifecycle path may change their aggregate
 residency or availability.
 
 Reconciliation runs on a dedicated Master worker, not the general task-cleanup
-thread, and is not exposed as a client RPC. A background pass shares a bounded
-number of affinity migration or member deletion actions across revisions. This bounds physical action attempts,
-not the time required for a durable write or the cost of observing group metadata.
+thread, and is not exposed as a client RPC. A background pass shares bounded
+work items across revisions, as defined above. This bounds selected units,
+not individual migration member calls, durable-write latency, or metadata scans.
 Clients use operation and revision queries to observe convergence. The operation
 `cursor` reports progress; it is not a client-controlled resume token.
 
 ## Recovery and HA Rollout
 
-Weight metadata, leases, and operation records use durable-before-visible
-OpLog publication. Standby replay stores them in a separate weight-metadata
+Weight metadata, leases, operation records, lineage claims, and generation
+watermarks use durable-before-visible OpLog publication. Standby replay stores
+them in a separate weight-metadata
 namespace rather than encoding them as fake object metadata. Batch OpLog
 snapshots capture that namespace with object and segment metadata at the same
 durable replay cursor. Derived group indexes are rebuilt from restored
 metadata records.
 
-OpLog replay accepts the current metadata-plus-operation envelope. Earlier
-metadata-only payloads and invalid envelopes are rejected without advancing the
-replay cursor. This development-stage replacement requires fresh weight state;
-there is no rolling upgrade or old-format migration contract. Cancelled and
-completed operations are terminal, including for late progress and error reports.
+PR3 replay supports its legacy metadata-only payload and its operation envelope.
+The affinity-aware integration schema described here accepts its own operation
+envelope and rejects earlier weight-state schemas, including PR3 snapshots and
+lease records. Schema 2 to schema 3 retains the compatible lineage extension;
+this does not migrate the earlier member-based operation format. A migration
+from PR3 must be designed and validated separately before release.
+The `cancelled` terminal message also requires upgraded readers before writers
+enable cancellation, even though the serialized envelope shape is unchanged.
 
 Batch-OpLog snapshots containing weight state use a version-2 manifest with a
 checksummed weight-state artifact captured at the same replay cursor as object
@@ -280,36 +358,59 @@ prove that an in-flight write is absent from the durable log; recovery may
 still replay it, so callers must query the revision before retrying an
 uncertain operation.
 
-Clusters using HA plus the etcd batch OpLog fail closed for weight-management
-mutations unless the operator sets
-`weight_management_oplog_capability_confirmed=true`. Set it only after every
-configured standby runs a version that understands all weight metadata and
-lease OpLog entries, including the `cancelled` operation terminal. This is an
-explicit rolling-upgrade capability assertion,
-not automatic standby discovery. Reads and ordinary KV operations are not
-gated by it.
+After restoration, reconciliation resumes target import, base-lease drain, or
+base deletion from the stored replacement phase. Replay cannot lower the
+committed watermark or create another successor for the lineage.
 
-The capability flag admits new mutations; it is not a rollback switch.
-Disabling it does not remove existing weight state loaded through batch
+Clusters using HA plus the etcd batch OpLog have separate rollout gates. The
+existing `weight_management_oplog_capability_confirmed` flag covers ordinary
+Weight metadata OpTypes 8–11, including the `cancelled` operation terminal.
+Enable it only after every configured standby supports those entries. Lineage claims use OpType 12, and
+`weight_upsert` additionally requires
+`weight_lineage_oplog_capability_confirmed=true`.
+
+Upgrade every standby to a version that can replay OpType 12 before enabling
+the lineage flag on the active configuration. While the new flag is false,
+lineage mutations fail closed. Ordinary Weight mutations remain governed by
+the original flag, and Store KV reads and writes are unaffected.
+
+These capability flags admit new mutations; they are not rollback switches.
+Disabling them does not remove existing weight or lineage state loaded through batch
 snapshot restore or standby promotion. Such a cluster still requires readers
 that support its weight OpLog and batch snapshot formats.
 
 ## Serving-System Boundary
 
 Store owns durable revision discovery, readable-residency state, leases, and
-safe reclamation. SGLang or another runtime owns live GPU addresses, runtime
+safe reclamation. Its lineage watermark is not a serving-active pointer.
+SGLang or another runtime owns live GPU addresses, runtime
 bindings, allocation guards, and worker-local snapshot generations. Slime,
 Kubernetes, Ray, or another serving control plane owns multi-worker activation,
 traffic switching, and rollback. Store does not choose a globally active
 serving revision.
 
-## Integration Boundary
+## Public API Boundary
 
-This layer exposes the native lifecycle primitives through the Master RPC and
-C++ client surfaces. A follow-up change adds the managed `WeightStore` Python
-facade that composes these primitives with manifest upload and load. A
-framework adapter remains responsible for constructing and validating the
-immutable tensor manifest, holding runtime allocation guards, and activating a
-revision in the serving system. Manifest-only objects written without a Weight
-metadata record are outside this lifecycle and are not discovered
-automatically.
+Applications publish with `weight_put` and
+`WeightStoreWriter.weight_put_tensor`, retain the resulting
+`WeightRevisionIdentity`, discover revisions with `weight_get_metadata` or
+`weight_list`, and load with `weight_get`. Policy-only changes use
+`weight_update_policy`; there is no old-name compatibility wrapper. A caller
+uses `weight_upsert` with `replacing=<base identity>` for generation
+replacement and chooses `DELETE_FIRST` only when its capacity constraint
+justifies the explicit downtime and non-rollback window.
+
+There is no unmanaged public path. Manifest keys, upload plans, transaction
+records, and payload transfers are internal details of `WeightStore` and do not
+identify a usable revision. The generic `MooncakeDistributedStore` binding does
+not expose Weight writer shortcuts; callers construct `WeightStore` explicitly.
+
+Data written by an older unmanaged path is not added to revision metadata
+automatically. Publish it again with `weight_put` before relying on discovery,
+leases, group migration, or deletion.
+
+Sparse-update RFCs [#3747](https://github.com/kvcache-ai/Mooncake/issues/3747)
+and [#3953](https://github.com/kvcache-ai/Mooncake/issues/3953) can feed this
+lifecycle through an adapter that materializes a new complete generation. A
+delta-backed revision that directly depends on base payloads needs a separate
+design for dependency leases, base retention, chain depth, and compaction.

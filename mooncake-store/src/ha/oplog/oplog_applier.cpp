@@ -117,6 +117,9 @@ bool OpLogApplier::ApplyOpLogEntry(const OpLogEntry& entry) {
         case OpType::WEIGHT_LEASE_DELETE:
             applied = ApplyWeightLeaseDelete(entry);
             break;
+        case OpType::WEIGHT_LINEAGE_UPSERT:
+            applied = ApplyWeightLineageUpsert(entry);
+            break;
         default:
             LOG(ERROR) << "OpLogApplier: unsupported op_type="
                        << static_cast<int>(entry.op_type)
@@ -258,7 +261,22 @@ bool OpLogApplier::ApplyWeightMetadataUpsert(const OpLogEntry& entry) {
           upsert.operation->operation_id != *next.operation_id ||
           upsert.operation->fenced_metadata_generation !=
               next.metadata_generation ||
-          !IsValidWeightOperationShape(*upsert.operation))) ||
+          (upsert.operation->kind != WeightOperationKind::MIGRATING &&
+           upsert.operation->kind != WeightOperationKind::REPAIRING) ||
+          !IsWeightResidencyTarget(upsert.operation->target_residency) ||
+          (upsert.operation->target_residency == WeightResidencyState::MIXED &&
+           (!upsert.operation->target_hot_ratio.has_value() ||
+            !std::isfinite(*upsert.operation->target_hot_ratio) ||
+            *upsert.operation->target_hot_ratio <= 0.0 ||
+            *upsert.operation->target_hot_ratio >= 1.0)) ||
+          (upsert.operation->target_residency != WeightResidencyState::MIXED &&
+           upsert.operation->target_hot_ratio.has_value()) ||
+          upsert.operation->total_units == 0 ||
+          upsert.operation->total_bytes == 0 ||
+          upsert.operation->processed_units > upsert.operation->total_units ||
+          upsert.operation->processed_bytes > upsert.operation->total_bytes ||
+          (!upsert.operation->cursor.empty() &&
+           !IsValidWeightComponent(upsert.operation->cursor)))) ||
         (!next.operation_id.has_value() && upsert.operation.has_value() &&
          (upsert.operation->identity != next.identity ||
           !IsWeightOperationTerminal(upsert.operation->message) ||
@@ -499,6 +517,41 @@ bool OpLogApplier::ApplyWeightLeaseDelete(const OpLogEntry& entry) {
     return metadata_store_->RemoveWeightLease(
         deletion.lease_id, deletion.identity,
         deletion.fenced_metadata_generation);
+}
+
+bool OpLogApplier::ApplyWeightLineageUpsert(const OpLogEntry& entry) {
+    WeightLineageUpsertOp upsert;
+    if (struct_pack::deserialize_to(upsert, entry.payload) !=
+            struct_pack::errc::ok ||
+        !ValidateWeightLineageMetadata(upsert.lineage).ok() ||
+        NormalizeTenantId(entry.tenant_id) !=
+            upsert.lineage.identity.tenant_id ||
+        entry.object_key !=
+            MakeWeightLineageMetadataKey(upsert.lineage.identity)) {
+        LOG(ERROR) << "OpLogApplier: invalid weight lineage upsert, key="
+                   << entry.object_key;
+        return false;
+    }
+    const auto current =
+        metadata_store_->GetWeightLineage(upsert.lineage.identity);
+    if (!current.has_value()) {
+        return upsert.lineage.lineage_metadata_generation == 1 &&
+               metadata_store_->PutWeightLineage(upsert.lineage);
+    }
+    if (*current == upsert.lineage) {
+        return true;
+    }
+    if (!CanAdvanceWeightMetadataGeneration(
+            current->lineage_metadata_generation) ||
+        upsert.lineage.lineage_metadata_generation !=
+            current->lineage_metadata_generation + 1 ||
+        upsert.lineage.committed_weight_generation <
+            current->committed_weight_generation) {
+        LOG(ERROR) << "OpLogApplier: stale weight lineage upsert, key="
+                   << entry.object_key;
+        return false;
+    }
+    return metadata_store_->PutWeightLineage(upsert.lineage);
 }
 
 const StandbySegmentRegistry& OpLogApplier::GetSegmentRegistry() const {

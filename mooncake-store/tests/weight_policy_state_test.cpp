@@ -79,7 +79,7 @@ TEST(WeightPolicyStateTest, DefaultsPolicyAndPersistsAffinitySummary) {
     EXPECT_EQ(WeightResidencyState::MIXED,
               importing.policy.preferred_residency);
     EXPECT_DOUBLE_EQ(0.5, importing.policy.mixed_hot_ratio);
-    EXPECT_EQ(WeightMigrationMode::MANUAL, importing.policy.migration_mode);
+    EXPECT_EQ(WeightMigrationMode::AUTO, importing.policy.migration_mode);
     EXPECT_EQ(WeightResidencyState::UNKNOWN, importing.residency);
     EXPECT_FALSE(importing.operation_id.has_value());
     EXPECT_EQ(2, importing.affinity_count);
@@ -173,7 +173,7 @@ TEST(WeightPolicyStateTest,
             WeightStoragePolicy{
                 .preferred_residency = WeightResidencyState::COLD,
                 .mixed_hot_ratio = 0.5,
-                .migration_mode = WeightMigrationMode::MANUAL,
+                .migration_mode = WeightMigrationMode::AUTO,
             },
     };
     auto update = metadata_store.PrepareUpdatePolicy(request, 300);

@@ -148,6 +148,22 @@ class MasterService {
 
     WeightMetadataStore::Result<WeightRevisionMetadata> UpdateWeightPolicy(
         const UpdateWeightPolicyRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request) {
+        return weight_manager_.BeginWeightUpsert(request);
+    }
+    WeightMetadataStore::Result<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request) {
+        return weight_manager_.CommitWeightUpsert(request);
+    }
+    WeightMetadataStore::Result<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request) {
+        return weight_manager_.AbortWeightUpsert(request);
+    }
+    WeightMetadataStore::Result<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request) const {
+        return weight_manager_.GetWeightLineage(request);
+    }
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
     WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
@@ -661,16 +677,20 @@ class MasterService {
                        bool force = false) -> tl::expected<long, ErrorCode>;
 
     /**
-     * @brief Remove all objects and their replicas across all tenants.
-     * @param force If true, skip lease and replication task checks.
+     * @brief Remove eligible objects across all tenants, preserving managed
+     * weight groups. Disk space is reclaimed through per-object eviction.
+     * @param force If true, skip lease checks; in-flight work remains
+     * protected.
      * @return return the number of objects removed
      */
     long RemoveAll(bool force = false);
 
     /**
-     * @brief Remove all objects and their replicas for a single tenant.
+     * @brief Remove eligible objects for a single tenant, preserving managed
+     * weight groups. Disk space is reclaimed through per-object eviction.
      * @param tenant_id The tenant whose objects should be removed.
-     * @param force If true, skip lease and replication task checks.
+     * @param force If true, skip lease checks; in-flight work remains
+     * protected.
      * @return return the number of objects removed
      */
     long RemoveAll(const TenantId& tenant_id, bool force = false);
@@ -2031,6 +2051,7 @@ class MasterService {
 
     const bool enable_oplog_;
     const bool weight_management_mutations_enabled_;
+    const bool weight_lineage_mutations_enabled_;
     const uint32_t oplog_batch_max_entries_;
     const uint64_t restore_repair_durable_timeout_ms_;
 

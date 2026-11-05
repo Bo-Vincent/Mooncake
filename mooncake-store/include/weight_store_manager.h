@@ -100,6 +100,14 @@ class WeightStoreManager {
 
     WeightMetadataStore::Result<WeightRevisionMetadata> UpdateWeightPolicy(
         const UpdateWeightPolicyRequest& request);
+    WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightUpsert(
+        const BeginWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> CommitWeightUpsert(
+        const CommitWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> AbortWeightUpsert(
+        const AbortWeightUpsertRequest& request);
+    WeightMetadataStore::Result<WeightLineageMetadata> GetWeightLineage(
+        const GetWeightLineageRequest& request) const;
     WeightMetadataStore::Result<WeightRevisionMetadata> BeginWeightImport(
         const BeginWeightImportRequest& request);
     WeightMetadataStore::Result<WeightRevisionMetadata> CommitWeightImport(
@@ -114,10 +122,24 @@ class WeightStoreManager {
    private:
     WeightMetadataStore::Result<WeightRevisionMetadata>
     ReconcileWeightRevisionBounded(
-        const ReconcileWeightRevisionRequest& request, size_t* member_budget);
+        const ReconcileWeightRevisionRequest& request, size_t* work_budget);
     WeightMetadataStore::Result<void> RemoveWeightMembers(
-        const WeightRevisionMetadata& revision, size_t* member_budget);
+        const WeightRevisionMetadata& revision, size_t* deletion_member_budget);
     void ForgetReconciliationCursor(const WeightRevisionIdentity& identity);
+    std::unique_lock<std::mutex> LockLineage(
+        const WeightLineageIdentity& identity);
+    WeightMetadataStore::Result<WeightLineageMetadata>
+    PersistAndPublishWeightLineageMutation(
+        const WeightLineageMutation& mutation);
+    // Both internal entry points require the caller to hold the lineage lock.
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    DeleteWeightRevisionInternal(const DeleteWeightRevisionRequest& request,
+                                 bool allow_active_upsert,
+                                 size_t* deletion_member_budget = nullptr);
+    WeightMetadataStore::Result<WeightRevisionMetadata>
+    ReconcileWeightRevisionInternal(
+        const ReconcileWeightRevisionRequest& request,
+        size_t* work_budget = nullptr);
     WeightMetadataStore::Result<WeightResidencyOperation>
     StartWeightResidencyOperationLocked(
         const StartWeightResidencyOperationRequest& request, uint64_t now_ms);
@@ -149,9 +171,12 @@ class WeightStoreManager {
     WeightMetadataStore weight_metadata_;
     std::shared_mutex mutation_mutex_;
     std::array<std::mutex, 4096> group_locks_;
+    std::array<std::mutex, 4096> lineage_locks_;
     size_t weight_reconciliation_offset_{0};
     bool expire_leases_on_unit_budget_{true};
     std::mutex reconciliation_mutex_;
+    size_t lineage_reconciliation_offset_{0};
+    bool reconcile_lineages_first_{true};
     std::mutex affinity_cursor_mutex_;
     // Retry offsets are local scheduling hints, not durable progress tokens.
     std::unordered_map<std::string, size_t> affinity_cursors_;

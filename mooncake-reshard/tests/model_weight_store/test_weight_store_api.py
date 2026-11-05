@@ -12,6 +12,7 @@ def test_managed_weight_store_uses_store_aligned_api_names() -> None:
         "weight_get_size",
         "weight_list",
         "weight_update_policy",
+        "weight_upsert",
         "weight_migrate",
         "weight_get_operation",
         "weight_remove",

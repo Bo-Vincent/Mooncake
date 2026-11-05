@@ -330,7 +330,9 @@ WeightMetadataSnapshot MakeWeightSnapshot(bool active) {
     metadata.metadata_generation = active ? 3 : 2;
     metadata.created_at_ms = 100;
     metadata.updated_at_ms = 200;
+    metadata.last_accessed_at_ms = 100;
     WeightMetadataSnapshot snapshot;
+    snapshot.lineages = std::vector<WeightLineageMetadata>{};
     snapshot.leases.push_back({
         .lease_id = 42,
         .identity = metadata.identity,
@@ -423,7 +425,8 @@ class BatchOpLogSnapshotWriterTest : public ::testing::Test {
                                MakeWeightLeaseMetadataKey(lease.lease_id),
                                WeightLeaseUpsertOp{
                                    .lease = lease,
-                                   .last_accessed_at_ms = metadata.last_accessed_at_ms});
+                                   .last_accessed_at_ms =
+                                       metadata.last_accessed_at_ms});
                     }
                 }
                 if (metadata.operation_id.has_value()) {
@@ -1220,6 +1223,7 @@ TEST_F(BatchOpLogSnapshotWriterTest,
         .metadata = {metadata},
         .leases = {lease},
         .next_lease_id = 43,
+        .lineages = std::vector<WeightLineageMetadata>{},
     };
     auto capture = StartCapture(1, &expected);
     ASSERT_TRUE(capture);

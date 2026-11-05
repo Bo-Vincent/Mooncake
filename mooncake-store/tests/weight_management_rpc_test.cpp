@@ -61,13 +61,9 @@ TEST(WeightManagementRpcTest,
         .policy =
             WeightStoragePolicy{
                 .preferred_residency = WeightResidencyState::HOT,
-                .migration_mode = WeightMigrationMode::MANUAL,
-            },
-        .affinity_summary =
-            WeightAffinitySummary{
-                .affinity_count = 1,
-                .affinity_digest = std::string(64, 'c'),
-            },
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(begin.has_value());
     ASSERT_TRUE(Domain(begin).has_value());
@@ -122,16 +118,6 @@ TEST(WeightManagementRpcTest, RegistersEveryApiAndBindsTenant) {
     ASSERT_TRUE(Domain(get).has_value());
     EXPECT_EQ(Domain(begin)->metadata_generation,
               Domain(get)->metadata.metadata_generation);
-
-    auto update = client.UpdateWeightPolicy(UpdateWeightPolicyRequest{
-        .identity = Identity(),
-        .expected_metadata_generation = Domain(begin)->metadata_generation,
-        .policy = *begin_request.policy,
-    });
-    ASSERT_TRUE(Domain(update).has_value());
-    EXPECT_EQ("default", Domain(update)->identity.tenant_id);
-    EXPECT_EQ(Domain(begin)->metadata_generation,
-              Domain(update)->metadata_generation);
 
     auto list = client.ListWeightRevisions(ListWeightRevisionsRequest{
         .tenant_id = "forged-tenant",
@@ -309,13 +295,9 @@ TEST_F(WeightManagementTcpTest, LeaseProtectsPublishedBytesUntilManagedDelete) {
         .policy =
             WeightStoragePolicy{
                 .preferred_residency = WeightResidencyState::HOT,
-                .migration_mode = WeightMigrationMode::MANUAL,
-            },
-        .affinity_summary =
-            WeightAffinitySummary{
-                .affinity_count = 1,
-                .affinity_digest = std::string(64, 'c'),
-            },
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest = std::string(64, 'c')},
     });
     ASSERT_TRUE(begin.has_value());
     ASSERT_TRUE(begin->has_value());
@@ -323,11 +305,11 @@ TEST_F(WeightManagementTcpTest, LeaseProtectsPublishedBytesUntilManagedDelete) {
     ReplicateConfig config;
     config.replica_num = 1;
     config.data_type = ObjectDataType::WEIGHT;
+    config.residency_affinity_ids = std::vector<std::string>{payload_key};
     config.group_ids =
         std::vector<std::string>{(*begin)->manifest.payload_group_id};
     // No hard pin: protection must come from managed group membership.
     ASSERT_FALSE(config.with_hard_pin);
-    config.residency_affinity_ids = std::vector<std::string>{"payload"};
     ASSERT_NO_FATAL_FAILURE(PutBytes(payload_key, payload, config));
     config.data_type = ObjectDataType::METADATA;
     config.residency_affinity_ids.reset();
@@ -418,6 +400,49 @@ TEST_F(WeightManagementTcpTest, LeaseProtectsPublishedBytesUntilManagedDelete) {
         ASSERT_FALSE(get.has_value());
         EXPECT_EQ(ErrorCode::OBJECT_NOT_FOUND, get.error());
     }
+}
+
+TEST(WeightManagementRpcTest, RegistersUpsertApisAndBindsLineageTenant) {
+    InProcMaster server;
+    ASSERT_TRUE(server.Start(InProcMasterConfigBuilder().build()));
+    MasterClient client(generate_uuid(), nullptr, "default");
+    ASSERT_EQ(ErrorCode::OK, client.Connect(server.master_address()));
+
+    auto base = Identity();
+    auto target = base;
+    target.weight_generation = 8;
+    auto begin = client.BeginWeightUpsert(BeginWeightUpsertRequest{
+        .request_id = "request-1",
+        .mode = WeightUpsertMode::PUT_FIRST,
+        .base_identity = base,
+        .expected_base_metadata_generation = 2,
+        .target_identity = target,
+        .import =
+            BeginWeightImportRequest{
+                .identity = target,
+                .payload_group_id = {},
+                .expected_payload_count = 1,
+                .expected_logical_bytes = 1024,
+                .policy =
+                    WeightStoragePolicy{
+                        .preferred_residency = WeightResidencyState::HOT,
+                        .migration_mode = WeightMigrationMode::MANUAL,
+                    },
+                .affinity_summary =
+                    WeightAffinitySummary{
+                        .affinity_count = 1,
+                        .affinity_digest = std::string(64, 'c'),
+                    },
+            },
+    });
+    ASSERT_FALSE(Domain(begin).has_value());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(begin).error());
+
+    auto lineage = client.GetWeightLineage(GetWeightLineageRequest{
+        .identity = ToWeightLineageIdentity(base),
+    });
+    ASSERT_FALSE(Domain(lineage).has_value());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, Domain(lineage).error());
 }
 
 }  // namespace

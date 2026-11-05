@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime, timezone
 from threading import Event, Lock, Thread
 from typing import Callable, Literal, Optional
 from uuid import uuid4
@@ -26,6 +27,7 @@ from ..management import (
     WeightRevisionPage,
     WeightRevisionView,
     WeightStoragePolicy,
+    WeightUpsertMode,
 )
 from ...lifetime import TerminalTransferState
 from ..lifetime import (
@@ -51,6 +53,7 @@ from .writer import (
     WeightStoreWriter,
 )
 from .upload import WeightUploadService
+from .upsert import WeightUpsertContext, prepare_weight_upsert_context
 
 
 def _require_upload_plan(plan: WeightUploadPlan) -> None:
@@ -308,7 +311,90 @@ class WeightStore:
             policy=policy,
         )
 
+    def weight_upsert(
+        self,
+        snapshot: WeightSnapshotDescriptor,
+        adapter: WeightSnapshotAdapter,
+        *,
+        replacing: WeightRevisionIdentity,
+        expected_metadata_generation: int,
+        mode: WeightUpsertMode = WeightUpsertMode.PUT_FIRST,
+        tenant_id: str = "default",
+        policy: Optional[WeightStoragePolicy] = None,
+        request_id: Optional[str] = None,
+    ) -> WeightStoreWriter:
+        """Replace one immutable revision with a higher generation."""
 
+        context = prepare_weight_upsert_context(
+            snapshot,
+            replacing=replacing,
+            expected_metadata_generation=expected_metadata_generation,
+            mode=mode,
+            tenant_id=tenant_id,
+            request_id=request_id,
+        )
+        return WeightStoreWriter._for_upsert(
+            self,
+            snapshot,
+            adapter,
+            tenant_id=tenant_id,
+            policy=policy,
+            upsert=context,
+        )
+
+    def _begin_weight_upsert(
+        self,
+        source_placement: WeightPlacementManifest,
+        source_bindings: Sequence[WeightRuntimeBindingManifest],
+        *,
+        namespace: str,
+        policy: Optional[WeightStoragePolicy],
+        context: WeightUpsertContext,
+    ) -> WeightUploadPlan:
+        draft, effective_policy = self._prepare_managed_import(
+            source_placement,
+            source_bindings,
+            namespace=namespace,
+            policy=policy,
+            transaction_id=context.transaction_id(source_placement.digest),
+        )
+        if (
+            draft.manifest.resource_id != context.target.resource_id
+            or draft.manifest.revision != context.target.revision
+            or draft.manifest.weight_generation != context.target.weight_generation
+        ):
+            raise WeightStoreError("upsert target differs from source placement")
+        payload_keys, logical_bytes = _payload_summary(draft.manifest)
+        affinity_count, affinity_digest = _affinity_summary(draft.manifest)
+        importing = self.store.weight_upsert_begin(
+            context.request_id,
+            context.mode,
+            context.replacing,
+            expected_metadata_generation=context.expected_metadata_generation,
+            target=context.target,
+            payload_group_id="",
+            expected_payload_count=len(payload_keys),
+            expected_logical_bytes=logical_bytes,
+            policy=effective_policy,
+            affinity_count=affinity_count,
+            affinity_digest=affinity_digest,
+        )
+        if importing.identity != context.target:
+            raise WeightStoreError("upsert begin returned a different target identity")
+        return replace(
+            draft,
+            manifest=replace(
+                draft.manifest,
+                group_id=importing.manifest.payload_group_id,
+                created_at=datetime.fromtimestamp(
+                    importing.created_at_ms / 1000, timezone.utc
+                )
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+            ),
+            management_identity=importing.identity,
+            management_generation=importing.metadata_generation,
+        )
 
     def _weight_put_payload(
         self,
@@ -377,7 +463,38 @@ class WeightStore:
         self._publish_weight_revision(plan, manifest)
         return manifest
 
+    def _weight_upsert_commit(
+        self,
+        plan: WeightUploadPlan,
+        receipts: Sequence[UploadReceipt],
+        context: WeightUpsertContext,
+        *,
+        on_commit_decision_may_exist: Callable[[], None],
+    ) -> StoredWeightManifest:
+        manifest = self._weight_put_commit(
+            plan,
+            receipts,
+            on_commit_decision_may_exist=on_commit_decision_may_exist,
+        )
+        self.store.weight_upsert_commit(
+            context.request_id,
+            context.replacing,
+            context.target,
+        )
+        return manifest
 
+    def _weight_upsert_abort(
+        self,
+        plan: WeightUploadPlan,
+        receipts: Sequence[UploadReceipt],
+        context: WeightUpsertContext,
+    ) -> None:
+        self._weight_put_abort(plan, receipts)
+        self.store.weight_upsert_abort(
+            context.request_id,
+            context.replacing,
+            context.target,
+        )
 
     def _weight_get_manifest(self, manifest_key: str) -> StoredWeightManifest:
         return self._load.weight_get_manifest(manifest_key)

@@ -68,6 +68,7 @@ from .management import (
     WeightRevisionPage,
     WeightRevisionView,
     WeightStoragePolicy,
+    WeightUpsertMode,
 )
 from .store import (
     WeightSnapshotAdapter,
@@ -133,6 +134,7 @@ __all__ = [
     "WeightRevisionPage",
     "WeightRevisionView",
     "WeightStoragePolicy",
+    "WeightUpsertMode",
     "WeightSnapshotAdapter",
     "WeightSnapshotDescriptor",
     "WeightStoreWriter",
