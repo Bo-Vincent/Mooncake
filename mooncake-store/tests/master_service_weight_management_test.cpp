@@ -32,6 +32,8 @@ class MasterServiceWeightManagementTest : public MasterServiceTest {
 
     static BeginWeightImportRequest BeginRequest(
         std::optional<WeightStoragePolicy> policy) {
+        const std::vector<WeightAffinityMappingEntry> layout{
+            {"payload-a", 1024, "payload-a"}, {"payload-b", 1024, "payload-b"}};
         return BeginWeightImportRequest{
             .identity = Identity(),
             .payload_group_id = {},
@@ -41,8 +43,10 @@ class MasterServiceWeightManagementTest : public MasterServiceTest {
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
-                    .affinity_digest = std::string(64, 'c'),
+                    .affinity_digest =
+                        ComputeWeightAffinityMappingSha256(layout),
                 },
+            .payload_layout = layout,
         };
     }
 
@@ -165,6 +169,9 @@ TEST_F(MasterServiceWeightManagementTest,
     request.expected_payload_count = 1;
     request.expected_logical_bytes = 1024;
     request.affinity_summary.affinity_count = 1;
+    request.payload_layout.resize(1);
+    request.affinity_summary.affinity_digest =
+        ComputeWeightAffinityMappingSha256(request.payload_layout);
 
     auto importing = service.BeginWeightImport(request);
 
@@ -187,7 +194,7 @@ TEST_F(MasterServiceWeightManagementTest,
     MasterService service;
     [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
     const UUID client_id = generate_uuid();
-    auto importing = Begin(service, 1, 1024);
+    auto importing = Begin(service, {"payload-a"}, 1024);
     PutObject(service, client_id, "payload-a",
               importing.manifest.payload_group_id, ObjectDataType::WEIGHT,
               1024);

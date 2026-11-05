@@ -38,6 +38,17 @@
 
 namespace mooncake::test {
 
+static std::vector<WeightAffinityMappingEntry> WeightImportLayoutForTest(
+    size_t count, char tag = 'c') {
+    std::vector<WeightAffinityMappingEntry> layout;
+    for (size_t i = 0; i < count; ++i) {
+        const auto suffix = std::to_string(i);
+        layout.push_back(
+            {"payload-" + suffix, 1024, std::string(1, tag) + suffix});
+    }
+    return layout;
+}
+
 class FakeBatchHaKvBackend : public HaKvBackend {
    public:
     ErrorCode DeleteRange(std::string_view, std::string_view) override {
@@ -4022,8 +4033,10 @@ TEST_F(MasterServiceHATest,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
-                    .affinity_digest = std::string(64, 'c'),
+                    .affinity_digest = ComputeWeightAffinityMappingSha256(
+                        WeightImportLayoutForTest(2, 'c')),
                 },
+            .payload_layout = WeightImportLayoutForTest(2, 'c'),
         });
     });
 
@@ -4137,8 +4150,10 @@ TEST_F(MasterServiceHATest,
         .affinity_summary =
             WeightAffinitySummary{
                 .affinity_count = 2,
-                .affinity_digest = std::string(64, 'c'),
+                .affinity_digest = ComputeWeightAffinityMappingSha256(
+                    WeightImportLayoutForTest(2, 'c')),
             },
+        .payload_layout = WeightImportLayoutForTest(2, 'c'),
     });
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
@@ -4390,8 +4405,10 @@ TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
         .affinity_summary =
             WeightAffinitySummary{
                 .affinity_count = 2,
-                .affinity_digest = std::string(64, 'c'),
+                .affinity_digest = ComputeWeightAffinityMappingSha256(
+                    WeightImportLayoutForTest(2, 'c')),
             },
+        .payload_layout = WeightImportLayoutForTest(2, 'c'),
     });
     ASSERT_FALSE(rejected.has_value());
     EXPECT_EQ(WeightManagementError::DURABILITY_FAILED, rejected.error());
@@ -4431,8 +4448,10 @@ TEST_F(MasterServiceHATest,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
-                    .affinity_digest = std::string(64, 'c'),
+                    .affinity_digest = ComputeWeightAffinityMappingSha256(
+                        WeightImportLayoutForTest(2, 'c')),
                 },
+            .payload_layout = WeightImportLayoutForTest(2, 'c'),
         });
     });
     const bool attempted = backend->WaitForTxnCalls(1);
@@ -4554,8 +4573,10 @@ TEST_F(MasterServiceHATest,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
-                    .affinity_digest = std::string(64, 'c'),
+                    .affinity_digest = ComputeWeightAffinityMappingSha256(
+                        WeightImportLayoutForTest(2, 'c')),
                 },
+            .payload_layout = WeightImportLayoutForTest(2, 'c'),
         });
     });
     const bool blocked = backend->WaitForBlockedTxn();
@@ -4609,9 +4630,10 @@ TEST_F(MasterServiceHATest,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = payload_count,
-                    .affinity_digest =
-                        std::string(64, payload_count == 2 ? 'c' : 'd'),
+                    .affinity_digest = ComputeWeightAffinityMappingSha256(
+                        WeightImportLayoutForTest(payload_count, 'c')),
                 },
+            .payload_layout = WeightImportLayoutForTest(payload_count, 'c'),
         });
     };
 
@@ -7792,8 +7814,10 @@ TEST_F(MasterServiceHATest,
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = payload_count,
-                    .affinity_digest = std::string(64, digest),
+                    .affinity_digest = ComputeWeightAffinityMappingSha256(
+                        WeightImportLayoutForTest(payload_count, digest)),
                 },
+            .payload_layout = WeightImportLayoutForTest(payload_count, digest),
         });
     };
 

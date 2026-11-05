@@ -606,7 +606,8 @@ TEST_F(WeightGroupLifecycleTest,
         }
         const auto manifest = manager.ResolveImportMemberTier(
             TenantId::Default(), importing->manifest.payload_group_id,
-            ManifestKey(), 128, "", ObjectDataType::METADATA);
+            MakeWeightManifestKey(Identity()), 128, "",
+            ObjectDataType::METADATA);
         ASSERT_TRUE(manifest);
         EXPECT_EQ(WeightResidencyState::HOT, *manifest);
         for (const auto& invalid : std::vector<WeightAffinityMappingEntry>{
@@ -622,7 +623,8 @@ TEST_F(WeightGroupLifecycleTest,
             "payload-a", 1024, "affinity-a", ObjectDataType::METADATA));
         EXPECT_FALSE(manager.ResolveImportMemberTier(
             TenantId::Default(), importing->manifest.payload_group_id,
-            ManifestKey(), 128, "", ObjectDataType::WEIGHT));
+            MakeWeightManifestKey(Identity()), 128, "",
+            ObjectDataType::WEIGHT));
         EXPECT_FALSE(manager.ResolveImportMemberTier(
             TenantId("another-tenant"), importing->manifest.payload_group_id,
             "payload-a", 1024, "affinity-a", ObjectDataType::WEIGHT));
@@ -716,13 +718,14 @@ TEST_F(WeightGroupLifecycleTest, CommitRejectsSwappedAffinityMapping) {
     manifest_config.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
     manifest_config.data_type = ObjectDataType::METADATA;
-    PutCompletedObject(service, client_id, ManifestKey(), manifest_config, 128);
+    PutCompletedObject(service, client_id, MakeWeightManifestKey(Identity()),
+                       manifest_config, 128);
     auto ready = service.CommitWeightImport(CommitWeightImportRequest{
         .identity = Identity(),
         .expected_metadata_generation = importing->metadata_generation,
         .manifest =
             WeightManifestReference{
-                .manifest_key = ManifestKey(),
+                .manifest_key = MakeWeightManifestKey(Identity()),
                 .manifest_sha256 = std::string(64, 'a'),
                 .payload_group_id = importing->manifest.payload_group_id,
                 .payload_keys_sha256 =
@@ -871,12 +874,20 @@ TEST_F(WeightGroupLifecycleTest, RetirementSharesDeletionMemberBudget) {
     }));
     auto ordinary = base.identity;
     ordinary.revision = "ordinary-deletion";
+    const std::vector<WeightAffinityMappingEntry> layout{
+        {"ordinary-a", 1024, "ordinary"}, {"ordinary-b", 1024, "ordinary"}};
     const auto importing = service.BeginWeightImport({
         .identity = ordinary,
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
-        .affinity_summary = {.affinity_count = 2,
-                             .affinity_digest = std::string(64, 'c')},
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest =
+                                 ComputeWeightAffinityMappingSha256(layout)},
+        .payload_layout = layout,
     });
     ASSERT_TRUE(importing);
     ReplicateConfig put;
@@ -884,8 +895,8 @@ TEST_F(WeightGroupLifecycleTest, RetirementSharesDeletionMemberBudget) {
     put.with_hard_pin = true;
     put.group_ids =
         std::vector<std::string>{importing->manifest.payload_group_id};
-    put.residency_affinity_ids = std::vector<std::string>{"ordinary"};
     put.data_type = ObjectDataType::WEIGHT;
+    put.residency_affinity_ids = std::vector<std::string>{"ordinary"};
     for (const auto& key : {"ordinary-a", "ordinary-b"}) {
         PutCompletedObject(service, context.client_id, key, put, 1024);
     }

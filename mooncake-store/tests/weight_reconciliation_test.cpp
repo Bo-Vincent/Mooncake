@@ -1279,12 +1279,20 @@ TEST_F(WeightReconciliationTest, MemberBudgetBoundsDeletionAndResumes) {
     MasterService service;
     const auto context = PrepareSimpleSegment(service);
     const auto identity = Identity("bounded-delete");
+    const std::vector<WeightAffinityMappingEntry> layout{
+        {"bounded-a", 1024, "delete-unit"}, {"bounded-b", 1024, "delete-unit"}};
     auto importing = service.BeginWeightImport({
         .identity = identity,
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
-        .affinity_summary = {.affinity_count = 2,
-                             .affinity_digest = std::string(64, 'c')},
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest =
+                                 ComputeWeightAffinityMappingSha256(layout)},
+        .payload_layout = layout,
     });
     ASSERT_TRUE(importing);
     ReplicateConfig config;
@@ -1332,12 +1340,22 @@ TEST_F(WeightReconciliationTest, MemberBudgetIsSharedAcrossRevisions) {
     std::vector<std::string> keys;
     for (const auto& revision : {"shared-a", "shared-b"}) {
         const auto identity = Identity(revision);
+        const std::vector<WeightAffinityMappingEntry> layout{
+            {std::string(revision) + "0", 1024, "delete-unit"},
+            {std::string(revision) + "1", 1024, "delete-unit"}};
         const auto importing = service.BeginWeightImport({
             .identity = identity,
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
-            .affinity_summary = {.affinity_count = 2,
-                                 .affinity_digest = std::string(64, 'c')},
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL},
+            .affinity_summary = {.affinity_count = 1,
+                                 .affinity_digest =
+                                     ComputeWeightAffinityMappingSha256(
+                                         layout)},
+            .payload_layout = layout,
         });
         ASSERT_TRUE(importing);
         ReplicateConfig config;
