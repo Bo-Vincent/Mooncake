@@ -1969,6 +1969,10 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
     stop_dummy_client_monitor();
     stop_http_server();
 
+    if (file_storage_) {
+        file_storage_->Shutdown();
+        file_storage_.reset();
+    }
     ErrorCode cleanup_error = ErrorCode::OK;
     if (client_) {
         if (!egm_segment_ptrs_.empty()) {
@@ -9311,7 +9315,7 @@ tl::expected<QueryTaskResponse, ErrorCode> RealClient::query_task(
 namespace {
 struct ColdArenaSlot {
     std::shared_ptr<void> buffer;
-    std::shared_ptr<Client> registration_owner;
+    std::function<tl::expected<void, ErrorCode>()> release_registration;
     UUID client_id{};
     bool busy{false};
     bool quarantined{false};
@@ -9328,8 +9332,7 @@ ColdArenaPool &ColdPool(bool source) {
 }
 bool ReleaseColdSlotBuffer(ColdArenaSlot &slot) {
     if (!slot.buffer) return true;
-    auto result =
-        slot.registration_owner->unregisterLocalMemory(slot.buffer.get());
+    auto result = slot.release_registration();
     if (!result) {
         // Cleanup failure does not authorize freeing a registered allocation.
         slot.quarantined = true;
@@ -9338,7 +9341,7 @@ bool ReleaseColdSlotBuffer(ColdArenaSlot &slot) {
         return false;
     }
     slot.buffer.reset();
-    slot.registration_owner.reset();
+    slot.release_registration = {};
     return true;
 }
 void ReleaseIdleColdSlots(const UUID &client_id) {
@@ -9428,7 +9431,7 @@ tl::expected<void, ErrorCode> WriteColdLocalSlices(
                 }
                 slot.buffer =
                     std::shared_ptr<void>(buffer, [](void *ptr) { free(ptr); });
-                slot.registration_owner = client;
+                slot.release_registration = client->WeightMemoryRelease(buffer);
                 slot.client_id = client->getClientId();
             }
             slot.busy = true;
@@ -9696,7 +9699,7 @@ RealClient::cold_write_chunk(const ColdWriteChunk &chunk) {
                     }
                     slot.buffer = std::shared_ptr<void>(
                         buffer, [](void *ptr) { free(ptr); });
-                    slot.registration_owner = client;
+                    slot.release_registration = client->WeightMemoryRelease(buffer);
                     slot.client_id = client->getClientId();
                 }
                 slot.busy = true;
@@ -9869,7 +9872,7 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
         }
         slot.buffer =
             std::shared_ptr<void>(buffer, [](void *ptr) { free(ptr); });
-        slot.registration_owner = client_;
+        slot.release_registration = client_->WeightMemoryRelease(buffer);
         slot.client_id = client_->getClientId();
     }
     if (disk.client_id == client_->getClientId() && file_storage_) {
