@@ -19,6 +19,8 @@ Classic TE 中，同一 slice、worker、路径、选中 domain 和 controller g
 
 无效、未提交或已释放的 batch/task 不能查询。`submitTransfer` 在创建 task 前失败时没有可供查询的 `task_id`，调用方继续使用提交错误。查询不延长 batch 生命周期；不要与释放同一个 batch 并发使用。
 
+Classic TE 在首次提交或重新分派时，如果所有候选 peer rail 均已暂停，失败任务会保留 `LONG_UNAVAILABLE` 和 `kNoUsablePath` 证据。路径字段标识当时选中的暂停 rail，不推断所有 rail 的统一重试期限。
+
 ## C++
 
 Classic `mooncake::TransferEngine` 和 TENT `mooncake::tent::TransferEngine` 都有同名只读方法：
