@@ -834,7 +834,9 @@ TEST_F(WeightGroupLifecycleTest,
     ASSERT_TRUE(observed);
     EXPECT_EQ(WeightAvailabilityState::DEGRADED, observed->availability);
     EXPECT_EQ(WeightResidencyState::MIXED, observed->residency);
-    EXPECT_DOUBLE_EQ(0.5, observed->observed_hot_ratio);
+    EXPECT_EQ(3072u, observed->manifest.logical_bytes);
+    EXPECT_DOUBLE_EQ(1024.0 / observed->manifest.logical_bytes,
+                     observed->observed_hot_ratio);
     EXPECT_EQ(operation->operation_id, observed->operation_id);
     const auto progress = service.QueryWeightOperation({
         .operation_id = operation->operation_id,
@@ -1841,7 +1843,7 @@ TEST_F(WeightGroupLifecycleTest, ColdOperationCompletesAfterReadLeaseExpires) {
 }
 
 TEST_F(WeightGroupLifecycleTest,
-       UnreadablePayloadDoesNotDiluteReadableHotResidency) {
+       UnreadablePayloadLeavesDegradedMixedDeclaredCoverage) {
     MasterService service;
     const auto context = PrepareSimpleSegment(service);
     const auto ready = PublishReadyWithPayloads(
@@ -1860,8 +1862,10 @@ TEST_F(WeightGroupLifecycleTest,
         service.ReconcileWeightRevision({.identity = ready.identity});
     ASSERT_TRUE(observed);
     EXPECT_EQ(WeightAvailabilityState::DEGRADED, observed->availability);
-    EXPECT_EQ(WeightResidencyState::HOT, observed->residency);
-    EXPECT_DOUBLE_EQ(1.0, observed->observed_hot_ratio);
+    EXPECT_EQ(WeightResidencyState::MIXED, observed->residency);
+    EXPECT_EQ(2048u, observed->manifest.logical_bytes);
+    EXPECT_DOUBLE_EQ(1024.0 / observed->manifest.logical_bytes,
+                     observed->observed_hot_ratio);
 }
 
 TEST_F(WeightGroupLifecycleTest,
@@ -2215,67 +2219,77 @@ TEST_F(WeightGroupLifecycleTest,
 }
 
 TEST_F(WeightGroupLifecycleTest,
-       MigrationBatchLimitsKeepOversizedAffinityWholeAndMakeProgress) {
-    MasterServiceConfig config;
-    config.default_kv_lease_ttl = 0;
-    config.enable_offload = true;
-    config.offload_on_evict = true;
-    config.weight_migration_max_members_per_round = 1;
-    config.weight_migration_max_bytes_per_round = 1000;
-    MasterService service(config);
-    const auto context = PrepareSimpleSegment(service);
-    ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
-    auto ready = PublishReadyWithPayloads(
-        service, context.client_id,
-        {
-            {.key = "payload-a0", .size = 600, .affinity_id = "a"},
-            {.key = "payload-a1", .size = 600, .affinity_id = "a"},
-            {.key = "payload-b", .size = 500, .affinity_id = "b"},
-        });
-    for (const auto& [key, size] : std::vector<std::pair<std::string, int64_t>>{
-             {"payload-a0", 600},
-             {"payload-a1", 600},
-             {"payload-b", 500},
-         }) {
-        AddLocalDiskReplica(service, context.client_id, key, size,
-                            "test_segment");
-    }
-    auto started = service.StartWeightResidencyOperation(
-        StartWeightResidencyOperationRequest{
+       MemberAndByteBudgetsConvergeWithOversizedAffinitiesAndMembers) {
+    for (const uint64_t first_member_bytes : {600u, 1600u}) {
+        SCOPED_TRACE(first_member_bytes);
+        MasterServiceConfig config;
+        config.default_kv_lease_ttl = 0;
+        config.enable_offload = true;
+        config.offload_on_evict = true;
+        config.weight_migration_max_members_per_round = 1;
+        config.weight_migration_max_bytes_per_round = 1000;
+        MasterService service(config);
+        const auto context = PrepareSimpleSegment(service);
+        ASSERT_TRUE(service.MountLocalDiskSegment(context.client_id, true));
+        const std::vector<PayloadSpec> payloads{
+            {"payload-a0", first_member_bytes, "a"},
+            {"payload-a1", 600, "a"},
+            {"payload-b", 500, "b"}};
+        const auto ready =
+            PublishReadyWithPayloads(service, context.client_id, payloads);
+        for (const auto& payload : payloads) {
+            AddLocalDiskReplica(service, context.client_id, payload.key,
+                                payload.size, "test_segment");
+        }
+        const auto started = service.StartWeightResidencyOperation({
             .identity = ready.identity,
             .expected_metadata_generation = ready.metadata_generation,
             .target_residency = WeightResidencyState::COLD,
-            .mixed_hot_ratio = std::nullopt,
         });
-    ASSERT_TRUE(started.has_value());
-
-    auto partial = service.ReconcileWeightRevision(
-        ReconcileWeightRevisionRequest{.identity = ready.identity});
-
-    ASSERT_TRUE(partial.has_value());
-    EXPECT_EQ(WeightResidencyState::MIXED, partial->residency);
-    ASSERT_TRUE(partial->operation_id.has_value());
-    const auto partial_members = GetWeightGroupResidencyForTest(
-        service, ready.identity, ready.manifest.payload_group_id);
-    for (const auto& member : partial_members) {
-        if (member.residency_affinity_id == "a") {
-            EXPECT_FALSE(member.has_memory);
-        } else if (member.residency_affinity_id == "b") {
-            EXPECT_TRUE(member.has_memory);
+        ASSERT_TRUE(started);
+        // One member advances each round, including a first member over the
+        // byte limit.
+        for (size_t round = 0; round < payloads.size(); ++round) {
+            const auto observed =
+                service.ReconcileWeightRevision({.identity = ready.identity});
+            ASSERT_TRUE(observed);
+            const auto members = GetWeightGroupResidencyForTest(
+                service, ready.identity, ready.manifest.payload_group_id);
+            size_t remaining_memory = 0;
+            for (const auto& member : members) {
+                if (member.data_type == ObjectDataType::METADATA) {
+                    EXPECT_TRUE(member.has_memory);
+                    continue;
+                }
+                EXPECT_TRUE(member.has_cold) << member.key;
+                const auto position = std::find_if(
+                    payloads.begin(), payloads.end(), [&](const auto& payload) {
+                        return payload.key == member.key;
+                    });
+                ASSERT_NE(payloads.end(), position);
+                EXPECT_EQ(
+                    static_cast<size_t>(position - payloads.begin()) > round,
+                    member.has_memory)
+                    << member.key;
+                remaining_memory += member.has_memory;
+            }
+            EXPECT_EQ(payloads.size() - round - 1, remaining_memory);
+            const auto operation = service.QueryWeightOperation(
+                {.operation_id = started->operation_id});
+            ASSERT_TRUE(operation);
+            EXPECT_EQ(round == 0 ? 0u : round, operation->processed_units);
+            const auto completed_bytes =
+                round == 0 ? 0u
+                           : first_member_bytes + 600 + (round == 2 ? 500 : 0);
+            EXPECT_EQ(completed_bytes, operation->processed_bytes);
+            EXPECT_EQ(round + 1 == payloads.size()
+                          ? WeightResidencyState::COLD
+                          : WeightResidencyState::MIXED,
+                      observed->residency);
+            EXPECT_EQ(round + 1 != payloads.size(),
+                      observed->operation_id.has_value());
         }
     }
-    auto operation = service.QueryWeightOperation(QueryWeightOperationRequest{
-        .operation_id = started->operation_id,
-    });
-    ASSERT_TRUE(operation.has_value());
-    EXPECT_EQ(1, operation->processed_units);
-    EXPECT_EQ(1200, operation->processed_bytes);
-
-    auto cold = service.ReconcileWeightRevision(
-        ReconcileWeightRevisionRequest{.identity = ready.identity});
-    ASSERT_TRUE(cold.has_value());
-    EXPECT_EQ(WeightResidencyState::COLD, cold->residency);
-    EXPECT_FALSE(cold->operation_id.has_value());
 }
 
 TEST_F(WeightGroupLifecycleTest, RehydrateQueuesAndCompletesWholeManagedGroup) {
