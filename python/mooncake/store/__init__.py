@@ -20,6 +20,7 @@ _CPP_EXPORTS = frozenset(
         "WeightManifestReference",
         "WeightStoragePolicy",
         "WeightAffinitySummary",
+        "WeightAffinityMappingEntry",
         "WeightLineageIdentity",
         "WeightUpsertImportSummary",
         "WeightUpsertClaim",

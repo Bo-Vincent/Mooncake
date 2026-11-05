@@ -12,6 +12,7 @@ def test_weight_types_are_available_through_public_store_facade() -> None:
     import mooncake.store as store
     from mooncake.store import (
         WeightAffinitySummary,
+        WeightAffinityMappingEntry,
         WeightAvailabilityState,
         WeightLineageIdentity,
         WeightLineageMetadata,
@@ -34,6 +35,7 @@ def test_weight_types_are_available_through_public_store_facade() -> None:
 
     public_types = (
         WeightAffinitySummary,
+        WeightAffinityMappingEntry,
         WeightAvailabilityState,
         WeightLineageIdentity,
         WeightLineageMetadata,
@@ -59,3 +61,12 @@ def test_weight_types_are_available_through_public_store_facade() -> None:
 
     assert WeightResidencyState.HOT.name == "HOT"
     assert WeightMigrationMode.MANUAL.name == "MANUAL"
+
+
+def test_native_payload_layout_entry_preserves_physical_fields() -> None:
+    if find_spec("mooncake._store") is None:
+        pytest.skip("C++ Store native extension is not built")
+    from mooncake.store import WeightAffinityMappingEntry
+
+    entry = WeightAffinityMappingEntry("payload-雪", 4096, "tensor-a")
+    assert (entry.key, entry.size, entry.affinity_id) == ("payload-雪", 4096, "tensor-a")

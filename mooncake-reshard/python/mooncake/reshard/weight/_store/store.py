@@ -87,21 +87,38 @@ def _payload_summary(manifest: StoredWeightManifest) -> tuple[tuple[str, ...], i
     return tuple(sorted(object_sizes)), sum(object_sizes.values())
 
 
-def _affinity_summary(manifest: StoredWeightManifest) -> tuple[int, str]:
-    affinities = sorted(
-        {
-            tuple(fragment.aliases) if fragment.aliases else (fragment.tensor_id,)
-            for fragment in manifest.fragments
-        }
+def _payload_layout(plan: WeightUploadPlan) -> tuple[tuple[str, int, str], ...]:
+    objects: dict[str, tuple[int, str]] = {}
+    for operation in plan.operations:
+        fragment = operation.target
+        size = fragment.object_offset + fragment.nbytes
+        affinity = operation.residency_affinity_id
+        previous = objects.get(fragment.object_key)
+        if previous is not None:
+            if previous[1] != affinity:
+                raise WeightStoreError(
+                    "physical object spans multiple residency affinities"
+                )
+            size = max(size, previous[0])
+        objects[fragment.object_key] = (size, affinity)
+    return tuple(
+        (key, *objects[key])
+        for key in sorted(objects, key=lambda key: key.encode("utf-8"))
     )
-    digest = hashlib.sha256()
-    for affinity in affinities:
-        encoded = "\0".join(affinity).encode("utf-8")
-        digest.update(str(len(encoded)).encode("ascii"))
-        digest.update(b":")
-        digest.update(encoded)
-        digest.update(b"\n")
-    return len(affinities), digest.hexdigest()
+
+
+def _affinity_summary(layout: Sequence[tuple[str, int, str]]) -> tuple[int, str]:
+    digest = hashlib.sha256(b"weight-affinity-mapping-v1\n")
+    for key, size, affinity in sorted(
+        layout, key=lambda entry: entry[0].encode("utf-8")
+    ):
+        for value in (key, str(size), affinity):
+            encoded = value.encode("utf-8")
+            digest.update(str(len(encoded)).encode("ascii"))
+            digest.update(b":")
+            digest.update(encoded)
+            digest.update(b"\n")
+    return len({entry[2] for entry in layout}), digest.hexdigest()
 
 
 class _RevisionLeaseGuard:
@@ -272,7 +289,8 @@ class WeightStore:
             weight_generation=draft.manifest.weight_generation,
         )
         payload_keys, logical_bytes = _payload_summary(draft.manifest)
-        affinity_count, affinity_digest = _affinity_summary(draft.manifest)
+        payload_layout = _payload_layout(draft)
+        affinity_count, affinity_digest = _affinity_summary(payload_layout)
         importing = self.store.weight_put_begin_import(
             identity,
             payload_group_id="",
@@ -281,6 +299,7 @@ class WeightStore:
             policy=effective_policy,
             affinity_count=affinity_count,
             affinity_digest=affinity_digest,
+            payload_layout=payload_layout,
         )
         managed_manifest = replace(
             draft.manifest,
@@ -365,7 +384,8 @@ class WeightStore:
         ):
             raise WeightStoreError("upsert target differs from source placement")
         payload_keys, logical_bytes = _payload_summary(draft.manifest)
-        affinity_count, affinity_digest = _affinity_summary(draft.manifest)
+        payload_layout = _payload_layout(draft)
+        affinity_count, affinity_digest = _affinity_summary(payload_layout)
         importing = self.store.weight_upsert_begin(
             context.request_id,
             context.mode,
@@ -378,6 +398,7 @@ class WeightStore:
             policy=effective_policy,
             affinity_count=affinity_count,
             affinity_digest=affinity_digest,
+            payload_layout=payload_layout,
         )
         if importing.identity != context.target:
             raise WeightStoreError("upsert begin returned a different target identity")

@@ -181,6 +181,18 @@ class StoreBackend:
             raise WeightStoreError("Store returned an invalid ranged-read snapshot")
         return snapshot
 
+    @staticmethod
+    def _native_payload_layout(layout: Sequence[tuple[str, int, str]]) -> list[object]:
+        try:
+            entry_type = getattr(
+                import_module("mooncake.store"), "WeightAffinityMappingEntry"
+            )
+        except (ImportError, AttributeError) as error:
+            raise WeightStoreError(
+                "native Mooncake Store payload layout is unavailable"
+            ) from error
+        return [entry_type(key, size, affinity) for key, size, affinity in layout]
+
     def weight_put_begin_import(
         self,
         identity: WeightRevisionIdentity,
@@ -191,6 +203,7 @@ class StoreBackend:
         policy: Optional[WeightStoragePolicy],
         affinity_count: int,
         affinity_digest: str,
+        payload_layout: Sequence[tuple[str, int, str]],
     ) -> WeightRevisionMetadata:
         value = self._management_call(
             "begin_weight_import",
@@ -204,6 +217,7 @@ class StoreBackend:
             int(policy.migration_mode) if policy is not None else 0,
             affinity_count,
             affinity_digest,
+            self._native_payload_layout(payload_layout),
         )
         return metadata_from_native(value)
 
@@ -251,6 +265,7 @@ class StoreBackend:
         policy: Optional[WeightStoragePolicy],
         affinity_count: int,
         affinity_digest: str,
+        payload_layout: Sequence[tuple[str, int, str]],
     ) -> WeightRevisionMetadata:
         value = self._management_call(
             "begin_weight_upsert",
@@ -268,6 +283,7 @@ class StoreBackend:
             int(policy.migration_mode) if policy is not None else 0,
             affinity_count,
             affinity_digest,
+            self._native_payload_layout(payload_layout),
         )
         return metadata_from_native(value)
 

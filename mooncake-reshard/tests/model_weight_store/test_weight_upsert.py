@@ -89,6 +89,7 @@ class UpsertInMemoryStore(ManagedInMemoryStore):
         return results
 
     def begin_weight_upsert(self, *args):
+        self.received_payload_layouts.append(args[22])
         request_id = args[0]
         mode = weight.WeightUpsertMode(args[1])
         base = self._identity(args[2:7])
@@ -303,6 +304,13 @@ def test_put_first_publishes_target_before_retiring_base() -> None:
         tenant_id="tenant-a",
         request_id="replace-1-with-2",
     )
+    from mooncake.reshard.weight._store.store import _affinity_summary
+
+    layout = raw.received_payload_layouts[-1]
+    physical = tuple((entry.key, entry.size, entry.affinity_id) for entry in layout)
+    assert len(physical) == raw.catalog[writer.identity].manifest.payload_count
+    assert sum(entry[1] for entry in physical) == raw.catalog[writer.identity].manifest.logical_bytes
+    assert _affinity_summary(physical)[1] == raw.catalog[writer.identity].affinity_digest
     assert writer.request_id == "replace-1-with-2"
     assert raw.catalog[base_identity].availability is WeightAvailabilityState.READY
 

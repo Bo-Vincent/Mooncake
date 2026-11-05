@@ -2270,6 +2270,12 @@ PYBIND11_MODULE(_store, m) {
                       &WeightStoragePolicy::preferred_residency)
         .def_readonly("mixed_hot_ratio", &WeightStoragePolicy::mixed_hot_ratio)
         .def_readonly("migration_mode", &WeightStoragePolicy::migration_mode);
+    py::class_<WeightAffinityMappingEntry>(m, "WeightAffinityMappingEntry")
+        .def(py::init<std::string, uint64_t, std::string>(), py::arg("key"),
+             py::arg("size"), py::arg("affinity_id"))
+        .def_readonly("key", &WeightAffinityMappingEntry::key)
+        .def_readonly("size", &WeightAffinityMappingEntry::size)
+        .def_readonly("affinity_id", &WeightAffinityMappingEntry::affinity_id);
     py::class_<WeightAffinitySummary>(m, "WeightAffinitySummary")
         .def_readonly("affinity_count", &WeightAffinitySummary::affinity_count)
         .def_readonly("affinity_digest",
@@ -3742,7 +3748,8 @@ PYBIND11_MODULE(_store, m) {
             uint64_t expected_payload_count, uint64_t expected_logical_bytes,
             bool has_policy, int preferred_residency, double mixed_hot_ratio,
             int migration_mode, uint64_t affinity_count,
-            const std::string &affinity_digest) {
+            const std::string &affinity_digest,
+            const std::vector<WeightAffinityMappingEntry> &payload_layout) {
             auto request = BeginWeightImportRequest{
                 .identity =
                     identity_from_args(tenant_id, name_space, resource_id,
@@ -3767,6 +3774,7 @@ PYBIND11_MODULE(_store, m) {
                         .affinity_count = affinity_count,
                         .affinity_digest = affinity_digest,
                     },
+                .payload_layout = payload_layout,
             };
             WeightRpcResult<WeightRevisionMetadata> result =
                 tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -3782,7 +3790,7 @@ PYBIND11_MODULE(_store, m) {
         py::arg("expected_logical_bytes"), py::arg("has_policy"),
         py::arg("preferred_residency"), py::arg("mixed_hot_ratio"),
         py::arg("migration_mode"), py::arg("affinity_count"),
-        py::arg("affinity_digest"));
+        py::arg("affinity_digest"), py::arg("payload_layout"));
     store_class.def(
         "begin_weight_upsert",
         [identity_from_args](
@@ -3799,7 +3807,8 @@ PYBIND11_MODULE(_store, m) {
             const std::string &payload_group_id, uint64_t payload_count,
             uint64_t logical_bytes, bool has_policy, int preferred_residency,
             double mixed_hot_ratio, int migration_mode, uint64_t affinity_count,
-            const std::string &affinity_digest) {
+            const std::string &affinity_digest,
+            const std::vector<WeightAffinityMappingEntry> &payload_layout) {
             const auto target = identity_from_args(
                 target_tenant_id, target_namespace, target_resource_id,
                 target_revision, target_generation);
@@ -3836,6 +3845,7 @@ PYBIND11_MODULE(_store, m) {
                                 .affinity_count = affinity_count,
                                 .affinity_digest = affinity_digest,
                             },
+                        .payload_layout = payload_layout,
                     },
             };
             WeightRpcResult<WeightRevisionMetadata> result =
@@ -3856,7 +3866,8 @@ PYBIND11_MODULE(_store, m) {
         py::arg("payload_count"), py::arg("logical_bytes"),
         py::arg("has_policy"), py::arg("preferred_residency"),
         py::arg("mixed_hot_ratio"), py::arg("migration_mode"),
-        py::arg("affinity_count"), py::arg("affinity_digest"));
+        py::arg("affinity_count"), py::arg("affinity_digest"),
+        py::arg("payload_layout"));
     auto upsert_control_args = [identity_from_args](
                                    const std::string &request_id,
                                    const std::string &base_tenant_id,

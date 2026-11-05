@@ -59,6 +59,7 @@ class ManagedInMemoryStore(InMemoryStore):
         self.renewed = Event()
         self.operations: dict[int, WeightResidencyOperation] = {}
         self.next_operation_id = 1
+        self.received_payload_layouts = []
         self.cluster_policy = WeightStoragePolicy()
         self.received_policy_overrides: list[WeightStoragePolicy | None] = []
 
@@ -73,6 +74,7 @@ class ManagedInMemoryStore(InMemoryStore):
         )
 
     def begin_weight_import(self, *args):
+        self.received_payload_layouts.append(args[14])
         identity = self._identity(args)
         group_id = f"weight:{_identity_digest(identity)}"
         current = self.catalog.get(identity)
@@ -548,3 +550,74 @@ def test_weight_put_policy_precedence_is_call_then_instance_then_cluster() -> No
     _, store = make_weight_store(raw)
     store._begin_weight_put(sources.placement, sources.bindings)
     assert raw.received_policy_overrides == [None]
+
+
+def test_import_layout_matches_real_upload_producer_and_mutations() -> None:
+    from mooncake.reshard.weight._store.store import _affinity_summary, _payload_layout
+
+    raw = ManagedInMemoryStore()
+    _, store = make_weight_store(raw)
+    sources = source_manifests(dp=1, tp=2)
+    plan = store._begin_weight_put(sources.placement, sources.bindings)
+    layout = _payload_layout(plan)
+    assert len(layout) == len({op.target.object_key for op in plan.operations})
+    assert layout == tuple(sorted({
+        (op.target.object_key, op.target.object_offset + op.target.nbytes,
+         op.residency_affinity_id) for op in plan.operations
+    }))
+    native = raw.received_payload_layouts[-1]
+    assert [(entry.key, entry.size, entry.affinity_id) for entry in native] == list(layout)
+    expected = hashlib.sha256(b"weight-affinity-mapping-v1\n")
+    for key, size, affinity in layout:
+        for value in (key, str(size), affinity):
+            encoded = value.encode("utf-8")
+            expected.update(str(len(encoded)).encode("ascii") + b":" + encoded + b"\n")
+    count, digest = _affinity_summary(layout)
+    assert digest == expected.hexdigest()
+    assert count == len({op.residency_affinity_id for op in plan.operations})
+    assert raw.catalog[plan.management_identity].affinity_digest == digest
+    assert _affinity_summary(tuple(reversed(layout))) == (count, digest)
+    for column, value in ((0, "renamed-雪"), (1, layout[0][1] + 1), (2, "f" * 64)):
+        entry = list(layout[0])
+        entry[column] = value
+        assert _affinity_summary((tuple(entry), *layout[1:]))[1] != digest
+
+    first, *remaining = plan.operations
+    changed = replace(first, target=replace(
+        first.target, object_key=first.target.object_key + "-mutated"
+    ))
+    changed_operations = (changed, *remaining)
+    changed_manifest = replace(
+        plan.manifest, fragments=tuple(op.target for op in changed_operations)
+    )
+    changed_plan = replace(plan, manifest=changed_manifest, operations=changed_operations)
+    assert changed_manifest.manifest_digest != plan.manifest.manifest_digest
+    assert _affinity_summary(_payload_layout(changed_plan))[1] != digest
+
+
+def test_import_layout_rejects_shared_object_with_conflicting_affinities() -> None:
+    from mooncake.reshard.weight._store.store import _payload_layout
+
+    raw = ManagedInMemoryStore()
+    _, store = make_weight_store(raw)
+    sources = source_manifests(dp=1, tp=2)
+    plan, _ = store._prepare_managed_import(
+        sources.placement, sources.bindings, namespace="default", policy=None
+    )
+    first, second, *remaining = plan.operations
+    second = replace(second, target=replace(second.target, object_key=first.target.object_key),
+                     residency_affinity_id="f" * 64)
+    operations = (first, second, *remaining)
+    from types import SimpleNamespace
+
+    with pytest.raises(WeightStoreError, match="multiple residency affinities"):
+        _payload_layout(SimpleNamespace(operations=operations))
+
+
+def test_import_layout_requires_native_entry_constructor(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from mooncake.reshard.weight._store import backend
+
+    monkeypatch.setattr(backend, "import_module", lambda name: SimpleNamespace())
+    with pytest.raises(WeightStoreError, match="native Mooncake Store payload layout"):
+        backend.StoreBackend._native_payload_layout((("payload", 16, "a" * 64),))
