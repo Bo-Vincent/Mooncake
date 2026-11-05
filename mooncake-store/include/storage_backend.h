@@ -1069,7 +1069,8 @@ class BucketStorageBackend : public StorageBackendInterface {
 
     tl::expected<void, ErrorCode> WriteBucket(
         int64_t bucket_id, std::shared_ptr<BucketMetadata> bucket_metadata,
-        std::vector<iovec>& iovs, int disk_index, const StreamWriter* writer = nullptr);
+        std::vector<iovec>& iovs, int disk_index,
+        const StreamWriter* writer = nullptr);
 
     tl::expected<void, ErrorCode> StoreBucketMetadata(
         int64_t bucket_id, std::shared_ptr<BucketMetadata> bucket_metadata,

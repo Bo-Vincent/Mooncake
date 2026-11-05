@@ -621,7 +621,8 @@ WeightMetadataStore::PrepareUpdatePolicy(
     std::optional<WeightResidencyOperation> operation;
     const bool auto_migration =
         next.availability == WeightAvailabilityState::READY &&
-        next.policy.migration_mode == WeightMigrationMode::AUTO && !at_preferred;
+        next.policy.migration_mode == WeightMigrationMode::AUTO &&
+        !at_preferred;
     const bool pinned_migration =
         next.policy.migration_mode == WeightMigrationMode::PINNED &&
         (next.availability != WeightAvailabilityState::READY ||
@@ -630,7 +631,8 @@ WeightMetadataStore::PrepareUpdatePolicy(
     if (auto_migration || pinned_migration) {
         if (next.policy.preferred_residency == WeightResidencyState::MIXED &&
             next.affinity_count < 2) {
-            return tl::make_unexpected(WeightManagementError::POLICY_UNSATISFIABLE);
+            return tl::make_unexpected(
+                WeightManagementError::POLICY_UNSATISFIABLE);
         }
         if (next_operation_id_ == 0 ||
             next_operation_id_ == std::numeric_limits<uint64_t>::max()) {

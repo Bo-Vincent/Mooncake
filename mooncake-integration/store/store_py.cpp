@@ -2641,7 +2641,8 @@ PYBIND11_MODULE(_store, m) {
              });
     // Create a wrapper that exposes DistributedObjectStore with Python-specific
     // methods
-    py::class_<MooncakeStorePyWrapper> store_class(m, "MooncakeDistributedStore");
+    py::class_<MooncakeStorePyWrapper> store_class(m,
+                                                   "MooncakeDistributedStore");
     store_class.def(py::init<>())
         .def(
             "_get_pyclient_capsule",

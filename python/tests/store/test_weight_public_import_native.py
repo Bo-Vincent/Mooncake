@@ -69,4 +69,8 @@ def test_native_payload_layout_entry_preserves_physical_fields() -> None:
     from mooncake.store import WeightAffinityMappingEntry
 
     entry = WeightAffinityMappingEntry("payload-雪", 4096, "tensor-a")
-    assert (entry.key, entry.size, entry.affinity_id) == ("payload-雪", 4096, "tensor-a")
+    assert (entry.key, entry.size, entry.affinity_id) == (
+        "payload-雪",
+        4096,
+        "tensor-a",
+    )

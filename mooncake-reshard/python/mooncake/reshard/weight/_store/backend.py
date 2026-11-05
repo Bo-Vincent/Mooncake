@@ -127,9 +127,7 @@ class StoreBackend:
             raise WeightStoreError(f"is_exist returned invalid status for {key}")
         return result
 
-    def weight_batch_is_exist(
-        self, keys: Sequence[str]
-    ) -> Optional[tuple[int, ...]]:
+    def weight_batch_is_exist(self, keys: Sequence[str]) -> Optional[tuple[int, ...]]:
         candidate = self._optional_method("batch_is_exist")
         if candidate is None:
             return None

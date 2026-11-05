@@ -561,12 +561,22 @@ def test_import_layout_matches_real_upload_producer_and_mutations() -> None:
     plan = store._begin_weight_put(sources.placement, sources.bindings)
     layout = _payload_layout(plan)
     assert len(layout) == len({op.target.object_key for op in plan.operations})
-    assert layout == tuple(sorted({
-        (op.target.object_key, op.target.object_offset + op.target.nbytes,
-         op.residency_affinity_id) for op in plan.operations
-    }))
+    assert layout == tuple(
+        sorted(
+            {
+                (
+                    op.target.object_key,
+                    op.target.object_offset + op.target.nbytes,
+                    op.residency_affinity_id,
+                )
+                for op in plan.operations
+            }
+        )
+    )
     native = raw.received_payload_layouts[-1]
-    assert [(entry.key, entry.size, entry.affinity_id) for entry in native] == list(layout)
+    assert [(entry.key, entry.size, entry.affinity_id) for entry in native] == list(
+        layout
+    )
     expected = hashlib.sha256(b"weight-affinity-mapping-v1\n")
     for key, size, affinity in layout:
         for value in (key, str(size), affinity):
@@ -583,14 +593,17 @@ def test_import_layout_matches_real_upload_producer_and_mutations() -> None:
         assert _affinity_summary((tuple(entry), *layout[1:]))[1] != digest
 
     first, *remaining = plan.operations
-    changed = replace(first, target=replace(
-        first.target, object_key=first.target.object_key + "-mutated"
-    ))
+    changed = replace(
+        first,
+        target=replace(first.target, object_key=first.target.object_key + "-mutated"),
+    )
     changed_operations = (changed, *remaining)
     changed_manifest = replace(
         plan.manifest, fragments=tuple(op.target for op in changed_operations)
     )
-    changed_plan = replace(plan, manifest=changed_manifest, operations=changed_operations)
+    changed_plan = replace(
+        plan, manifest=changed_manifest, operations=changed_operations
+    )
     assert changed_manifest.manifest_digest != plan.manifest.manifest_digest
     assert _affinity_summary(_payload_layout(changed_plan))[1] != digest
 
@@ -605,8 +618,11 @@ def test_import_layout_rejects_shared_object_with_conflicting_affinities() -> No
         sources.placement, sources.bindings, namespace="default", policy=None
     )
     first, second, *remaining = plan.operations
-    second = replace(second, target=replace(second.target, object_key=first.target.object_key),
-                     residency_affinity_id="f" * 64)
+    second = replace(
+        second,
+        target=replace(second.target, object_key=first.target.object_key),
+        residency_affinity_id="f" * 64,
+    )
     operations = (first, second, *remaining)
     from types import SimpleNamespace
 

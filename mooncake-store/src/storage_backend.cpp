@@ -1927,7 +1927,8 @@ tl::expected<int64_t, ErrorCode> BucketStorageBackend::BatchOffloadImpl(
             << finalize_result.error();
     }
 
-    auto write_bucket_result = WriteBucket(bucket_id, bucket, iovs, disk_index, writer);
+    auto write_bucket_result =
+        WriteBucket(bucket_id, bucket, iovs, disk_index, writer);
     if (!write_bucket_result) {
         LOG(ERROR) << "Failed to write bucket with id: " << bucket_id;
         ReleasePreparedWrite(pending);

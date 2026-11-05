@@ -1014,11 +1014,13 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
             }
             if (scheduled_members != 0 &&
                 (scheduled_bytes >= weight_migration_max_bytes_per_round_ ||
-                 bytes > weight_migration_max_bytes_per_round_ - scheduled_bytes)) {
+                 bytes >
+                     weight_migration_max_bytes_per_round_ - scheduled_bytes)) {
                 return false;
             }
             ++scheduled_members;
-            scheduled_bytes += std::min(bytes, weight_migration_max_bytes_per_round_);
+            scheduled_bytes +=
+                std::min(bytes, weight_migration_max_bytes_per_round_);
             if (work_budget) --*work_budget;
             return true;
         };
