@@ -8378,10 +8378,11 @@ TEST_F(MasterServiceHATest,
             WeightStoragePolicy{
                 .preferred_residency = WeightResidencyState::HOT,
                 .migration_mode = WeightMigrationMode::MANUAL},
-        .affinity_summary =
-            {.affinity_count = 1,
-             .affinity_digest = ComputeWeightAffinityMappingSha256(
-                 {{"operation-replay-payload", 1024, "operation-replay-payload"}})},
+        .affinity_summary = {.affinity_count = 1,
+                             .affinity_digest =
+                                 ComputeWeightAffinityMappingSha256(
+                                     {{"operation-replay-payload", 1024,
+                                       "operation-replay-payload"}})},
     });
     ASSERT_TRUE(importing);
     const std::string payload_key = "operation-replay-payload";
