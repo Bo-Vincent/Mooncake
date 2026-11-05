@@ -17,6 +17,9 @@ Use the normal [build instructions](../../getting_started/build.md), adding
 `-DUSE_TENT=ON` when building the TENT backend. The setting applies to the shared
 core and both RDMA adapters in a combined build.
 
+TENT endpoints bind their admission route once. Later slices reuse that binding
+with an acquire load; only the first binding requires an atomic compare-and-swap.
+
 Set `MC_ADAPTIVE_CONGESTION_CONTROL_MODE` before starting the application:
 
 | Mode | Behavior |

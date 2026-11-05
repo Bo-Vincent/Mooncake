@@ -147,6 +147,8 @@ class RdmaEndPoint : public std::enable_shared_from_this<RdmaEndPoint> {
     uint32_t generation() const { return generation_; }
     TentRdmaCongestionControlRoute* bindCongestionRoute(
         TentRdmaCongestionControlRoute* route) {
+        auto* bound = congestion_route_.load(std::memory_order_acquire);
+        if (bound) return bound;
         TentRdmaCongestionControlRoute* expected = nullptr;
         congestion_route_.compare_exchange_strong(expected, route,
                                                   std::memory_order_release,

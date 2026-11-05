@@ -14,6 +14,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
+#include <thread>
+#include <vector>
+
 #include "adaptive_congestion_control.h"
 #include "task_congestion_observation.h"
 #include "tent/transport/rdma/endpoint.h"
@@ -288,6 +293,59 @@ TEST(TentAdaptiveCongestionControlTest, EndpointUsesOneSharedRouteState) {
     first.reset();
     EXPECT_FALSE(weak.expired());
     EXPECT_EQ(retained.get(), bound);
+}
+
+TEST(TentAdaptiveCongestionControlTest, EndpointBindingPreservesNullAndWinner) {
+    RdmaEndPoint endpoint;
+    EXPECT_EQ(endpoint.bindCongestionRoute(nullptr), nullptr);
+    auto first = std::make_shared<TentRdmaCongestionControlRoute>(testConfig());
+    auto other = std::make_shared<TentRdmaCongestionControlRoute>(testConfig());
+    ASSERT_EQ(endpoint.bindCongestionRoute(first.get()), first.get());
+    for (int i = 0; i < 1000; ++i) {
+        EXPECT_EQ(endpoint.bindCongestionRoute(other.get()), first.get());
+        EXPECT_EQ(endpoint.bindCongestionRoute(nullptr), first.get());
+    }
+}
+
+TEST(TentAdaptiveCongestionControlTest,
+     ConcurrentEndpointBindingPublishesOneWinner) {
+    constexpr size_t kThreads = 8;
+    RdmaEndPoint endpoint;
+    std::array<std::shared_ptr<TentRdmaCongestionControlRoute>, kThreads>
+        routes;
+    std::array<size_t, kThreads> payload{};
+    for (auto& route : routes)
+        route = std::make_shared<TentRdmaCongestionControlRoute>(testConfig());
+    std::atomic<size_t> ready{0};
+    std::atomic<bool> start{false};
+    std::atomic<size_t> failures{0};
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            payload[i] = i + 1;
+            auto* winner = endpoint.bindCongestionRoute(routes[i].get());
+            size_t winner_id = 0;
+            while (winner_id < kThreads && routes[winner_id].get() != winner)
+                ++winner_id;
+            if (winner_id == kThreads || payload[winner_id] != winner_id + 1) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            for (int repeat = 0; repeat < 1000; ++repeat) {
+                if (endpoint.bindCongestionRoute(routes[i].get()) != winner ||
+                    endpoint.congestionRoute() != winner)
+                    failures.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != kThreads)
+        std::this_thread::yield();
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) thread.join();
+    EXPECT_EQ(failures.load(), 0u);
 }
 
 TEST(TentAdaptiveCongestionControlTest, PostedSliceRetainsRouteAndDevice) {
