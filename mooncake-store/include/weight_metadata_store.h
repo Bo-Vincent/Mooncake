@@ -34,6 +34,7 @@ struct WeightLeaseMutation {
     uint64_t lease_id{0};
     std::optional<WeightRevisionLease> previous;
     std::optional<WeightRevisionLease> next;
+    std::optional<uint64_t> last_accessed_at_ms;
     bool no_op{false};
 };
 
@@ -75,7 +76,7 @@ class WeightMetadataStore {
     Result<WeightRevisionMetadata> Publish(
         const WeightMetadataMutation& mutation);
     Result<WeightMetadataMutation> PrepareUpdatePolicy(
-        const UpdateWeightPolicyRequest& request, uint64_t now_ms) const;
+        const UpdateWeightPolicyRequest& request, uint64_t now_ms);
 
     Result<WeightRevisionView> Get(const WeightRevisionIdentity& identity,
                                    uint64_t now_ms) const;

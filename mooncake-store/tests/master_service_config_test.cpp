@@ -320,4 +320,44 @@ TEST(MasterServiceConfigTest,
     EXPECT_EQ(from_supervisor.http_port, UINT16_MAX);
 }
 
+TEST(MasterServiceConfigTest, DefaultWeightPolicyPropagatesToServingConfig) {
+    MasterConfig master_config{};
+    master_config.default_weight_storage_policy = WeightStoragePolicy{
+        .preferred_residency = WeightResidencyState::COLD,
+        .mixed_hot_ratio = 0.25,
+        .migration_mode = WeightMigrationMode::MANUAL,
+    };
+    master_config.weight_migration_cooldown_ms = 1234;
+    master_config.weight_migration_max_members_per_round = 12;
+    master_config.weight_migration_max_bytes_per_round = 34'567;
+    MasterServiceSupervisorConfig supervisor_config(master_config);
+    WrappedMasterServiceConfig wrapped_config(supervisor_config, 1);
+    MasterServiceConfig service_config(wrapped_config);
+
+    EXPECT_EQ(master_config.default_weight_storage_policy,
+              supervisor_config.default_weight_storage_policy);
+    EXPECT_EQ(master_config.default_weight_storage_policy,
+              wrapped_config.default_weight_storage_policy);
+    EXPECT_EQ(master_config.default_weight_storage_policy,
+              service_config.default_weight_storage_policy);
+    EXPECT_EQ(1234u, supervisor_config.weight_migration_cooldown_ms);
+    EXPECT_EQ(1234u, wrapped_config.weight_migration_cooldown_ms);
+    EXPECT_EQ(1234u, service_config.weight_migration_cooldown_ms);
+    EXPECT_EQ(12u, supervisor_config.weight_migration_max_members_per_round);
+    EXPECT_EQ(12u, wrapped_config.weight_migration_max_members_per_round);
+    EXPECT_EQ(12u, service_config.weight_migration_max_members_per_round);
+    EXPECT_EQ(34'567u, supervisor_config.weight_migration_max_bytes_per_round);
+    EXPECT_EQ(34'567u, wrapped_config.weight_migration_max_bytes_per_round);
+    EXPECT_EQ(34'567u, service_config.weight_migration_max_bytes_per_round);
+
+    auto built = MasterServiceConfig::builder()
+                     .set_weight_migration_cooldown_ms(5678)
+                     .set_weight_migration_max_members_per_round(23)
+                     .set_weight_migration_max_bytes_per_round(45'678)
+                     .build();
+    EXPECT_EQ(5678u, built.weight_migration_cooldown_ms);
+    EXPECT_EQ(23u, built.weight_migration_max_members_per_round);
+    EXPECT_EQ(45'678u, built.weight_migration_max_bytes_per_round);
+}
+
 }  // namespace mooncake::test

@@ -44,6 +44,15 @@ struct WeightMetadataDeleteOp {
 };
 YLT_REFL(WeightMetadataDeleteOp, identity, metadata_generation);
 
+struct WeightLeaseUpsertOp {
+    WeightRevisionLease lease;
+    uint64_t last_accessed_at_ms{0};
+
+    friend bool operator==(const WeightLeaseUpsertOp&,
+                           const WeightLeaseUpsertOp&) = default;
+};
+YLT_REFL(WeightLeaseUpsertOp, lease, last_accessed_at_ms);
+
 struct WeightLeaseDeleteOp {
     uint64_t lease_id{0};
     WeightRevisionIdentity identity;

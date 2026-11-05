@@ -37,6 +37,60 @@ enum class WeightMigrationMode : uint8_t {
     AUTO = 2,
 };
 
+inline std::optional<WeightResidencyState> ParseWeightResidencyTarget(
+    std::string_view value) {
+    if (value == "hot") {
+        return WeightResidencyState::HOT;
+    }
+    if (value == "cold") {
+        return WeightResidencyState::COLD;
+    }
+    if (value == "mixed") {
+        return WeightResidencyState::MIXED;
+    }
+    return std::nullopt;
+}
+
+inline std::optional<WeightMigrationMode> ParseWeightMigrationMode(
+    std::string_view value) {
+    if (value == "pinned") {
+        return WeightMigrationMode::PINNED;
+    }
+    if (value == "manual") {
+        return WeightMigrationMode::MANUAL;
+    }
+    if (value == "auto") {
+        return WeightMigrationMode::AUTO;
+    }
+    return std::nullopt;
+}
+
+inline std::string_view WeightResidencyTargetName(
+    WeightResidencyState residency) {
+    switch (residency) {
+        case WeightResidencyState::HOT:
+            return "hot";
+        case WeightResidencyState::COLD:
+            return "cold";
+        case WeightResidencyState::MIXED:
+            return "mixed";
+        default:
+            return "unknown";
+    }
+}
+
+inline std::string_view WeightMigrationModeName(WeightMigrationMode mode) {
+    switch (mode) {
+        case WeightMigrationMode::PINNED:
+            return "pinned";
+        case WeightMigrationMode::MANUAL:
+            return "manual";
+        case WeightMigrationMode::AUTO:
+            return "auto";
+    }
+    return "unknown";
+}
+
 enum class WeightOperationKind : uint8_t {
     MIGRATING = 0,
     REPAIRING = 1,
@@ -109,7 +163,7 @@ YLT_REFL(WeightManifestReference, manifest_key, manifest_sha256,
 struct WeightStoragePolicy {
     WeightResidencyState preferred_residency{WeightResidencyState::MIXED};
     double mixed_hot_ratio{0.5};
-    WeightMigrationMode migration_mode{WeightMigrationMode::MANUAL};
+    WeightMigrationMode migration_mode{WeightMigrationMode::AUTO};
 
     friend bool operator==(const WeightStoragePolicy&,
                            const WeightStoragePolicy&) = default;
@@ -139,13 +193,15 @@ struct WeightRevisionMetadata {
     uint64_t metadata_generation{1};
     uint64_t created_at_ms{0};
     uint64_t updated_at_ms{0};
+    uint64_t last_accessed_at_ms{0};
 
     friend bool operator==(const WeightRevisionMetadata&,
                            const WeightRevisionMetadata&) = default;
 };
 YLT_REFL(WeightRevisionMetadata, identity, manifest, policy, availability,
          residency, operation_id, affinity_count, affinity_digest,
-         observed_hot_ratio, metadata_generation, created_at_ms, updated_at_ms);
+         observed_hot_ratio, metadata_generation, created_at_ms, updated_at_ms,
+         last_accessed_at_ms);
 
 struct WeightRevisionLease {
     uint64_t lease_id{0};
@@ -458,12 +514,9 @@ inline WeightValidationResult ValidateWeightStoragePolicy(
         policy.mixed_hot_ratio <= 0.0 || policy.mixed_hot_ratio >= 1.0) {
         return WeightValidationResult::Failure("invalid mixed_hot_ratio");
     }
-    if (policy.migration_mode == WeightMigrationMode::AUTO) {
-        return WeightValidationResult::Failure(
-            "AUTO migration is not supported yet");
-    }
     if (policy.migration_mode != WeightMigrationMode::PINNED &&
-        policy.migration_mode != WeightMigrationMode::MANUAL) {
+        policy.migration_mode != WeightMigrationMode::MANUAL &&
+        policy.migration_mode != WeightMigrationMode::AUTO) {
         return WeightValidationResult::Failure("invalid migration_mode");
     }
     return WeightValidationResult::Success();
@@ -518,7 +571,8 @@ inline WeightValidationResult ValidateWeightRevisionMetadata(
         metadata.metadata_generation == std::numeric_limits<uint64_t>::max()) {
         return WeightValidationResult::Failure("invalid metadata_generation");
     }
-    if (metadata.updated_at_ms < metadata.created_at_ms) {
+    if (metadata.updated_at_ms < metadata.created_at_ms ||
+        metadata.last_accessed_at_ms < metadata.created_at_ms) {
         return WeightValidationResult::Failure("timestamps are not monotonic");
     }
     auto policy_result = ValidateWeightStoragePolicy(metadata.policy);

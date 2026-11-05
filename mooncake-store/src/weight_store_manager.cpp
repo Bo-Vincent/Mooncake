@@ -153,6 +153,28 @@ void WeightStoreManager::Clear() {
     import_activity_.clear();
 }
 
+WeightStoreManager::WeightStoreManager(WeightStoreBackend& backend,
+                                       WeightStoragePolicy policy,
+                                       uint64_t migration_cooldown_ms,
+                                       uint64_t migration_max_members_per_round,
+                                       uint64_t migration_max_bytes_per_round)
+    : backend_(backend),
+      default_weight_storage_policy_(std::move(policy)),
+      weight_migration_cooldown_ms_(migration_cooldown_ms),
+      weight_migration_max_members_per_round_(migration_max_members_per_round),
+      weight_migration_max_bytes_per_round_(migration_max_bytes_per_round) {
+    if (weight_migration_max_members_per_round_ == 0 ||
+        weight_migration_max_bytes_per_round_ == 0) {
+        throw std::invalid_argument(
+            "Weight migration batch limits must be positive");
+    }
+    const auto validation =
+        ValidateWeightStoragePolicy(default_weight_storage_policy_);
+    if (!validation.ok()) {
+        throw std::invalid_argument("Invalid default weight storage policy: " +
+                                    validation.message());
+    }
+}
 std::unique_lock<std::mutex> WeightStoreManager::LockGroup(
     const WeightRevisionIdentity& identity) {
     const auto key = TenantId(identity.tenant_id)
@@ -172,6 +194,9 @@ WeightStoreManager::BeginWeightImport(const BeginWeightImportRequest& request) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     normalized.payload_group_id = canonical_group;
+    if (!normalized.policy.has_value()) {
+        normalized.policy = default_weight_storage_policy_;
+    }
     auto operation_lock = LockGroup(request.identity);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -383,12 +408,38 @@ WeightStoreManager::AcquireWeightRevisionLease(
     if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
-    [[maybe_unused]] auto operation_lock = LockGroup(request.identity);
+    [[maybe_unused]] auto group_operation_lock =
+        LockGroup(request.identity);
     const auto now_ms = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
-    auto mutation = weight_metadata_.PrepareAcquireLease(request, now_ms);
+    auto normalized = request;
+    auto current = weight_metadata_.Get(request.identity, now_ms);
+    if (current && current->metadata.metadata_generation ==
+                       request.expected_metadata_generation) {
+        auto target = PlanAutomaticWeightMigration(
+            current->metadata, current->active_lease_count,
+            WeightAutoMigrationSignal::ACCESS, now_ms,
+            weight_migration_cooldown_ms_);
+        if (target.has_value()) {
+            auto started = StartWeightResidencyOperationLocked(
+                StartWeightResidencyOperationRequest{
+                    .identity = request.identity,
+                    .expected_metadata_generation =
+                        current->metadata.metadata_generation,
+                    .target_residency = target->residency,
+                    .mixed_hot_ratio = target->mixed_hot_ratio,
+                },
+                now_ms);
+            if (!started) {
+                return tl::make_unexpected(started.error());
+            }
+            normalized.expected_metadata_generation =
+                started->fenced_metadata_generation;
+        }
+    }
+    auto mutation = weight_metadata_.PrepareAcquireLease(normalized, now_ms);
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
     }
@@ -465,13 +516,20 @@ WeightStoreManager::PersistAndPublishWeightLeaseMutation(
     OpType type;
     std::string tenant_id;
     std::string payload;
-    if (mutation.kind == WeightMetadataMutationKind::UPSERT &&
-        mutation.next.has_value()) {
+    if (mutation.kind == WeightMetadataMutationKind::UPSERT) {
+        if (!mutation.next.has_value() ||
+            !mutation.last_accessed_at_ms.has_value()) {
+            return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+        }
         type = OpType::WEIGHT_LEASE_UPSERT;
         tenant_id = mutation.next->identity.tenant_id;
-        const auto encoded = struct_pack::serialize(*mutation.next);
+        const auto encoded = struct_pack::serialize(WeightLeaseUpsertOp{
+            .lease = *mutation.next,
+            .last_accessed_at_ms = *mutation.last_accessed_at_ms,
+        });
         payload.assign(encoded.begin(), encoded.end());
-    } else if (mutation.previous.has_value()) {
+    } else if (mutation.kind == WeightMetadataMutationKind::ERASE &&
+               mutation.previous.has_value()) {
         type = OpType::WEIGHT_LEASE_DELETE;
         tenant_id = mutation.previous->identity.tenant_id;
         WeightLeaseDeleteOp deletion{
@@ -515,6 +573,12 @@ WeightStoreManager::StartWeightResidencyOperation(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
+    return StartWeightResidencyOperationLocked(request, now_ms);
+}
+
+WeightMetadataStore::Result<WeightResidencyOperation>
+WeightStoreManager::StartWeightResidencyOperationLocked(
+    const StartWeightResidencyOperationRequest& request, uint64_t now_ms) {
     auto mutation = weight_metadata_.PrepareStartOperation(request, now_ms);
     if (!mutation) {
         return tl::make_unexpected(mutation.error());
@@ -675,8 +739,8 @@ WeightStoreManager::ReconcileWeightRevisionBounded(
     struct AffinityObservation {
         uint64_t logical_bytes{0};
         bool all_memory{true};
-        bool all_cold{true};
         bool all_have_cold{true};
+        bool all_cold{true};
         std::vector<std::string> keys;
         std::vector<std::string> keys_without_cold;
     };
@@ -689,12 +753,13 @@ WeightStoreManager::ReconcileWeightRevisionBounded(
             auto& affinity = affinities[member.residency_affinity_id];
             affinity.logical_bytes += member.size;
             affinity.all_memory = affinity.all_memory && member.has_memory;
+            affinity.all_have_cold = affinity.all_have_cold && member.has_cold;
             affinity.all_cold =
                 affinity.all_cold && member.has_cold && !member.has_memory;
             affinity.keys.push_back(member.key);
-            affinity.all_have_cold = affinity.all_have_cold && member.has_cold;
-            if (!member.has_cold)
+            if (!member.has_cold) {
                 affinity.keys_without_cold.push_back(member.key);
+            }
         }
         return affinities;
     };
@@ -805,6 +870,40 @@ WeightStoreManager::ReconcileWeightRevisionBounded(
                     << " result=" << static_cast<int>(result);
         }
 
+        uint64_t scheduled_affinities = 0;
+        uint64_t scheduled_members = 0;
+        uint64_t scheduled_bytes = 0;
+        auto reserve_affinity = [&](const AffinityObservation& affinity) {
+            // One work item is a complete affinity, even if it has many keys.
+            if (member_budget && *member_budget == 0) {
+                return false;
+            }
+            const auto member_count =
+                static_cast<uint64_t>(affinity.keys.size());
+            if (scheduled_affinities != 0 &&
+                (scheduled_members >= weight_migration_max_members_per_round_ ||
+                 member_count > weight_migration_max_members_per_round_ -
+                                    scheduled_members ||
+                 scheduled_bytes >= weight_migration_max_bytes_per_round_ ||
+                 affinity.logical_bytes >
+                     weight_migration_max_bytes_per_round_ - scheduled_bytes)) {
+                return false;
+            }
+            if (scheduled_affinities == 0) {
+                scheduled_members = std::min(
+                    weight_migration_max_members_per_round_, member_count);
+                scheduled_bytes =
+                    std::min(weight_migration_max_bytes_per_round_,
+                             affinity.logical_bytes);
+            } else {
+                scheduled_members += member_count;
+                scheduled_bytes += affinity.logical_bytes;
+            }
+            ++scheduled_affinities;
+            if (member_budget) --*member_budget;
+            return true;
+        };
+
         std::vector<std::string> affinity_ids;
         for (const auto& [affinity_id, affinity] : affinities) {
             affinity_ids.push_back(affinity_id);
@@ -821,12 +920,18 @@ WeightStoreManager::ReconcileWeightRevisionBounded(
             const auto& affinity_id = affinity_ids[index];
             const auto& affinity = affinities.at(affinity_id);
             const bool should_be_hot = hot_affinities.contains(affinity_id);
-            if (should_be_hot ? affinity.all_memory : affinity.all_cold) {
+            const bool needs_action =
+                should_be_hot
+                    ? !affinity.all_memory
+                    : (!affinity.all_have_cold ||
+                       (view->active_lease_count == 0 && !affinity.all_cold));
+            if (!needs_action) {
                 continue;
             }
+            if (!reserve_affinity(affinity)) {
+                break;
+            }
             if (member_budget) {
-                if (*member_budget == 0) break;
-                --*member_budget;
                 std::lock_guard lock(affinity_cursor_mutex_);
                 affinity_cursors_[MakeWeightRevisionMetadataKey(
                     current.identity)] = (index + 1) % affinity_ids.size();
@@ -1094,7 +1199,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
     }
 
     size_t member_budget = limit - actions;
-    const auto snapshot = weight_metadata_.ExportSnapshot();
+    auto snapshot = weight_metadata_.ExportSnapshot();
     bool has_affinity_cursors;
     {
         std::lock_guard cursor_lock(affinity_cursor_mutex_);
@@ -1116,8 +1221,22 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
             return !live_revisions.contains(cursor.first);
         });
     }
+    const auto pressure = backend_.GetMemoryPressure();
+    const double memory_used_ratio =
+        pressure.used_ratio;
+    const bool memory_pressure =
+        memory_used_ratio > pressure.high_watermark ||
+        pressure.eviction_requested;
+    const double memory_low_watermark =
+        std::max(0.0, pressure.high_watermark - pressure.eviction_ratio);
+    const bool capacity_available =
+        !memory_pressure && memory_used_ratio < memory_low_watermark;
+    if (memory_pressure) {
+        std::sort(snapshot.metadata.begin(), snapshot.metadata.end(),
+                  WeightAutoMigrationCandidateLess);
+    }
     const size_t revision_count = snapshot.metadata.size();
-    const size_t start = revision_count == 0
+    const size_t start = revision_count == 0 || memory_pressure
                              ? 0
                              : weight_reconciliation_offset_ % revision_count;
     size_t examined = 0;
@@ -1172,6 +1291,42 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
             continue;
         }
 
+        std::optional<WeightAutoMigrationSignal> auto_signal;
+        if (memory_pressure) {
+            auto_signal = WeightAutoMigrationSignal::MEMORY_PRESSURE;
+        } else if (capacity_available) {
+            auto_signal = WeightAutoMigrationSignal::CAPACITY_AVAILABLE;
+        }
+        if (auto_signal.has_value() &&
+            metadata.availability == WeightAvailabilityState::READY) {
+            auto current = weight_metadata_.Get(metadata.identity, now_ms);
+            if (current) {
+                auto target = PlanAutomaticWeightMigration(
+                    current->metadata, current->active_lease_count,
+                    *auto_signal, now_ms, weight_migration_cooldown_ms_);
+                if (target.has_value()) {
+                    auto started = StartWeightResidencyOperation(
+                        StartWeightResidencyOperationRequest{
+                            .identity = metadata.identity,
+                            .expected_metadata_generation =
+                                current->metadata.metadata_generation,
+                            .target_residency = target->residency,
+                            .mixed_hot_ratio = target->mixed_hot_ratio,
+                        });
+                    if (started) {
+                        ++actions;
+                        continue;
+                    }
+                    if (started.error() !=
+                            WeightManagementError::STALE_GENERATION &&
+                        started.error() != WeightManagementError::BUSY) {
+                        MasterMetricManager::instance()
+                            .inc_weight_reconciliation_failures();
+                    }
+                }
+            }
+        }
+
         auto reconciled = ReconcileWeightRevisionBounded(
             ReconcileWeightRevisionRequest{.identity = metadata.identity},
             &member_budget);
@@ -1183,7 +1338,7 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
         }
     }
 
-    if (examined != 0) {
+    if (!memory_pressure && examined != 0) {
         weight_reconciliation_offset_ = (start + examined) % revision_count;
     }
     MasterMetricManager::instance().project_weight_metadata(
@@ -1194,7 +1349,8 @@ size_t WeightStoreManager::ReconcileWeightMetadataStoreOnce(uint64_t now_ms,
 WeightMetadataStore::Result<WeightRevisionMetadata>
 WeightStoreManager::UpdateWeightPolicy(
     const UpdateWeightPolicyRequest& request) {
-    if (MakeWeightPayloadGroupId(request.identity).empty()) {
+    const auto canonical_group = MakeWeightPayloadGroupId(request.identity);
+    if (canonical_group.empty()) {
         return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
     }
     auto group_operation_lock = LockGroup(request.identity);

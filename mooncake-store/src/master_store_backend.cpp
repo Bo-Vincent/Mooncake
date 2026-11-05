@@ -6,6 +6,16 @@
 
 namespace mooncake {
 
+WeightStoreMemoryPressure MasterStoreBackend::GetMemoryPressure() const {
+    return {
+        .used_ratio = master_.segment_manager_.GetMemoryUsage().used_ratio(),
+        .high_watermark = master_.eviction_high_watermark_ratio_,
+        .eviction_ratio = master_.eviction_ratio_,
+        .eviction_requested =
+            master_.need_mem_eviction_.load(std::memory_order_relaxed),
+    };
+}
+
 bool MasterStoreBackend::CanPublishWeightMutations() const {
     return master_.weight_management_mutations_enabled_;
 }

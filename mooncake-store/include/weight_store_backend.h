@@ -9,6 +9,13 @@
 
 namespace mooncake {
 
+struct WeightStoreMemoryPressure {
+    double used_ratio;
+    double high_watermark;
+    double eviction_ratio;
+    bool eviction_requested;
+};
+
 struct WeightGroupMemberSnapshot {
     std::string key;
     std::string residency_affinity_id;
@@ -26,6 +33,7 @@ class WeightStoreBackend {
     // The consumer must arbitrate completion before publishing metadata.
     using DurableFinalize = std::function<void(const DurableResult&)>;
     virtual ~WeightStoreBackend() = default;
+    virtual WeightStoreMemoryPressure GetMemoryPressure() const = 0;
     virtual bool CanPublishWeightMutations() const = 0;
     virtual PromotionQueueResult PromoteWeightObject(
         const TenantId& tenant_id, const std::string& key) = 0;
@@ -54,6 +62,7 @@ class MasterService;
 class MasterStoreBackend final : public WeightStoreBackend {
    public:
     explicit MasterStoreBackend(MasterService& master) : master_(master) {}
+    WeightStoreMemoryPressure GetMemoryPressure() const override;
     bool CanPublishWeightMutations() const override;
     PromotionQueueResult PromoteWeightObject(const TenantId& tenant_id,
                                              const std::string& key) override;
