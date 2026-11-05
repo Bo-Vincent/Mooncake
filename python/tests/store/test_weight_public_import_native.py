@@ -74,3 +74,14 @@ def test_native_payload_layout_entry_preserves_physical_fields() -> None:
         4096,
         "tensor-a",
     )
+
+
+def test_native_import_bindings_require_physical_layout() -> None:
+    if find_spec("mooncake._store") is None:
+        pytest.skip("C++ Store native extension is not built")
+    from mooncake.store import MooncakeDistributedStore
+
+    for name in ("begin_weight_import", "begin_weight_upsert"):
+        signature = getattr(MooncakeDistributedStore, name).__doc__
+        assert "payload_layout" in signature
+        assert "WeightAffinityMappingEntry" in signature

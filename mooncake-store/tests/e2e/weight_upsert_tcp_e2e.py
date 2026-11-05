@@ -48,6 +48,20 @@ def _payload_keys_sha256(keys: list[str]) -> str:
     return digest.hexdigest()
 
 
+def _affinity_mapping(store, entries):
+    digest = hashlib.sha256(b"weight-affinity-mapping-v1\n")
+    for key, size, affinity in sorted(
+        entries, key=lambda entry: entry[0].encode("utf-8")
+    ):
+        for value in (key, str(size), affinity):
+            encoded = value.encode("utf-8")
+            digest.update(str(len(encoded)).encode("ascii") + b":" + encoded + b"\n")
+    return digest.hexdigest(), [
+        store.WeightAffinityMappingEntry(key, size, affinity)
+        for key, size, affinity in entries
+    ]
+
+
 def _require_success(result, operation: str):
     value, management_error, transport_error = result
     if value is None or management_error != 0 or transport_error != 0:
@@ -68,6 +82,9 @@ def _run_replacements(client, store, identity, payload_key, payload, suffix):
     def begin(mode, base, target, request_id, expected_generation=None):
         if expected_generation is None:
             expected_generation = view(base).metadata.metadata_generation
+        affinity_digest, payload_layout = _affinity_mapping(
+            store, [(f"weights/{identity[2]}/{target}/payload", len(payload), "rank-0")]
+        )
         return client.begin_weight_upsert(
             request_id,
             mode,
@@ -84,7 +101,8 @@ def _run_replacements(client, store, identity, payload_key, payload, suffix):
             0.5,
             1,
             1,
-            hashlib.sha256(b"rank-0").hexdigest(),
+            affinity_digest,
+            payload_layout,
         )
 
     def publish(importing, generation):
@@ -195,6 +213,13 @@ def _run_lifecycle(client, store, suffix: str, *, cancel_only=False) -> None:
         f"weights/{prefix}/tensor-{index}": bytes([index + 1]) * 65536
         for index in range(2)
     }
+    affinity_digest, payload_layout = _affinity_mapping(
+        store,
+        [
+            (key, len(payload), f"rank-{index}")
+            for index, (key, payload) in enumerate(payloads.items())
+        ],
+    )
     importing = _require_success(
         client.begin_weight_import(
             *identity,
@@ -206,7 +231,8 @@ def _run_lifecycle(client, store, suffix: str, *, cancel_only=False) -> None:
             0.5,
             1,
             2,
-            hashlib.sha256(b"rank-0,rank-1").hexdigest(),
+            affinity_digest,
+            payload_layout,
         ),
         "lifecycle begin",
     )
@@ -456,7 +482,13 @@ def run(*, cancel_only=False) -> int:
     manifest_key = (
         f"weights/{namespace}/{resource}/{revision}/{base_generation}/manifest"
     )
-    affinity_digest = hashlib.sha256(b"rank-0").hexdigest()
+    affinity_digest, payload_layout = _affinity_mapping(
+        store, [(payload_key, len(payload), "rank-0")]
+    )
+    target_digest, target_layout = _affinity_mapping(
+        store,
+        [(f"weights/{resource}/{target_generation}/payload", len(payload), "rank-0")],
+    )
 
     try:
         if cancel_only:
@@ -478,6 +510,7 @@ def run(*, cancel_only=False) -> int:
                 1,
                 1,
                 affinity_digest,
+                payload_layout,
             ),
             "begin_weight_import",
         )
@@ -539,7 +572,8 @@ def run(*, cancel_only=False) -> int:
             0.5,
             1,
             1,
-            affinity_digest,
+            target_digest,
+            target_layout,
         )
         assert stale[0] is None
         assert stale[1] == 4
@@ -568,7 +602,8 @@ def run(*, cancel_only=False) -> int:
                 0.5,
                 1,
                 1,
-                affinity_digest,
+                target_digest,
+                target_layout,
             ),
             "begin_weight_upsert",
         )
