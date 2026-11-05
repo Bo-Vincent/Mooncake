@@ -66,6 +66,7 @@ class WeightReconciliationTest : public MasterServiceTest {
         config.data_type = ObjectDataType::WEIGHT;
         PutCompletedObject(service, client_id, payload_key, config, 1024);
         config.data_type = ObjectDataType::METADATA;
+        config.residency_affinity_ids.reset();
         PutCompletedObject(service, client_id, ManifestKey(identity), config,
                            128);
         auto ready = service.CommitWeightImport(CommitWeightImportRequest{
@@ -197,6 +198,7 @@ class WeightReconciliationTest : public MasterServiceTest {
                                1024);
         }
         put_config.data_type = ObjectDataType::METADATA;
+        put_config.residency_affinity_ids.reset();
         PutCompletedObject(service, context.client_id, ManifestKey(identity),
                            put_config, 128);
         const auto ready = service.CommitWeightImport(CommitWeightImportRequest{
@@ -1416,7 +1418,12 @@ TEST_F(WeightReconciliationTest, UnitBudgetKeepsAffinityWholeAndResumes) {
                 .migration_mode = WeightMigrationMode::MANUAL,
             },
         .affinity_summary = {.affinity_count = 2,
-                             .affinity_digest = std::string(64, 'c')},
+                             .affinity_digest =
+                                 ComputeWeightAffinityMappingSha256(
+                                     {{keys[0], 1024, "unit-a"},
+                                      {keys[1], 1024, "unit-a"},
+                                      {keys[2], 1024, "unit-b"},
+                                      {keys[3], 1024, "unit-b"}})},
     });
     ASSERT_TRUE(importing);
     ReplicateConfig put;
@@ -1431,6 +1438,7 @@ TEST_F(WeightReconciliationTest, UnitBudgetKeepsAffinityWholeAndResumes) {
         PutCompletedObject(service, context.client_id, keys[i], put, 1024);
     }
     put.data_type = ObjectDataType::METADATA;
+    put.residency_affinity_ids.reset();
     PutCompletedObject(service, context.client_id, ManifestKey(identity), put,
                        128);
     const auto ready = service.CommitWeightImport({
