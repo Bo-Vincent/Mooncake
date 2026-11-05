@@ -614,13 +614,8 @@ WeightMetadataStore::PrepareUpdatePolicy(
         revision->second.availability != WeightAvailabilityState::DEGRADED) {
         return tl::make_unexpected(WeightManagementError::NOT_READY);
     }
-    if ((request.policy.preferred_residency == WeightResidencyState::MIXED &&
-         revision->second.affinity_count < 2) ||
-        (request.policy.migration_mode == WeightMigrationMode::PINNED &&
-         (revision->second.residency != request.policy.preferred_residency ||
-          (request.policy.preferred_residency == WeightResidencyState::MIXED &&
-           revision->second.observed_hot_ratio !=
-               request.policy.mixed_hot_ratio)))) {
+    if (request.policy.preferred_residency == WeightResidencyState::MIXED &&
+        revision->second.affinity_count < 2) {
         return tl::make_unexpected(WeightManagementError::POLICY_UNSATISFIABLE);
     }
     if (!CanAdvanceWeightMetadataGeneration(
@@ -636,13 +631,18 @@ WeightMetadataStore::PrepareUpdatePolicy(
         (next.residency != WeightResidencyState::MIXED ||
          next.observed_hot_ratio == next.policy.mixed_hot_ratio);
     std::optional<WeightResidencyOperation> operation;
-    if (next.availability == WeightAvailabilityState::READY &&
-        next.policy.migration_mode == WeightMigrationMode::AUTO &&
-        !at_preferred) {
+    const bool auto_migration =
+        next.availability == WeightAvailabilityState::READY &&
+        next.policy.migration_mode == WeightMigrationMode::AUTO && !at_preferred;
+    const bool pinned_migration =
+        next.policy.migration_mode == WeightMigrationMode::PINNED &&
+        (next.availability != WeightAvailabilityState::READY ||
+         next.residency != next.policy.preferred_residency ||
+         next.policy.preferred_residency == WeightResidencyState::MIXED);
+    if (auto_migration || pinned_migration) {
         if (next.policy.preferred_residency == WeightResidencyState::MIXED &&
             next.affinity_count < 2) {
-            return tl::make_unexpected(
-                WeightManagementError::POLICY_UNSATISFIABLE);
+            return tl::make_unexpected(WeightManagementError::POLICY_UNSATISFIABLE);
         }
         if (next_operation_id_ == 0 ||
             next_operation_id_ == std::numeric_limits<uint64_t>::max()) {
