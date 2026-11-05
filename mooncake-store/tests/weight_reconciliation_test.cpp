@@ -1305,6 +1305,7 @@ TEST_F(WeightReconciliationTest, MemberBudgetBoundsDeletionAndResumes) {
     PutCompletedObject(service, context.client_id, "bounded-a", config, 1024);
     PutCompletedObject(service, context.client_id, "bounded-b", config, 1024);
     config.data_type = ObjectDataType::METADATA;
+    config.residency_affinity_ids.reset();
     PutCompletedObject(service, context.client_id, ManifestKey(identity),
                        config, 128);
     ASSERT_TRUE(service.AbortWeightImport({
@@ -1371,6 +1372,7 @@ TEST_F(WeightReconciliationTest, MemberBudgetIsSharedAcrossRevisions) {
                                1024);
         }
         config.data_type = ObjectDataType::METADATA;
+        config.residency_affinity_ids.reset();
         keys.push_back(ManifestKey(identity));
         PutCompletedObject(service, context.client_id, keys.back(), config,
                            128);

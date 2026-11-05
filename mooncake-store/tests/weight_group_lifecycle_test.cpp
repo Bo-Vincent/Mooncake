@@ -901,6 +901,7 @@ TEST_F(WeightGroupLifecycleTest, RetirementSharesDeletionMemberBudget) {
         PutCompletedObject(service, context.client_id, key, put, 1024);
     }
     put.data_type = ObjectDataType::METADATA;
+    put.residency_affinity_ids.reset();
     PutCompletedObject(service, context.client_id,
                        MakeWeightManifestKey(ordinary), put, 128);
     ASSERT_TRUE(service.AbortWeightImport({
