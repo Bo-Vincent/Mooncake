@@ -1419,7 +1419,9 @@ TEST_F(MasterServiceHATest, LegacyStandbyRestorePreservesWeightAffinities) {
         .affinity_summary =
             WeightAffinitySummary{
                 .affinity_count = 2,
-                .affinity_digest = std::string(64, 'c'),
+                .affinity_digest = ComputeWeightAffinityMappingSha256(
+                    {{"affinity-payload-a", 1024, "affinity-a"},
+                     {"affinity-payload-b", 1024, "affinity-b"}}),
             },
     });
     ASSERT_TRUE(importing.has_value());
@@ -8379,7 +8381,7 @@ TEST_F(MasterServiceHATest,
         .affinity_summary =
             {.affinity_count = 1,
              .affinity_digest = ComputeWeightAffinityMappingSha256(
-                 {{"operation-replay-payload", 1024, "affinity-a"}})},
+                 {{"operation-replay-payload", 1024, "operation-replay-payload"}})},
     });
     ASSERT_TRUE(importing);
     const std::string payload_key = "operation-replay-payload";

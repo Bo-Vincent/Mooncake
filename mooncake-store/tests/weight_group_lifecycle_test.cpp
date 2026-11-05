@@ -971,7 +971,8 @@ TEST_F(WeightGroupLifecycleTest, NewLineageClaimRevalidatesCurrentBase) {
                 .affinity_summary =
                     WeightAffinitySummary{
                         .affinity_count = 1,
-                        .affinity_digest = std::string(64, 'd'),
+                        .affinity_digest = ComputeWeightAffinityMappingSha256(
+                            {{"payload-b", 2048, "affinity-b"}}),
                     },
             },
     });
