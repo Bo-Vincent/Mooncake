@@ -114,6 +114,8 @@ TEST(WeightManagementContractTest, RejectsNonCanonicalWeightObjectNames) {
 }
 
 TEST(WeightManagementContractTest, RejectsInvalidStoragePolicyEnums) {
+    EXPECT_EQ(10,
+              static_cast<int>(WeightManagementError::POLICY_UNSATISFIABLE));
     auto policy = WeightStoragePolicy{};
     EXPECT_TRUE(ValidateWeightStoragePolicy(policy).ok());
     EXPECT_EQ(WeightMigrationMode::MANUAL, policy.migration_mode);

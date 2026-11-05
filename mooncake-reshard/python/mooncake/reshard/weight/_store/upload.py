@@ -468,7 +468,7 @@ class WeightUploadService:
                         begin : begin + self.client.max_ranges_per_request
                     ]
                     store_io_started = True
-                    results = self.client.store.batch_put_from(
+                    results = self.client.store.weight_batch_put_from(
                         [operation.target.object_key for operation, _ in batch],
                         [current.address for _, current in batch],
                         [current.nbytes for _, current in batch],

@@ -47,7 +47,7 @@ class WeightLoadService:
 
     def load_manifest(self, manifest_key: str) -> StoredWeightManifest:
         try:
-            raw = self.client.store.get(manifest_key)
+            raw = self.client.store.weight_get_object(manifest_key)
         except Exception as error:
             raise WeightStoreError(f"manifest get failed: {manifest_key}") from error
         try:
@@ -324,7 +324,7 @@ class WeightLoadService:
             all_target_offsets.append([group[0] for group in object_ranges.values()])
             all_source_offsets.append([group[1] for group in object_ranges.values()])
             all_sizes.append([group[2] for group in object_ranges.values()])
-        results = self.client.store.get_into_ranges(
+        results = self.client.store.weight_get_into_ranges(
             addresses,
             all_keys,
             all_target_offsets,
