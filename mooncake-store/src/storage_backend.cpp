@@ -3042,7 +3042,7 @@ tl::expected<void, ErrorCode> BucketStorageBackend::WriteBucket(
     if (writer) {
         auto result = WriteStreamFile(*file, iovs, 0, *writer);
         if (!result) {
-            CleanupOrphanedBucket(bucket_id);
+            CleanupOrphanedBucket(bucket_id, disk_index);
             return tl::make_unexpected(result.error());
         }
     } else
