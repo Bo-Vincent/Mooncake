@@ -6126,8 +6126,6 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
     if (!plan) {
         return tl::make_unexpected(plan.error());
     }
-    if (weight_manager_.IsManagedGroup(plan->group_id))
-        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
     std::optional<std::unique_lock<std::mutex>> weight_group_operation_lock;
     if (!plan->group_id.empty() &&
         weight_manager_.IsManagedGroup(plan->group_id)) {
@@ -6142,6 +6140,13 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
     const std::string& group_id = plan->group_id;
     const std::string& residency_affinity_id = plan->residency_affinity_id;
     const ResolvedSoftPinRequest& soft_pin_request = plan->soft_pin_request;
+
+    auto member_tier = weight_manager_.ResolveImportMemberTier(
+        object_id.tenant_id, group_id, key, slice_length,
+        residency_affinity_id, config.data_type);
+    if (!member_tier) return tl::make_unexpected(member_tier.error());
+    if (*member_tier == WeightResidencyState::COLD)
+        return tl::make_unexpected(ErrorCode::NOT_SUPPORTED);
 
     ReplicateConfig allocation_config = config;
     std::string allocation_group_id = group_id;
@@ -6206,8 +6211,6 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
             // --- Step 1: safety checks and preemption (only if key exists) ---
             if (accessor.IsPublished()) {
                 auto& metadata = accessor.Get();
-                if (weight_manager_.IsManagedGroup(metadata.group_id))
-                    return tl::make_unexpected(ErrorCode::INVALID_WRITE);
                 auto& state = accessor.GetState();
 
                 // Reject if a Copy/Move task is actively reading this key's
