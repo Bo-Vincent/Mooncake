@@ -19,6 +19,7 @@ from ..planner import (
     TransferPlan,
 )
 from ..storage_manifest import StoredFragmentSnapshot, StoredWeightManifest
+from ..management import WeightRevisionIdentity
 
 
 _MAX_U64 = (1 << 64) - 1
@@ -43,6 +44,7 @@ class UploadOperation:
     target: StoredFragmentSnapshot
     source_generation: int
     source_lease_id: LeaseId
+    residency_affinity_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_placement, PlacementFragment):
@@ -58,6 +60,15 @@ class UploadOperation:
         ):
             _require_nonempty_string(getattr(self, name), name)
         _require_u64(self.source_generation, "source_generation")
+        _require_nonempty_string(
+            self.residency_affinity_id,
+            "residency_affinity_id",
+        )
+        if len(self.residency_affinity_id) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in self.residency_affinity_id
+        ):
+            raise ValueError("residency_affinity_id must be a SHA-256 digest")
         if (
             self.source_snapshot.placement_fragment_id
             != self.source_placement.placement_fragment_id
@@ -92,6 +103,8 @@ class WeightUploadPlan:
     transaction_group_id: str
     control_key: str
     operations: tuple[UploadOperation, ...]
+    management_identity: WeightRevisionIdentity | None = None
+    management_generation: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, StoredWeightManifest):
@@ -108,7 +121,23 @@ class WeightUploadPlan:
         ):
             raise ValueError("upload plan operations are invalid")
         object.__setattr__(self, "operations", operations)
-        transaction_prefix = f"{self.manifest.group_id}/transactions/"
+        managed = self.management_identity is not None
+        if managed != (self.management_generation is not None):
+            raise ValueError("upload management identity and generation must coexist")
+        if self.management_identity is not None:
+            identity = self.management_identity
+            if (
+                identity.namespace != self.manifest.namespace
+                or identity.resource_id != self.manifest.resource_id
+                or identity.revision != self.manifest.revision
+                or identity.weight_generation != self.manifest.weight_generation
+            ):
+                raise ValueError("upload management identity and manifest differ")
+            _require_u64(self.management_generation, "management_generation")
+            if self.management_generation == 0:
+                raise ValueError("management_generation must be non-zero")
+        key_base = self.manifest.manifest_key[: -len("/manifest")]
+        transaction_prefix = f"{key_base}/transactions/"
         if not self.transaction_group_id.startswith(transaction_prefix):
             raise ValueError(
                 "upload transaction group does not belong to manifest group"
@@ -132,7 +161,7 @@ class WeightUploadPlan:
         )
         if operation_targets != manifest_fragments:
             raise ValueError("upload plan operations and manifest differ")
-        payload_prefix = f"{self.manifest.group_id}/payload/"
+        payload_prefix = f"{key_base}/payload/"
         if any(
             operation.target.object_key[len(payload_prefix) :].split("/", 1)[0]
             != transaction_id

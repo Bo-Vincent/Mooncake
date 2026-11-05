@@ -105,7 +105,7 @@ def test_store_preserves_expert_boxes_and_loads_cross_dim(
     sources = multi_dim_store_manifests("source", source=True)
     targets = multi_dim_store_manifests("target", source=False, target_dim=target_dim)
 
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
 
     assert upload_plan.manifest.tensors[0].shard_dims == (0,)
     assert len(upload_plan.operations) == 4
@@ -114,11 +114,13 @@ def test_store_preserves_expert_boxes_and_loads_cross_dim(
         (rank, 0, 0) for rank in range(4)
     }
 
-    manifest = weight_store.commit_upload(
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
-    loaded = weight_store.load_manifest(manifest.manifest_key)
-    load_plan = weight_store.plan_load(loaded, targets.placement, targets.bindings)
+    loaded = weight_store._weight_get_manifest(manifest.manifest_key)
+    load_plan = weight_store._weight_get_plan(
+        loaded, targets.placement, targets.bindings
+    )
     load_all(weight_store, load_plan, targets)
 
     assert loaded == manifest
@@ -162,16 +164,16 @@ def test_restore_reconstructs_from_stored_manifest_without_legacy_tensor_metadat
     store, writer = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
     targets = target_manifests(dp=1, tp=4)
-    upload_plan = writer.plan_upload(sources.placement, sources.bindings)
-    manifest = writer.commit_upload(
+    upload_plan = writer._weight_put_plan(sources.placement, sources.bindings)
+    manifest = writer._weight_put_commit(
         upload_plan, upload_all(writer, upload_plan, sources)
     )
     reader = WeightStore(_ManifestOnlyReader(store))
 
-    loaded = reader.load_manifest(manifest.manifest_key)
-    load_plan = reader.plan_load(loaded, targets.placement, targets.bindings)
+    loaded = reader._weight_get_manifest(manifest.manifest_key)
+    load_plan = reader._weight_get_plan(loaded, targets.placement, targets.bindings)
     for binding in targets.bindings:
-        reader.load(
+        reader._weight_get_payload(
             load_plan,
             targets.placement,
             binding,
@@ -247,12 +249,12 @@ def test_store_commit_preserves_mixed_single_axis_descriptor() -> None:
     )
 
     _store, weight_store = make_weight_store()
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    persisted = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    persisted = weight_store._weight_put_commit(
         upload_plan,
         upload_all(weight_store, upload_plan, sources),
     )
-    loaded = weight_store.load_manifest(persisted.manifest_key)
+    loaded = weight_store._weight_get_manifest(persisted.manifest_key)
 
     assert loaded == persisted == upload_plan.manifest
     loaded_single_axis = next(
@@ -265,9 +267,9 @@ def test_load_rejects_payloads_without_committed_manifest() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
     targets = target_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
     upload_all(weight_store, upload_plan, sources)
-    load_plan = weight_store.plan_load(
+    load_plan = weight_store._weight_get_plan(
         upload_plan.manifest,
         targets.placement,
         targets.bindings,
@@ -276,7 +278,9 @@ def test_load_rejects_payloads_without_committed_manifest() -> None:
     range_get_calls = store.range_get_calls
 
     with pytest.raises(WeightStoreError, match="manifest is not committed"):
-        weight_store.load(load_plan, targets[0].placement, targets[0].binding)
+        weight_store._weight_get_payload(
+            load_plan, targets[0].placement, targets[0].binding
+        )
 
     assert store.register_calls == register_calls
     assert store.range_get_calls == range_get_calls
@@ -286,16 +290,20 @@ def test_store_multi_dim_lowering_limit_fails_before_registration_or_read() -> N
     store, weight_store = make_weight_store(max_region_segments=5)
     sources = multi_dim_store_manifests("source", source=True)
     targets = multi_dim_store_manifests("target", source=False, target_dim=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     register_calls = store.register_calls
     range_get_calls = store.range_get_calls
 
     with pytest.raises(WeightStoreError, match="max_region_segments"):
-        weight_store.load(load_plan, targets[0].placement, targets[0].binding)
+        weight_store._weight_get_payload(
+            load_plan, targets[0].placement, targets[0].binding
+        )
 
     assert store.register_calls == register_calls
     assert store.range_get_calls == range_get_calls
@@ -304,16 +312,16 @@ def test_store_multi_dim_lowering_limit_fails_before_registration_or_read() -> N
 def test_load_reshards_tp_and_fans_out_dp_across_target_participants() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=2, tp=2)
-    upload_plan = weight_store.plan_upload(
+    upload_plan = weight_store._weight_put_plan(
         sources.placement, sources.bindings, namespace="default"
     )
-    manifest = weight_store.commit_upload(
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=3, tp=4)
 
-    loaded_manifest = weight_store.load_manifest(manifest.manifest_key)
-    load_plan = weight_store.plan_load(
+    loaded_manifest = weight_store._weight_get_manifest(manifest.manifest_key)
+    load_plan = weight_store._weight_get_plan(
         loaded_manifest, targets.placement, targets.bindings
     )
     load_all(weight_store, load_plan, targets)
@@ -416,11 +424,13 @@ def test_store_round_trip_moves_layers_and_experts_across_all_parallel_axes() ->
     sources = make_manifests(dp=2, tp=2, source=True)
     targets = make_manifests(dp=3, tp=4, source=False)
     store, weight_store = make_weight_store()
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
 
     load_all(weight_store, load_plan, targets)
 
@@ -440,15 +450,17 @@ def test_store_round_trip_moves_layers_and_experts_across_all_parallel_axes() ->
 def test_load_merges_store_fragments_for_larger_target_shards() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=4)
-    upload_plan = weight_store.plan_upload(
+    upload_plan = weight_store._weight_put_plan(
         sources.placement, sources.bindings, namespace="default"
     )
-    manifest = weight_store.commit_upload(
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=2)
 
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     load_all(weight_store, load_plan, targets)
 
     assert len(load_plan.transfer.operations) == 4
@@ -460,12 +472,14 @@ def test_load_merges_store_fragments_for_larger_target_shards() -> None:
 def test_load_rejects_partial_range_result() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=4)
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     original = store.get_into_ranges
 
     def partial(*args, **kwargs):
@@ -475,48 +489,56 @@ def test_load_rejects_partial_range_result() -> None:
 
     store.get_into_ranges = partial
     with pytest.raises(WeightStoreError, match="get_into_ranges failed"):
-        weight_store.load(load_plan, targets[0].placement, targets[0].binding)
+        weight_store._weight_get_payload(
+            load_plan, targets[0].placement, targets[0].binding
+        )
 
 
 def test_load_surfaces_scalar_get_into_ranges_error() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=4)
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     store.get_into_ranges = lambda *args, **kwargs: -19
 
     with pytest.raises(WeightStoreError, match="get_into_ranges failed: -19"):
-        weight_store.load(load_plan, targets[0].placement, targets[0].binding)
+        weight_store._weight_get_payload(
+            load_plan, targets[0].placement, targets[0].binding
+        )
 
 
 def test_plan_load_rejects_different_target_weight_generation() -> None:
     _store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2, weight_generation=7)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan,
         upload_all(weight_store, upload_plan, sources),
     )
     targets = target_manifests(dp=1, tp=4, weight_generation=8)
 
     with pytest.raises(WeightStoreError, match="target placement revision mismatch"):
-        weight_store.plan_load(manifest, targets.placement, targets.bindings)
+        weight_store._weight_get_plan(manifest, targets.placement, targets.bindings)
 
 
 def test_load_plan_rejects_transfer_weight_generation_mismatch() -> None:
     _store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2, weight_generation=7)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan,
         upload_all(weight_store, upload_plan, sources),
     )
     targets = target_manifests(dp=1, tp=4, weight_generation=7)
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
 
     # WeightLoadPlan remains fail-closed if a decoded/foreign plan has bypassed
     # TransferPlan construction. A normal replacement fails even earlier at the
@@ -537,8 +559,8 @@ def test_load_plan_rejects_transfer_weight_generation_mismatch() -> None:
 def test_plan_load_does_not_require_binding_for_empty_participant() -> None:
     _store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=1)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan,
         upload_all(weight_store, upload_plan, sources),
     )
@@ -548,7 +570,7 @@ def test_plan_load_does_not_require_binding_for_empty_participant() -> None:
         rank=ParallelRank(pp=1),
     )
 
-    load_plan = weight_store.plan_load(
+    load_plan = weight_store._weight_get_plan(
         manifest,
         targets.placement,
         targets.bindings,
@@ -560,27 +582,31 @@ def test_plan_load_does_not_require_binding_for_empty_participant() -> None:
 def test_load_rejects_stale_target_generation() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=4)
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     stale_binding = replace(targets.bindings[0], generation=2)
 
     with pytest.raises(WeightStoreError, match="target executor snapshot mismatch"):
-        weight_store.load(load_plan, targets.placement, stale_binding)
+        weight_store._weight_get_payload(load_plan, targets.placement, stale_binding)
 
 
 def test_load_rejects_generation_scoped_target_id_rollover() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=4)
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     replacement = replace(
         targets.bindings[0].fragments[0],
         fragment_id="replacement-target-fragment",
@@ -592,7 +618,7 @@ def test_load_rejects_generation_scoped_target_id_rollover() -> None:
     )
 
     with pytest.raises(WeightStoreError, match="target executor snapshot mismatch"):
-        weight_store.load(load_plan, targets.placement, current)
+        weight_store._weight_get_payload(load_plan, targets.placement, current)
 
 
 def test_load_rejects_worker_and_generation_rollover_instead_of_succeeding_noop() -> (
@@ -600,12 +626,14 @@ def test_load_rejects_worker_and_generation_rollover_instead_of_succeeding_noop(
 ):
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=4)
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
     replacement = replace(
         targets.bindings[0].fragments[0],
         fragment_id="replacement-target-fragment",
@@ -619,21 +647,25 @@ def test_load_rejects_worker_and_generation_rollover_instead_of_succeeding_noop(
     )
 
     with pytest.raises(WeightStoreError, match="target executor snapshot mismatch"):
-        weight_store.load(load_plan, targets.placement, current)
+        weight_store._weight_get_payload(load_plan, targets.placement, current)
 
 
 def test_load_chunks_large_ranges_to_bound_host_staging() -> None:
     """GPU range GET uses a host temporary per range, so each range is capped."""
     store, weight_store = make_weight_store(max_range_bytes=2, max_ranges_per_request=2)
     sources = source_manifests(dp=1, tp=1)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     targets = target_manifests(dp=1, tp=1)
 
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
-    weight_store.load(load_plan, targets[0].placement, targets[0].binding)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
+    weight_store._weight_get_payload(
+        load_plan, targets[0].placement, targets[0].binding
+    )
 
     assert store.range_sizes == [2, 2, 2, 2]
     assert bytes(bound_fragments(targets)[0].owner) == bytes(range(8))
@@ -715,11 +747,13 @@ def test_load_expands_strided_ranges_in_bounded_requests() -> None:
     sources = make_manifests(2, "source", source=True)
     targets = make_manifests(4, "target", source=False)
     store, weight_store = make_weight_store(max_ranges_per_request=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
-    load_plan = weight_store.plan_load(manifest, targets.placement, targets.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, targets.placement, targets.bindings
+    )
 
     load_all(weight_store, load_plan, targets)
 
@@ -802,13 +836,15 @@ def test_load_batches_multiple_local_target_buffers_in_one_request() -> None:
     source = make_manifest("source", source=True)
     target = make_manifest("target", source=False)
     store, weight_store = make_weight_store()
-    upload_plan = weight_store.plan_upload(source.placement, source.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(source.placement, source.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, source)
     )
-    load_plan = weight_store.plan_load(manifest, target.placement, target.bindings)
+    load_plan = weight_store._weight_get_plan(
+        manifest, target.placement, target.bindings
+    )
 
-    weight_store.load(load_plan, target.placement, target.binding)
+    weight_store._weight_get_payload(load_plan, target.placement, target.binding)
 
     assert store.range_get_calls == 1
     assert store.range_batch_sizes == [4]
@@ -819,8 +855,8 @@ def test_load_batches_multiple_local_target_buffers_in_one_request() -> None:
 def test_one_participant_binding_can_execute_multiple_fragments() -> None:
     store, weight_store = make_weight_store()
     sources = source_manifests(dp=1, tp=2)
-    upload_plan = weight_store.plan_upload(sources.placement, sources.bindings)
-    manifest = weight_store.commit_upload(
+    upload_plan = weight_store._weight_put_plan(sources.placement, sources.bindings)
+    manifest = weight_store._weight_put_commit(
         upload_plan, upload_all(weight_store, upload_plan, sources)
     )
     target_ranks = target_manifests(dp=1, tp=2)
@@ -830,8 +866,10 @@ def test_one_participant_binding_can_execute_multiple_fragments() -> None:
         worker_id="combined-target",
     )
 
-    load_plan = weight_store.plan_load(manifest, target.placement, target.bindings)
-    weight_store.load(load_plan, target.placement, target.binding)
+    load_plan = weight_store._weight_get_plan(
+        manifest, target.placement, target.bindings
+    )
+    weight_store._weight_get_payload(load_plan, target.placement, target.binding)
 
     assert store.range_get_calls == 1
     assert [bytes(fragment.owner) for fragment in bound_fragments(target)] == [

@@ -254,6 +254,20 @@ binding contracts with `get_into_ranges`.
 
 ## Store Snapshots
 
+Model-weight callers use `WeightStore.weight_put(snapshot, adapter)` and write
+fragments through `WeightStoreWriter.weight_put_tensor()`, then `commit()`.
+Restore an exact managed revision with `weight_get()`; inspect it with
+`weight_get_metadata()`, `weight_is_exist()`, `weight_get_size()`, or
+`weight_list()`. Change policy with `weight_update_policy()`, request residency
+with `weight_migrate()`, and remove the revision with `weight_remove()`.
+Reads hold a revision lease throughout transfer. Mutation requests carry the
+expected metadata generation so stale callers cannot replace newer state.
+
+Migration: replace the unmanaged `plan_upload`/`upload`/`commit_upload` and
+`plan_load`/`load` entrypoints with these managed operations. Open writers through
+`WeightStore.weight_put()` rather than native Store snapshot shortcuts or module
+factories. Unmanaged public entrypoints are removed directly.
+
 `StoredResourceManifest` is the persistent resource base. The concrete
 `StoredWeightManifest` adds revision, weight generation, tensor descriptors,
 stored fragments, and its canonical digest. It contains no GPU address or

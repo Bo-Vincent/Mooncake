@@ -2584,22 +2584,8 @@ PYBIND11_MODULE(_store, m) {
              });
     // Create a wrapper that exposes DistributedObjectStore with Python-specific
     // methods
-    py::class_<MooncakeStorePyWrapper> store_class(m,
-                                                 "MooncakeDistributedStore");
-    store_class
-        .def(py::init<>())
-        .def(
-            "begin_weight_snapshot",
-            [](MooncakeStorePyWrapper &self, py::object snapshot,
-               py::object adapter) -> py::object {
-                py::object raw_store =
-                    py::cast(&self, py::return_value_policy::reference);
-                return py::module_::import("mooncake.reshard.weight.store")
-                    .attr("begin_weight_snapshot")(raw_store, snapshot,
-                                                   adapter);
-            },
-            py::arg("snapshot"), py::arg("adapter"),
-            "Open a model-weight snapshot writer backed by this Store")
+    py::class_<MooncakeStorePyWrapper> store_class(m, "MooncakeDistributedStore");
+    store_class.def(py::init<>())
         .def(
             "_get_pyclient_capsule",
             [make_pyclient_capsule](MooncakeStorePyWrapper &self)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
-from typing import Callable, Optional
+from dataclasses import replace
+from threading import Event, Lock, Thread
+from typing import Callable, Literal, Optional
 from uuid import uuid4
 
 from ..manifest import (
@@ -10,6 +13,20 @@ from ..manifest import (
 )
 from ...contracts import RuntimeFragmentId
 from ..storage_manifest import StoredWeightManifest
+from ..management import (
+    WeightAvailabilityState,
+    WeightManagementError,
+    WeightManagementErrorCode,
+    WeightManifestReference,
+    WeightResidencyOperation,
+    WeightResidencyState,
+    WeightRevisionIdentity,
+    WeightRevisionLease,
+    WeightRevisionMetadata,
+    WeightRevisionPage,
+    WeightRevisionView,
+    WeightStoragePolicy,
+)
 from ...lifetime import TerminalTransferState
 from ..lifetime import (
     WeightAllocationGuardProviders,
@@ -46,6 +63,110 @@ def _require_load_plan(plan: WeightLoadPlan) -> None:
         raise WeightStoreError("plan must be a WeightLoadPlan")
 
 
+def _payload_keys_sha256(keys: Sequence[str]) -> str:
+    digest = hashlib.sha256()
+    for key in sorted(keys):
+        encoded = key.encode("utf-8")
+        digest.update(str(len(encoded)).encode("ascii"))
+        digest.update(b":")
+        digest.update(encoded)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _payload_summary(manifest: StoredWeightManifest) -> tuple[tuple[str, ...], int]:
+    object_sizes: dict[str, int] = {}
+    for fragment in manifest.fragments:
+        object_sizes[fragment.object_key] = max(
+            object_sizes.get(fragment.object_key, 0),
+            fragment.object_offset + fragment.nbytes,
+        )
+    return tuple(sorted(object_sizes)), sum(object_sizes.values())
+
+
+def _affinity_summary(manifest: StoredWeightManifest) -> tuple[int, str]:
+    affinities = sorted(
+        {
+            tuple(fragment.aliases) if fragment.aliases else (fragment.tensor_id,)
+            for fragment in manifest.fragments
+        }
+    )
+    digest = hashlib.sha256()
+    for affinity in affinities:
+        encoded = "\0".join(affinity).encode("utf-8")
+        digest.update(str(len(encoded)).encode("ascii"))
+        digest.update(b":")
+        digest.update(encoded)
+        digest.update(b"\n")
+    return len(affinities), digest.hexdigest()
+
+
+class _RevisionLeaseGuard:
+    def __init__(
+        self,
+        backend: StoreBackend,
+        lease: WeightRevisionLease,
+        ttl_ms: int,
+    ) -> None:
+        self._backend = backend
+        self._lease = lease
+        self._ttl_ms = ttl_ms
+        self._stop = Event()
+        self._error_lock = Lock()
+        self._renewal_error: Optional[Exception] = None
+        self._thread = Thread(
+            target=self._renew_loop,
+            name=f"weight-lease-{lease.lease_id}",
+            daemon=True,
+        )
+
+    def __enter__(self) -> _RevisionLeaseGuard:
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> Literal[False]:
+        self._stop.set()
+        self._thread.join()
+        renewal_error = self._get_renewal_error()
+        release_error: Optional[Exception] = None
+        try:
+            self._backend.release_weight_revision_lease(
+                tenant_id=self._lease.identity.tenant_id,
+                lease_id=self._lease.lease_id,
+            )
+        except Exception as error:
+            release_error = error
+        if exc_type is None:
+            if renewal_error is not None:
+                raise renewal_error
+            if release_error is not None:
+                raise release_error
+        return False
+
+    def raise_if_failed(self) -> None:
+        error = self._get_renewal_error()
+        if error is not None:
+            raise error
+
+    def _get_renewal_error(self) -> Optional[Exception]:
+        with self._error_lock:
+            return self._renewal_error
+
+    def _renew_loop(self) -> None:
+        interval_seconds = max(0.001, min(self._ttl_ms / 3000, 30.0))
+        while not self._stop.wait(interval_seconds):
+            try:
+                self._backend.renew_weight_revision_lease(
+                    tenant_id=self._lease.identity.tenant_id,
+                    lease_id=self._lease.lease_id,
+                    ttl_ms=self._ttl_ms,
+                )
+            except Exception as error:
+                with self._error_lock:
+                    self._renewal_error = error
+                return
+
+
 class WeightStore:
     def __init__(
         self,
@@ -53,6 +174,7 @@ class WeightStore:
         *,
         key_prefix: str = "weights",
         config_factory: Optional[StoreConfigFactory] = None,
+        default_policy: Optional[WeightStoragePolicy] = None,
         max_range_bytes: int = 64 * 1024 * 1024,
         max_ranges_per_request: int = 1024,
         max_region_segments: int = 1_000_000,
@@ -66,6 +188,11 @@ class WeightStore:
         self.store = StoreBackend(store)
         self.key_prefix = key_prefix.strip("/")
         self.config_factory = config_factory or default_config_factory
+        if default_policy is not None and not isinstance(
+            default_policy, WeightStoragePolicy
+        ):
+            raise ValueError("default_policy must be a WeightStoragePolicy")
+        self.default_policy = default_policy
         self.max_range_bytes = max_range_bytes
         self.max_ranges_per_request = max_ranges_per_request
         self.max_region_segments = max_region_segments
@@ -75,29 +202,115 @@ class WeightStore:
         self._upload = WeightUploadService(self, self._payloads, self._transaction)
         self._load = WeightLoadService(self)
 
-    def plan_upload(
+    def _weight_put_plan(
         self,
         source_placement: WeightPlacementManifest,
         source_bindings: Sequence[WeightRuntimeBindingManifest],
         *,
         namespace: str = "default",
+        transaction_id: Optional[str] = None,
     ) -> WeightUploadPlan:
-        return self._upload.plan_upload(
+        return self._upload.weight_put_plan(
             source_placement,
             source_bindings,
             namespace=namespace,
+            transaction_id=transaction_id,
         )
 
-    def begin_weight_snapshot(
+    def _prepare_managed_import(
+        self,
+        source_placement: WeightPlacementManifest,
+        source_bindings: Sequence[WeightRuntimeBindingManifest],
+        *,
+        namespace: str,
+        policy: Optional[WeightStoragePolicy],
+        transaction_id: Optional[str] = None,
+    ) -> tuple[WeightUploadPlan, Optional[WeightStoragePolicy]]:
+        """Validate shared policy and key rules before claiming an import."""
+        if self.key_prefix != "weights":
+            raise WeightStoreError(
+                "weight revisions require the canonical weights key prefix"
+            )
+        effective_policy = policy or self.default_policy
+        if effective_policy is not None and not isinstance(
+            effective_policy, WeightStoragePolicy
+        ):
+            raise WeightStoreError("policy must be a WeightStoragePolicy")
+        draft = self._weight_put_plan(
+            source_placement,
+            source_bindings,
+            namespace=namespace,
+            transaction_id=transaction_id,
+        )
+        return draft, effective_policy
+
+    def _begin_weight_put(
+        self,
+        source_placement: WeightPlacementManifest,
+        source_bindings: Sequence[WeightRuntimeBindingManifest],
+        *,
+        namespace: str = "default",
+        tenant_id: str = "default",
+        policy: Optional[WeightStoragePolicy] = None,
+    ) -> WeightUploadPlan:
+        """Begin and plan one immutable weight revision."""
+
+        draft, effective_policy = self._prepare_managed_import(
+            source_placement,
+            source_bindings,
+            namespace=namespace,
+            policy=policy,
+        )
+        identity = WeightRevisionIdentity(
+            tenant_id=tenant_id,
+            namespace=namespace,
+            resource_id=draft.manifest.resource_id,
+            revision=draft.manifest.revision,
+            weight_generation=draft.manifest.weight_generation,
+        )
+        payload_keys, logical_bytes = _payload_summary(draft.manifest)
+        affinity_count, affinity_digest = _affinity_summary(draft.manifest)
+        importing = self.store.weight_put_begin_import(
+            identity,
+            payload_group_id="",
+            expected_payload_count=len(payload_keys),
+            expected_logical_bytes=logical_bytes,
+            policy=effective_policy,
+            affinity_count=affinity_count,
+            affinity_digest=affinity_digest,
+        )
+        managed_manifest = replace(
+            draft.manifest,
+            group_id=importing.manifest.payload_group_id,
+        )
+        return replace(
+            draft,
+            manifest=managed_manifest,
+            management_identity=importing.identity,
+            management_generation=importing.metadata_generation,
+        )
+
+    def weight_put(
         self,
         snapshot: WeightSnapshotDescriptor,
         adapter: WeightSnapshotAdapter,
+        *,
+        tenant_id: str = "default",
+        policy: Optional[WeightStoragePolicy] = None,
     ) -> WeightStoreWriter:
-        """Create a manifest-backed writer for one immutable model snapshot."""
+        """Create a writer for one immutable weight revision."""
 
-        return WeightStoreWriter(self, snapshot, adapter)
+        return WeightStoreWriter(
+            self,
+            snapshot,
+            adapter,
+            tenant_id=tenant_id,
+            policy=policy,
+        )
 
-    def upload(
+
+
+    def _weight_put_payload(
         self,
         plan: WeightUploadPlan,
         source_placement: WeightPlacementManifest,
@@ -109,7 +322,7 @@ class WeightStore:
         transfer_id: Optional[str] = None,
     ) -> tuple[UploadReceipt, ...]:
         _require_upload_plan(plan)
-        return self._upload.upload(
+        return self._upload.weight_put_payload(
             plan,
             source_placement,
             source_binding,
@@ -119,52 +332,205 @@ class WeightStore:
             transfer_id=transfer_id,
         )
 
-    def abort_upload(
+    def _weight_put_abort(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
     ) -> None:
         _require_upload_plan(plan)
-        self._transaction.abort_upload(plan, receipts)
+        if plan.management_identity is not None:
+            metadata = self.store.weight_get_metadata(plan.management_identity).metadata
+            if metadata.availability is WeightAvailabilityState.IMPORTING:
+                metadata = self.store.weight_put_abort_import(
+                    metadata.identity,
+                    metadata.metadata_generation,
+                )
+            if metadata.availability is WeightAvailabilityState.DELETING:
+                metadata = self.store.weight_remove(
+                    metadata.identity, metadata.metadata_generation
+                )
+            if metadata.availability is not WeightAvailabilityState.DELETED:
+                raise WeightStoreError(
+                    "cannot abort weight revision in availability state "
+                    f"{metadata.availability.name}"
+                )
+            return
+        self._transaction.weight_put_abort(plan, receipts)
 
-    def finalize_upload_transaction(self, plan: WeightUploadPlan) -> None:
+    def _weight_put_finalize(self, plan: WeightUploadPlan) -> None:
         _require_upload_plan(plan)
-        self._transaction.finalize_upload_transaction(plan)
+        self._transaction.weight_put_finalize(plan)
 
-    def commit_upload(
-        self,
-        plan: WeightUploadPlan,
-        receipts: Sequence[UploadReceipt],
-    ) -> StoredWeightManifest:
-        _require_upload_plan(plan)
-        return self._transaction.commit(plan, receipts)
-
-    def _commit_upload_from_writer(
+    def _weight_put_commit(
         self,
         plan: WeightUploadPlan,
         receipts: Sequence[UploadReceipt],
         *,
-        on_commit_decision_may_exist: Callable[[], None],
+        on_commit_decision_may_exist: Optional[Callable[[], None]] = None,
     ) -> StoredWeightManifest:
         _require_upload_plan(plan)
-        return self._transaction.commit(
+        manifest = self._transaction.weight_put_commit(
             plan,
             receipts,
             on_commit_decision_may_exist=on_commit_decision_may_exist,
         )
+        self._publish_weight_revision(plan, manifest)
+        return manifest
 
-    def load_manifest(self, manifest_key: str) -> StoredWeightManifest:
-        return self._load.load_manifest(manifest_key)
 
-    def plan_load(
+
+    def _weight_get_manifest(self, manifest_key: str) -> StoredWeightManifest:
+        return self._load.weight_get_manifest(manifest_key)
+
+    def weight_get_metadata(
+        self, identity: WeightRevisionIdentity
+    ) -> WeightRevisionView:
+        return self.store.weight_get_metadata(identity)
+
+    def weight_is_exist(self, identity: WeightRevisionIdentity) -> bool:
+        try:
+            view = self.weight_get_metadata(identity)
+        except WeightManagementError as error:
+            if error.code is WeightManagementErrorCode.NOT_FOUND:
+                return False
+            raise
+        return view.metadata.availability is WeightAvailabilityState.READY
+
+    def weight_get_size(self, identity: WeightRevisionIdentity) -> int:
+        view = self.weight_get_metadata(identity)
+        if view.metadata.availability is not WeightAvailabilityState.READY:
+            raise WeightStoreError("weight revision is not READY")
+        return view.metadata.manifest.logical_bytes
+
+    def weight_list(
+        self,
+        *,
+        namespace: str,
+        resource_id: str,
+        tenant_id: str = "default",
+        page_token: str = "",
+        limit: int = 100,
+    ) -> WeightRevisionPage:
+        return self.store.weight_list(
+            tenant_id=tenant_id,
+            namespace=namespace,
+            resource_id=resource_id,
+            page_token=page_token,
+            limit=limit,
+        )
+
+    def weight_update_policy(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        policy: WeightStoragePolicy,
+        expected_metadata_generation: int,
+    ) -> WeightRevisionMetadata:
+        return self.store.weight_update_policy(
+            identity,
+            expected_metadata_generation=expected_metadata_generation,
+            policy=policy,
+        )
+
+    def weight_migrate(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        target: WeightResidencyState,
+        expected_metadata_generation: int,
+        mixed_hot_ratio: Optional[float] = None,
+    ) -> WeightResidencyOperation:
+        target = WeightResidencyState(target)
+        if target not in (
+            WeightResidencyState.HOT,
+            WeightResidencyState.COLD,
+            WeightResidencyState.MIXED,
+        ):
+            raise WeightStoreError("migration target must be HOT, COLD, or MIXED")
+        ratio: Optional[float] = None
+        if target is WeightResidencyState.MIXED:
+            candidate = mixed_hot_ratio
+            if candidate is None:
+                candidate = self.weight_get_metadata(
+                    identity
+                ).metadata.policy.mixed_hot_ratio
+            if type(candidate) not in (float, int) or not 0.0 < float(candidate) < 1.0:
+                raise WeightStoreError("mixed_hot_ratio must be between 0 and 1")
+            ratio = float(candidate)
+        elif mixed_hot_ratio is not None:
+            raise WeightStoreError("mixed_hot_ratio is only valid for MIXED")
+        return self.store.weight_migrate(
+            identity,
+            expected_metadata_generation=expected_metadata_generation,
+            target_residency=target,
+            mixed_hot_ratio=ratio,
+        )
+
+    def weight_get_operation(
+        self,
+        operation_id: int,
+        *,
+        tenant_id: str = "default",
+    ) -> WeightResidencyOperation:
+        return self.store.weight_get_operation(
+            tenant_id=tenant_id,
+            operation_id=operation_id,
+        )
+
+    def weight_remove(
+        self,
+        identity: WeightRevisionIdentity,
+        *,
+        expected_metadata_generation: int,
+    ) -> WeightRevisionMetadata:
+        return self.store.weight_remove(identity, expected_metadata_generation)
+
+    def weight_get(
+        self,
+        identity: WeightRevisionIdentity,
+        target_placement: WeightPlacementManifest,
+        target_bindings: Sequence[WeightRuntimeBindingManifest],
+        *,
+        holder: Optional[str] = None,
+        lease_ttl_ms: int = 24 * 60 * 60 * 1000,
+        target_allocation_guards: Optional[WeightAllocationGuardProviders] = None,
+    ) -> StoredWeightManifest:
+        """Resolve, verify, and transfer an exact revision under one lease."""
+
+        view = self.weight_get_metadata(identity)
+        lease = self.store.acquire_weight_revision_lease(
+            identity,
+            expected_metadata_generation=view.metadata.metadata_generation,
+            holder=holder or f"reshard-{uuid4().hex}",
+            ttl_ms=lease_ttl_ms,
+        )
+        with _RevisionLeaseGuard(self.store, lease, lease_ttl_ms) as lease_guard:
+            manifest = self._weight_get_manifest(view.metadata.manifest.manifest_key)
+            self._verify_weight_manifest(view.metadata, manifest)
+            plan = self._weight_get_plan(manifest, target_placement, target_bindings)
+            for binding in target_bindings:
+                lease_guard.raise_if_failed()
+                if target_allocation_guards is None:
+                    self._weight_get_payload(plan, target_placement, binding)
+                else:
+                    self._weight_get_payload(
+                        plan,
+                        target_placement,
+                        binding,
+                        target_allocation_guards=target_allocation_guards,
+                    )
+                lease_guard.raise_if_failed()
+            return manifest
+
+    def _weight_get_plan(
         self,
         manifest: StoredWeightManifest,
         target_placement: WeightPlacementManifest,
         target_bindings: Sequence[WeightRuntimeBindingManifest],
     ) -> WeightLoadPlan:
-        return self._load.plan_load(manifest, target_placement, target_bindings)
+        return self._load.weight_get_plan(manifest, target_placement, target_bindings)
 
-    def load(
+    def _weight_get_payload(
         self,
         plan: WeightLoadPlan,
         target_placement: WeightPlacementManifest,
@@ -176,7 +542,7 @@ class WeightStore:
         transfer_id: Optional[str] = None,
     ) -> None:
         _require_load_plan(plan)
-        self._load.load(
+        self._load.weight_get_payload(
             plan,
             target_placement,
             target_binding,
@@ -186,7 +552,7 @@ class WeightStore:
             transfer_id=transfer_id,
         )
 
-    def register_weight_buffers(
+    def _register_weight_buffers(
         self,
         binding: WeightRuntimeBindingManifest,
         *,
@@ -226,11 +592,51 @@ class WeightStore:
             ) from error
         return self.registration.acquire_lease(fresh_binding, fragments, tokens)
 
-    def pending_registration_ids(self) -> tuple[str, ...]:
+    def _pending_registration_ids(self) -> tuple[str, ...]:
         return self.registration.pending_registration_ids()
 
-    def drain_pending_registration(self, pending_registration_id: str) -> None:
+    def _drain_pending_registration(self, pending_registration_id: str) -> None:
         self.registration.drain_pending_registration(pending_registration_id)
+
+    def _publish_weight_revision(
+        self, plan: WeightUploadPlan, manifest: StoredWeightManifest
+    ) -> Optional[WeightRevisionMetadata]:
+        identity = plan.management_identity
+        if identity is None:
+            return None
+        payload_keys, logical_bytes = _payload_summary(manifest)
+        reference = WeightManifestReference(
+            manifest_key=manifest.manifest_key,
+            manifest_sha256=manifest.manifest_digest,
+            payload_group_id=manifest.group_id,
+            payload_keys_sha256=_payload_keys_sha256(payload_keys),
+            payload_count=len(payload_keys),
+            logical_bytes=logical_bytes,
+        )
+        return self.store.weight_put_commit_import(
+            identity,
+            expected_metadata_generation=plan.management_generation or 0,
+            manifest=reference,
+        )
+
+    @staticmethod
+    def _verify_weight_manifest(
+        metadata: WeightRevisionMetadata, manifest: StoredWeightManifest
+    ) -> None:
+        if metadata.availability is not WeightAvailabilityState.READY:
+            raise WeightStoreError("weight revision is not READY")
+        identity = metadata.identity
+        if (
+            manifest.namespace != identity.namespace
+            or manifest.resource_id != identity.resource_id
+            or manifest.revision != identity.revision
+            or manifest.weight_generation != identity.weight_generation
+            or manifest.group_id != metadata.manifest.payload_group_id
+            or manifest.manifest_key != metadata.manifest.manifest_key
+        ):
+            raise WeightStoreError("weight manifest identity mismatch")
+        if manifest.manifest_digest != metadata.manifest.manifest_sha256:
+            raise WeightStoreError("weight manifest digest mismatch")
 
 
 __all__ = ["WeightStore", "WeightStoreError"]

@@ -35,6 +35,7 @@ from ..lifetime import (
     acquire_weight_binding_token,
 )
 from .contracts import UploadOperation, UploadReceipt, WeightUploadPlan
+from .backend import set_residency_affinity_ids
 from .errors import WeightStoreError
 from .payload import PayloadStoreOperations
 from .transaction import WeightUploadTransaction
@@ -198,12 +199,19 @@ def _fragment_digest(fragment: PlacementFragment) -> StoredFragmentSnapshotId:
     return StoredFragmentSnapshotId(hashlib.sha256(value).hexdigest()[:24])
 
 
-def plan_weight_upload(
+def _residency_affinity_id(fragment: PlacementFragment) -> str:
+    logical_names = fragment.aliases or (fragment.tensor_id,)
+    return hashlib.sha256("\0".join(sorted(logical_names)).encode()).hexdigest()
+
+
+def _build_weight_put_plan(
     source_placement: WeightPlacementManifest,
     source_bindings: Sequence[WeightRuntimeBindingManifest],
     *,
     namespace: str = "default",
     key_prefix: str = "weights",
+    payload_group_id: Optional[str] = None,
+    transaction_id: Optional[str] = None,
 ) -> WeightUploadPlan:
     """Build an address-free Store upload plan from complete source manifests."""
 
@@ -226,7 +234,7 @@ def plan_weight_upload(
             str(weight_generation),
         )
     )
-    transaction_id = uuid4().hex
+    transaction_id = transaction_id or uuid4().hex
     stored_fragments: list[StoredFragmentSnapshot] = []
     operations: list[UploadOperation] = []
     for placement_fragment, source_binding, binding_manifest in sources:
@@ -255,6 +263,7 @@ def plan_weight_upload(
                 target=target,
                 source_generation=binding_manifest.generation,
                 source_lease_id=binding_manifest.lease_id,
+                residency_affinity_id=_residency_affinity_id(placement_fragment),
             )
         )
     manifest = StoredWeightManifest(
@@ -262,7 +271,7 @@ def plan_weight_upload(
         resource_id=resource_id,
         revision=revision,
         weight_generation=weight_generation,
-        group_id=base_key,
+        group_id=payload_group_id or base_key,
         manifest_key=f"{base_key}/manifest",
         tensors=tensors,
         fragments=tuple(stored_fragments),
@@ -291,21 +300,23 @@ class WeightUploadService:
         self.payloads = payloads
         self.transaction = transaction
 
-    def plan_upload(
+    def weight_put_plan(
         self,
         source_placement: WeightPlacementManifest,
         source_bindings: Sequence[WeightRuntimeBindingManifest],
         *,
         namespace: str = "default",
+        transaction_id: Optional[str] = None,
     ) -> WeightUploadPlan:
-        return plan_weight_upload(
+        return _build_weight_put_plan(
             source_placement,
             source_bindings,
             namespace=namespace,
             key_prefix=self.client.key_prefix,
+            transaction_id=transaction_id,
         )
 
-    def upload(
+    def weight_put_payload(
         self,
         plan: WeightUploadPlan,
         source_placement: WeightPlacementManifest,
@@ -472,8 +483,12 @@ class WeightUploadService:
                         [operation.target.object_key for operation, _ in batch],
                         [current.address for _, current in batch],
                         [current.nbytes for _, current in batch],
-                        self.client.config_factory(
-                            [plan.manifest.group_id] * len(batch), "payload"
+                        set_residency_affinity_ids(
+                            self.client.config_factory(
+                                [plan.manifest.group_id] * len(batch),
+                                "payload",
+                            ),
+                            [operation.residency_affinity_id for operation, _ in batch],
                         ),
                     )
                     if len(results) != len(batch) or any(

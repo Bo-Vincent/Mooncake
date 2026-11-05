@@ -115,19 +115,23 @@ def allocation_guards_for_bindings(
 class GuardedWeightStore(WeightStore):
     """Test-only caller adapter that explicitly supplies framework pins."""
 
-    def upload(self, plan, source_placement, source_binding, **kwargs):
+    def _weight_put_payload(self, plan, source_placement, source_binding, **kwargs):
         kwargs.setdefault(
             "source_allocation_guards",
             allocation_guards_for_bindings((source_binding,)),
         )
-        return super().upload(plan, source_placement, source_binding, **kwargs)
+        return super()._weight_put_payload(
+            plan, source_placement, source_binding, **kwargs
+        )
 
-    def load(self, plan, target_placement, target_binding, **kwargs):
+    def _weight_get_payload(self, plan, target_placement, target_binding, **kwargs):
         kwargs.setdefault(
             "target_allocation_guards",
             allocation_guards_for_bindings((target_binding,)),
         )
-        return super().load(plan, target_placement, target_binding, **kwargs)
+        return super()._weight_get_payload(
+            plan, target_placement, target_binding, **kwargs
+        )
 
 
 def with_empty_participant(
@@ -298,12 +302,14 @@ class FakeReplicateConfig:
     group_ids: list[str]
     data_type: str
     with_hard_pin: bool
+    residency_affinity_ids: list[str] | None = None
 
 
 class InMemoryStore:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.group_ids: dict[str, str] = {}
+        self.residency_affinity_ids: dict[str, str] = {}
         self.configs: dict[str, tuple[str, bool]] = {}
         self.calls: list[str] = []
         self.put_batches: list[tuple[str, ...]] = []
@@ -361,8 +367,9 @@ class InMemoryStore:
         self.calls.append("batch_put_from")
         self.put_batches.append(tuple(keys))
         results = []
-        for key, address, size, group_id in zip(
-            keys, addresses, sizes, config.group_ids
+        affinity_ids = config.residency_affinity_ids or [""] * len(keys)
+        for key, address, size, group_id, affinity_id in zip(
+            keys, addresses, sizes, config.group_ids, affinity_ids
         ):
             if key == self.fail_key:
                 results.append(-1)
@@ -372,6 +379,7 @@ class InMemoryStore:
                 continue
             self.objects[key] = ctypes.string_at(address, size)
             self.group_ids[key] = group_id
+            self.residency_affinity_ids[key] = affinity_id
             self.configs[key] = (config.data_type, config.with_hard_pin)
             results.append(0)
         return results
@@ -840,13 +848,15 @@ def upload_all(weight_store: WeightStore, plan, manifests: RuntimeInputs):
     receipts = []
     try:
         for binding in manifests.bindings:
-            receipts.extend(weight_store.upload(plan, manifests.placement, binding))
+            receipts.extend(
+                weight_store._weight_put_payload(plan, manifests.placement, binding)
+            )
     except Exception:
-        weight_store.abort_upload(plan, receipts)
+        weight_store._weight_put_abort(plan, receipts)
         raise
     return receipts
 
 
 def load_all(weight_store: WeightStore, plan, manifests: RuntimeInputs) -> None:
     for binding in manifests.bindings:
-        weight_store.load(plan, manifests.placement, binding)
+        weight_store._weight_get_payload(plan, manifests.placement, binding)
