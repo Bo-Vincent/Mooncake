@@ -295,9 +295,14 @@ TEST_F(WeightManagementTcpTest, LeaseProtectsPublishedBytesUntilManagedDelete) {
         .policy =
             WeightStoragePolicy{
                 .preferred_residency = WeightResidencyState::HOT,
-                .migration_mode = WeightMigrationMode::MANUAL},
-        .affinity_summary = {.affinity_count = 1,
-                             .affinity_digest = std::string(64, 'c')},
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = 1,
+                .affinity_digest = ComputeWeightAffinityMappingSha256(
+                    {{payload_key, kPayloadSize, "payload"}}),
+            },
     });
     ASSERT_TRUE(begin.has_value());
     ASSERT_TRUE(begin->has_value());
