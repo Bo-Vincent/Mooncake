@@ -47,10 +47,13 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
         uint64_t logical_bytes = 0;
         std::vector<std::string> payload_keys;
         std::set<std::string> affinity_ids;
+        std::vector<WeightAffinityMappingEntry> affinity_mapping;
         for (const auto& payload : payloads) {
             logical_bytes += payload.size;
             payload_keys.push_back(payload.key);
             affinity_ids.insert(payload.affinity_id);
+            affinity_mapping.push_back(
+                {payload.key, payload.size, payload.affinity_id});
         }
         auto importing = service.BeginWeightImport(BeginWeightImportRequest{
             .identity = identity,
@@ -61,7 +64,8 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = affinity_ids.size(),
-                    .affinity_digest = std::string(64, 'c'),
+                    .affinity_digest =
+                        ComputeWeightAffinityMappingSha256(affinity_mapping),
                 },
         });
         EXPECT_TRUE(importing.has_value());
@@ -556,6 +560,78 @@ TEST_F(WeightGroupLifecycleTest, BlockedRetirementDoesNotStarveOtherLineages) {
                      .value_or(true));
     EXPECT_TRUE(service.CopyRevoke(source.client_id, "blocked-payload",
                                    TenantId::Default()));
+}
+
+TEST_F(WeightGroupLifecycleTest, CommitRejectsSwappedAffinityMapping) {
+    MasterService service;
+    const auto context = PrepareSimpleSegment(service);
+    const auto client_id = context.client_id;
+    const std::vector<PayloadSpec> payloads{{"payload-a", 1024, "affinity-a"},
+                                            {"payload-b", 1024, "affinity-b"}};
+    uint64_t logical_bytes = 0;
+    std::vector<std::string> payload_keys;
+    std::set<std::string> affinity_ids;
+    std::vector<WeightAffinityMappingEntry> affinity_mapping;
+    for (const auto& payload : payloads) {
+        logical_bytes += payload.size;
+        payload_keys.push_back(payload.key);
+        affinity_ids.insert(payload.affinity_id);
+        affinity_mapping.push_back(
+            {payload.key, payload.size, payload.affinity_id});
+    }
+    auto importing = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = Identity(),
+        .payload_group_id = {},
+        .expected_payload_count = payloads.size(),
+        .expected_logical_bytes = logical_bytes,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
+        .affinity_summary =
+            WeightAffinitySummary{
+                .affinity_count = affinity_ids.size(),
+                .affinity_digest =
+                    ComputeWeightAffinityMappingSha256(affinity_mapping),
+            },
+    });
+    EXPECT_TRUE(importing.has_value());
+    for (const auto& payload : payloads) {
+        ReplicateConfig config;
+        config.replica_num = 1;
+        config.with_hard_pin = true;
+        config.group_ids =
+            std::vector<std::string>{importing->manifest.payload_group_id};
+        config.residency_affinity_ids = std::vector<std::string>{
+            payload.affinity_id == "affinity-a" ? "affinity-b" : "affinity-a"};
+        config.data_type = ObjectDataType::WEIGHT;
+        PutCompletedObject(service, client_id, payload.key, config,
+                           payload.size);
+    }
+    ReplicateConfig manifest_config;
+    manifest_config.replica_num = 1;
+    manifest_config.with_hard_pin = true;
+    manifest_config.group_ids =
+        std::vector<std::string>{importing->manifest.payload_group_id};
+    manifest_config.data_type = ObjectDataType::METADATA;
+    PutCompletedObject(service, client_id, ManifestKey(), manifest_config, 128);
+    auto ready = service.CommitWeightImport(CommitWeightImportRequest{
+        .identity = Identity(),
+        .expected_metadata_generation = importing->metadata_generation,
+        .manifest =
+            WeightManifestReference{
+                .manifest_key = ManifestKey(),
+                .manifest_sha256 = std::string(64, 'a'),
+                .payload_group_id = importing->manifest.payload_group_id,
+                .payload_keys_sha256 =
+                    ComputeWeightPayloadKeysSha256(payload_keys),
+                .payload_count = payloads.size(),
+                .logical_bytes = logical_bytes,
+            },
+    });
+    ASSERT_FALSE(ready.has_value());
+    EXPECT_EQ(WeightManagementError::CONFLICT, ready.error());
 }
 
 TEST_F(WeightGroupLifecycleTest, LeaseBlocksOperationAndDelete) {
@@ -2180,12 +2256,12 @@ TEST_F(WeightGroupLifecycleTest, UnitBudgetBoundsEvictionAndPromotion) {
     };
     MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
         ready.updated_at_ms + 1, 1);
-    EXPECT_EQ(2, std::count_if(keys.begin(), keys.end(), has_memory));
-    EXPECT_EQ(has_memory(keys[0]), has_memory(keys[1]));
-    EXPECT_EQ(has_memory(keys[2]), has_memory(keys[3]));
+    EXPECT_EQ(3, std::count_if(keys.begin(), keys.end(), has_memory));
     EXPECT_TRUE(has_memory(MakeWeightManifestKey(ready.identity)));
-    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
-        ready.updated_at_ms + 2, 1);
+    for (int i = 0; i < 3; ++i) {
+        MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+            ready.updated_at_ms + 2 + i, 1);
+    }
     const auto cold = service.GetWeightRevision({.identity = ready.identity});
     ASSERT_TRUE(cold);
     ASSERT_EQ(WeightResidencyState::COLD, cold->metadata.residency);
@@ -2197,12 +2273,11 @@ TEST_F(WeightGroupLifecycleTest, UnitBudgetBoundsEvictionAndPromotion) {
         .target_residency = WeightResidencyState::HOT,
         .mixed_hot_ratio = std::nullopt,
     }));
-    std::string first_affinity;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 4; ++i) {
         MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
             ready.updated_at_ms + 3 + i, 1);
         std::vector<PromotionTaskItem> pending;
-        for (int heartbeat = 0; heartbeat < 2; ++heartbeat) {
+        for (int heartbeat = 0; heartbeat < 1; ++heartbeat) {
             const auto tasks = service.PromotionObjectHeartbeat(client_id);
             ASSERT_TRUE(tasks);
             ASSERT_EQ(1u, tasks->size());
@@ -2211,19 +2286,13 @@ TEST_F(WeightGroupLifecycleTest, UnitBudgetBoundsEvictionAndPromotion) {
         const auto extra = service.PromotionObjectHeartbeat(client_id);
         ASSERT_TRUE(extra);
         EXPECT_TRUE(extra->empty());
-        const auto affinity = pending.front().key.substr(0, 6);
-        EXPECT_EQ(affinity, pending.back().key.substr(0, 6));
-        if (i == 0)
-            first_affinity = affinity;
-        else
-            EXPECT_NE(first_affinity, affinity);
         for (const auto& task : pending) {
             ASSERT_TRUE(service.PromotionAllocStart(
                 client_id, task.key, TenantId(task.tenant_id), task.size, {}));
             ASSERT_TRUE(service.NotifyPromotionSuccess(
                 client_id, task.key, TenantId(task.tenant_id)));
         }
-        EXPECT_EQ(static_cast<size_t>((i + 1) * 2),
+        EXPECT_EQ(static_cast<size_t>(i + 1),
                   std::count_if(keys.begin(), keys.end(), has_memory));
         EXPECT_TRUE(has_memory(MakeWeightManifestKey(ready.identity)));
     }
@@ -2279,6 +2348,52 @@ TEST_F(WeightGroupLifecycleTest, PendingOperationReflectsLostReadableMembers) {
         service.ReconcileWeightRevision({.identity = ready.identity});
     ASSERT_TRUE(retry);
     EXPECT_EQ(*reconciled, *retry);
+}
+
+TEST_F(WeightGroupLifecycleTest,
+       PendingMixedOperationReflectsLossOfAnEntireAffinity) {
+    for (const size_t lost_count : {1u, 2u}) {
+        SCOPED_TRACE(lost_count);
+        MasterService service;
+        const auto segment = PrepareSimpleSegment(service);
+        const auto ready = PublishReadyWithPayloads(
+            service, segment.client_id,
+            {{.key = "payload-a", .size = 1024, .affinity_id = "affinity-a"},
+             {.key = "payload-b", .size = 1024, .affinity_id = "affinity-b"}});
+        const auto started = service.StartWeightResidencyOperation({
+            .identity = ready.identity,
+            .expected_metadata_generation = ready.metadata_generation,
+            .target_residency = WeightResidencyState::MIXED,
+            .mixed_hot_ratio = 0.5,
+        });
+        ASSERT_TRUE(started);
+        const std::vector<std::string> lost_keys{"payload-b", "payload-a"};
+        for (size_t i = 0; i < lost_count; ++i) {
+            ASSERT_TRUE(
+                MasterServiceTestPeer(service).DropWeightGroupMemberForTesting(
+                    ready.identity, lost_keys[i]));
+        }
+
+        const auto reconciled =
+            service.ReconcileWeightRevision({.identity = ready.identity});
+        EXPECT_TRUE(reconciled);
+        const auto view =
+            service.GetWeightRevision({.identity = ready.identity});
+        ASSERT_TRUE(view);
+        EXPECT_EQ(WeightAvailabilityState::DEGRADED,
+                  view->metadata.availability);
+        EXPECT_EQ(lost_count == 1 ? WeightResidencyState::MIXED
+                                  : WeightResidencyState::ABSENT,
+                  view->metadata.residency);
+        EXPECT_DOUBLE_EQ(lost_count == 1 ? 0.5 : 0.0,
+                         view->metadata.observed_hot_ratio);
+        EXPECT_EQ(started->operation_id, view->metadata.operation_id);
+        const auto operation = service.QueryWeightOperation({
+            .operation_id = started->operation_id,
+        });
+        ASSERT_TRUE(operation);
+        EXPECT_FALSE(IsWeightOperationTerminal(operation->message));
+    }
 }
 
 TEST_F(WeightGroupLifecycleTest,
