@@ -67,6 +67,7 @@ class WeightGroupLifecycleTest : public MasterServiceTest {
                     .affinity_digest =
                         ComputeWeightAffinityMappingSha256(affinity_mapping),
                 },
+            .payload_layout = affinity_mapping,
         });
         EXPECT_TRUE(importing.has_value());
         for (const auto& payload : payloads) {
@@ -200,6 +201,17 @@ TEST_F(WeightGroupLifecycleTest, RecreatedMetadataStartsFreshMemberSelection) {
         const bool has_memory = std::any_of(
             replicas->replicas.begin(), replicas->replicas.end(),
             [](const auto& replica) { return replica.is_memory_replica(); });
+        EXPECT_EQ(payload.key != "unit-a1", has_memory) << payload.key;
+    }
+    ASSERT_EQ(1, manager.ReconcileWeightMetadataStoreOnce(
+                     ready.updated_at_ms + 4, 1));
+    for (const auto& payload : payloads) {
+        const auto replicas =
+            service.GetReplicaListForAdmin(payload.key, TenantId::Default());
+        ASSERT_TRUE(replicas);
+        const bool has_memory = std::any_of(
+            replicas->replicas.begin(), replicas->replicas.end(),
+            [](const auto& replica) { return replica.is_memory_replica(); });
         EXPECT_EQ(payload.affinity_id == "b", has_memory) << payload.key;
     }
     const auto manifest =
@@ -293,13 +305,18 @@ TEST_F(WeightGroupLifecycleTest, TwoRetiringLineagesShareBoundedProgress) {
             .base_identity = base.identity,
             .expected_base_metadata_generation = base.metadata_generation,
             .target_identity = target,
-            .import = {.identity = target,
-                       .expected_payload_count = 1,
-                       .expected_logical_bytes = 1024,
-                       .policy = policy,
-                       .affinity_summary = {.affinity_count = 1,
-                                            .affinity_digest =
-                                                std::string(64, 'c')}},
+            .import =
+                {.identity = target,
+                 .expected_payload_count = 1,
+                 .expected_logical_bytes = 1024,
+                 .policy = policy,
+                 .affinity_summary =
+                     {.affinity_count = 1,
+                      .affinity_digest = ComputeWeightAffinityMappingSha256(
+                          {{std::string(revision) + "-replacement", 1024,
+                            "a"}})},
+                 .payload_layout = {{std::string(revision) + "-replacement",
+                                     1024, "a"}}},
         }));
         const auto ready_target = PublishReadyWithPayloads(
             service, context.client_id,
@@ -378,9 +395,11 @@ TEST_F(WeightGroupLifecycleTest,
                    .expected_payload_count = 1,
                    .expected_logical_bytes = 1024,
                    .policy = policy,
-                   .affinity_summary = {.affinity_count = 1,
-                                        .affinity_digest =
-                                            std::string(64, 'c')}},
+                   .affinity_summary =
+                       {.affinity_count = 1,
+                        .affinity_digest = ComputeWeightAffinityMappingSha256(
+                            {{"lease-traffic-target", 1024, "a"}})},
+                   .payload_layout = {{"lease-traffic-target", 1024, "a"}}},
     }));
     PublishReadyWithPayloads(service, context.client_id,
                              {{"lease-traffic-target", 1024, "a"}}, policy,
@@ -852,9 +871,11 @@ TEST_F(WeightGroupLifecycleTest, RetirementSharesDeletionMemberBudget) {
                        WeightStoragePolicy{
                            .preferred_residency = WeightResidencyState::HOT,
                            .migration_mode = WeightMigrationMode::MANUAL},
-                   .affinity_summary = {.affinity_count = 1,
-                                        .affinity_digest =
-                                            std::string(64, 'c')}},
+                   .affinity_summary =
+                       {.affinity_count = 1,
+                        .affinity_digest = ComputeWeightAffinityMappingSha256(
+                            {{"replacement", 1024, "replacement"}})},
+                   .payload_layout = {{"replacement", 1024, "replacement"}}},
     }));
     PublishReadyWithPayloads(service, context.client_id,
                              {{"replacement", 1024, "replacement"}},

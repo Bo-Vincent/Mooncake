@@ -1397,7 +1397,8 @@ TEST_F(WeightReconciliationTest, MemberBudgetIsSharedAcrossRevisions) {
     }
 }
 
-TEST_F(WeightReconciliationTest, UnitBudgetKeepsAffinityWholeAndResumes) {
+TEST_F(WeightReconciliationTest,
+       MemberBudgetWaitsForWholeAffinityDurabilityAndResumes) {
     MasterServiceConfig config;
     config.default_kv_lease_ttl = 0;
     config.enable_offload = true;
@@ -1460,36 +1461,39 @@ TEST_F(WeightReconciliationTest, UnitBudgetKeepsAffinityWholeAndResumes) {
         .mixed_hot_ratio = std::nullopt,
     });
     ASSERT_TRUE(operation);
-    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
-        operation->started_at_ms + 1, 1);
-    const auto first = service.OffloadObjectHeartbeat(context.client_id, true);
-    ASSERT_TRUE(first);
-    ASSERT_EQ(2u, first->size());
-    EXPECT_EQ((*first)[0].key.substr(0, 6), (*first)[1].key.substr(0, 6));
-
-    // A pending first affinity must not prevent the next complete unit.
-    MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
-        operation->started_at_ms + 2, 1);
-    const auto second = service.OffloadObjectHeartbeat(context.client_id, true);
-    ASSERT_TRUE(second);
-    ASSERT_EQ(2u, second->size());
-    EXPECT_EQ((*second)[0].key.substr(0, 6), (*second)[1].key.substr(0, 6));
-    EXPECT_NE((*first)[0].key.substr(0, 6), (*second)[0].key.substr(0, 6));
-    for (const auto& tasks : {*first, *second}) {
-        std::vector<StorageObjectMetadata> disk;
-        for (const auto& task : tasks) {
-            StorageObjectMetadata metadata{};
-            metadata.key_size = task.key.size();
-            metadata.data_size = task.size;
-            metadata.transport_endpoint = "test_segment";
-            disk.push_back(metadata);
-        }
-        ASSERT_TRUE(
-            service.NotifyOffloadSuccess(context.client_id, tasks, disk));
-    }
-    for (size_t round = 0; round < 4; ++round) {
+    const auto has_memory = [&](const std::string& key) {
+        const auto replicas =
+            service.GetReplicaListForAdmin(key, TenantId::Default());
+        EXPECT_TRUE(replicas);
+        return replicas &&
+               std::any_of(replicas->replicas.begin(), replicas->replicas.end(),
+                           [](const auto& replica) {
+                               return replica.is_memory_replica();
+                           });
+    };
+    for (size_t round = 0; round < keys.size(); ++round) {
         MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
-            operation->started_at_ms + 3 + round, 1);
+            operation->started_at_ms + 1 + round, 1);
+        const auto tasks =
+            service.OffloadObjectHeartbeat(context.client_id, true);
+        ASSERT_TRUE(tasks);
+        ASSERT_EQ(1u, tasks->size());
+        EXPECT_EQ(keys[round], tasks->front().key);
+        // A partial cold affinity must retain every memory replica.
+        for (const auto& key : keys) EXPECT_TRUE(has_memory(key)) << key;
+        StorageObjectMetadata metadata{};
+        metadata.key_size = tasks->front().key.size();
+        metadata.data_size = tasks->front().size;
+        metadata.transport_endpoint = "test_segment";
+        ASSERT_TRUE(service.NotifyOffloadSuccess(context.client_id, *tasks,
+                                                 {metadata}));
+    }
+    for (size_t round = 0; round < keys.size(); ++round) {
+        MasterServiceTestPeer(service).RunWeightReconciliationForTesting(
+            operation->started_at_ms + 1 + keys.size() + round, 1);
+        for (size_t i = 0; i < keys.size(); ++i) {
+            EXPECT_EQ(i > round, has_memory(keys[i])) << keys[i];
+        }
     }
     const auto view = service.GetWeightRevision({.identity = identity});
     ASSERT_TRUE(view);
