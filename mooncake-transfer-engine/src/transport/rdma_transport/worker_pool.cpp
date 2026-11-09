@@ -286,7 +286,7 @@ size_t ClassicRdmaCongestionControl::gate(SliceList &queued) {
             adaptive_congestion_control::generation(state->domain)};
         const auto decision = adaptive_congestion_control::tryAcquire(
             path, slice->length, slice->rdma_congestion_control_permit,
-            &evidence, false);
+            &evidence);
         if (decision == adaptive_congestion_control::Decision::kAllow) {
             slice->rdma_congestion_control_endpoint =
                 state->endpoint.load(std::memory_order_acquire);
@@ -301,12 +301,11 @@ size_t ClassicRdmaCongestionControl::gate(SliceList &queued) {
                     adaptive_congestion_control::AdmissionDomain::kDevice;
                 const auto selected_generation =
                     device ? path.device_generation : path.route_generation;
-                if (evidence.snapshot.generation == selected_generation)
-                    recordWindowCongestion(
-                        slice, device ? *device_ : state->domain,
-                        selected_generation, state->peer_nic_path,
-                        device ? TaskCongestionFailureScope::kDevice
-                               : TaskCongestionFailureScope::kRoute);
+                recordWindowCongestion(
+                    slice, device ? *device_ : state->domain,
+                    selected_generation, state->peer_nic_path,
+                    device ? TaskCongestionFailureScope::kDevice
+                           : TaskCongestionFailureScope::kRoute);
             }
             // A generation race is retried on the owner queue. It is not
             // evidence that the legacy health gate considers the path failed.

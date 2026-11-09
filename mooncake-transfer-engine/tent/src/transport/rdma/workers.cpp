@@ -193,12 +193,18 @@ adaptive_congestion_control::Decision acquireTentCongestionControlAttempt(
                slice.task->congestion_observation &&
                admission.reason ==
                    adaptive_congestion_control::AdmissionReason::kWindow) {
+        const bool device = admission.domain ==
+                            adaptive_congestion_control::AdmissionDomain::kDevice;
+        const auto* domain = device ? path.device : path.route;
+        const auto expected_generation =
+            device ? path.device_generation : path.route_generation;
+        if (!domain) return decision;
+        const auto current = adaptive_congestion_control::snapshot(*domain);
+        if (current.generation != expected_generation) return decision;
         const auto evidence = taskEvidence(
-            slice, TaskCongestionReason::kByteWindow, admission.snapshot,
-            admission.domain ==
-                    adaptive_congestion_control::AdmissionDomain::kDevice
-                ? TaskCongestionFailureScope::kDevice
-                : TaskCongestionFailureScope::kRoute);
+            slice, TaskCongestionReason::kByteWindow, current,
+            device ? TaskCongestionFailureScope::kDevice
+                   : TaskCongestionFailureScope::kRoute);
         slice.congestion_control_observed_blocked =
             slice.task->congestion_observation->defer(
                 slice.slice_idx, slice.task->congestion_attempt_id, evidence);

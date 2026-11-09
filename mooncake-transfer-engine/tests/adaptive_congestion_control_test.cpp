@@ -438,8 +438,8 @@ TEST(AdaptiveCongestionControlTest, AdmissionEvidenceIdentifiesBlockingDomain) {
               Decision::kDefer);
     EXPECT_EQ(evidence.domain, AdmissionDomain::kDevice);
     EXPECT_EQ(evidence.reason, AdmissionReason::kWindow);
-    EXPECT_EQ(evidence.snapshot.inflight_bytes, 64u);
-    EXPECT_EQ(evidence.snapshot.deferred_bytes, 8u);
+    EXPECT_EQ(snapshot(device).inflight_bytes, 64u);
+    EXPECT_EQ(snapshot(device).deferred_bytes, 8u);
     EXPECT_EQ(snapshot(route).deferred_bytes, 0u);
     ASSERT_TRUE(complete(occupied, OutcomeClass::kDerivedFlush,
                          FailureScope::kOperation));
@@ -449,59 +449,11 @@ TEST(AdaptiveCongestionControlTest, AdmissionEvidenceIdentifiesBlockingDomain) {
               Decision::kDefer);
     EXPECT_EQ(evidence.domain, AdmissionDomain::kRoute);
     EXPECT_EQ(evidence.reason, AdmissionReason::kWindow);
-    EXPECT_EQ(evidence.snapshot.inflight_bytes, 64u);
-    EXPECT_EQ(evidence.snapshot.deferred_bytes, 8u);
+    EXPECT_EQ(snapshot(route).inflight_bytes, 64u);
+    EXPECT_EQ(snapshot(route).deferred_bytes, 8u);
     EXPECT_EQ(snapshot(device).inflight_bytes, 0u);
     ASSERT_TRUE(complete(occupied, OutcomeClass::kDerivedFlush,
                          FailureScope::kOperation));
-}
-
-TEST(AdaptiveCongestionControlTest,
-     MetadataOnlyEvidencePreservesSnapshotFields) {
-    Config config = testConfig();
-    config.max_window_bytes = config.min_window_bytes;
-    DomainState device(config), route(config);
-    Permit held, rejected;
-    ASSERT_EQ(tryAcquire(pathFor(device, route), 64, held), Decision::kAllow);
-    AdmissionEvidence evidence;
-    evidence.snapshot.window_bytes = 123;
-    evidence.snapshot.inflight_bytes = 456;
-    evidence.snapshot.deferred_bytes = 789;
-    EXPECT_EQ(tryAcquire(pathFor(device, route), 8, rejected, &evidence, false),
-              Decision::kDefer);
-    EXPECT_EQ(evidence.domain, AdmissionDomain::kDevice);
-    EXPECT_EQ(evidence.reason, AdmissionReason::kWindow);
-    EXPECT_EQ(evidence.snapshot.generation, generation(device));
-    EXPECT_EQ(evidence.snapshot.window_bytes, 123u);
-    EXPECT_EQ(evidence.snapshot.inflight_bytes, 456u);
-    EXPECT_EQ(evidence.snapshot.deferred_bytes, 789u);
-    ASSERT_TRUE(
-        complete(held, OutcomeClass::kSuccess, FailureScope::kOperation));
-
-    const PathHandle route_only{nullptr, &route, 0, generation(route)};
-    ASSERT_EQ(tryAcquire(route_only, 64, held), Decision::kAllow);
-    EXPECT_EQ(tryAcquire(pathFor(device, route), 8, rejected, &evidence, false),
-              Decision::kDefer);
-    EXPECT_EQ(evidence.domain, AdmissionDomain::kRoute);
-    EXPECT_EQ(evidence.reason, AdmissionReason::kWindow);
-    EXPECT_EQ(evidence.snapshot.generation, generation(route));
-    EXPECT_EQ(evidence.snapshot.window_bytes, 123u);
-    ASSERT_TRUE(
-        complete(held, OutcomeClass::kSuccess, FailureScope::kOperation));
-
-    const auto stale = pathFor(device, route);
-    resetGeneration(route, generation(route) + 1);
-    EXPECT_EQ(tryAcquire(stale, 8, rejected, &evidence, false),
-              Decision::kAvoid);
-    EXPECT_EQ(evidence.domain, AdmissionDomain::kRoute);
-    EXPECT_EQ(evidence.reason, AdmissionReason::kStaleGeneration);
-    EXPECT_EQ(evidence.snapshot.generation, generation(route));
-    EXPECT_EQ(evidence.snapshot.inflight_bytes, 456u);
-    EXPECT_EQ(tryAcquire(pathFor(device, route), 8, rejected, &evidence, false),
-              Decision::kAllow);
-    EXPECT_EQ(evidence.reason, AdmissionReason::kStaleGeneration);
-    EXPECT_TRUE(
-        complete(rejected, OutcomeClass::kSuccess, FailureScope::kOperation));
 }
 
 TEST(AdaptiveCongestionControlTest, EvidenceChangesOnlyOnRejection) {
@@ -510,12 +462,10 @@ TEST(AdaptiveCongestionControlTest, EvidenceChangesOnlyOnRejection) {
     AdmissionEvidence evidence;
     evidence.domain = AdmissionDomain::kRoute;
     evidence.reason = AdmissionReason::kStaleGeneration;
-    evidence.snapshot.generation = 99;
     ASSERT_EQ(tryAcquire(pathFor(device, route), 8, permit, &evidence),
               Decision::kAllow);
     EXPECT_EQ(evidence.domain, AdmissionDomain::kRoute);
     EXPECT_EQ(evidence.reason, AdmissionReason::kStaleGeneration);
-    EXPECT_EQ(evidence.snapshot.generation, 99u);
     EXPECT_EQ(tryAcquire(pathFor(device, route), 8, permit, &evidence),
               Decision::kDefer);
     EXPECT_EQ(evidence.domain, AdmissionDomain::kNone);
@@ -653,7 +603,7 @@ TEST(AdaptiveCongestionControlTest, StalePathHandleIsRejected) {
     EXPECT_EQ(tryAcquire(stale, 8, permit, &evidence), Decision::kAvoid);
     EXPECT_EQ(evidence.domain, AdmissionDomain::kRoute);
     EXPECT_EQ(evidence.reason, AdmissionReason::kStaleGeneration);
-    EXPECT_EQ(evidence.snapshot.generation, stale.route_generation + 1);
+    EXPECT_EQ(snapshot(route).generation, stale.route_generation + 1);
     resetGeneration(device, stale.device_generation + 1);
     EXPECT_EQ(tryAcquire(stale, 8, permit, &evidence), Decision::kAvoid);
     EXPECT_EQ(evidence.domain, AdmissionDomain::kDevice);

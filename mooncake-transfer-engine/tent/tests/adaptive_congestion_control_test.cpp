@@ -85,6 +85,14 @@ TEST(TentAdaptiveCongestionControlTest,
     ASSERT_TRUE(detail.reason.observed);
     EXPECT_EQ(detail.reason.value, TaskCongestionReason::kByteWindow);
     EXPECT_EQ(detail.slice_id.value, 1);
+    ASSERT_TRUE(detail.controller_generation.observed);
+    EXPECT_EQ(detail.controller_generation.value, 3u);
+    ASSERT_TRUE(detail.window_bytes.observed);
+    EXPECT_EQ(detail.window_bytes.value, 1024u);
+    ASSERT_TRUE(detail.inflight_bytes.observed);
+    EXPECT_EQ(detail.inflight_bytes.value, 1024u);
+    ASSERT_TRUE(detail.failure_scope.observed);
+    EXPECT_EQ(detail.failure_scope.value, TaskCongestionFailureScope::kDevice);
 
     ASSERT_TRUE(completeTentCongestionControlAttempt(
         first, adaptive_congestion_control::OutcomeClass::kSuccess,

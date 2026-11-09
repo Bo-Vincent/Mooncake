@@ -94,7 +94,6 @@ enum class AdmissionReason : uint8_t { kNone, kWindow, kStaleGeneration };
 struct AdmissionEvidence {
     AdmissionDomain domain = AdmissionDomain::kNone;
     AdmissionReason reason = AdmissionReason::kNone;
-    Snapshot snapshot;
 };
 
 class DomainState {
@@ -109,8 +108,6 @@ class DomainState {
     friend class Permit;
     friend Decision tryAcquire(const PathHandle&, uint64_t, Permit&,
                                AdmissionEvidence*);
-    friend Decision tryAcquire(const PathHandle&, uint64_t, Permit&,
-                               AdmissionEvidence*, bool);
     friend bool complete(Permit&, OutcomeClass, FailureScope);
     friend void recordSignals(DomainState&, uint32_t, const Signals&);
     friend void controlTick(DomainState&, uint64_t);
@@ -156,8 +153,6 @@ class Permit {
    private:
     friend Decision tryAcquire(const PathHandle&, uint64_t, Permit&,
                                AdmissionEvidence*);
-    friend Decision tryAcquire(const PathHandle&, uint64_t, Permit&,
-                               AdmissionEvidence*, bool);
     friend bool complete(Permit&, OutcomeClass, FailureScope);
     friend bool isCurrentGeneration(const Permit&);
 
@@ -176,13 +171,10 @@ class Permit {
 // A domain with no inflight bytes admits one indivisible slice even when it
 // exceeds the window. The full byte count is reserved;
 // transport-level static limits must still be enforced by the caller.
-// Evidence is written only on rejection, with the device checked first.
+// Evidence contains rejection metadata only, with the device checked first.
+// Call snapshot() separately when full domain statistics are needed.
 Decision tryAcquire(const PathHandle& path, uint64_t bytes, Permit& permit,
                     AdmissionEvidence* evidence = nullptr);
-// Metadata-only rejection writes domain, reason and snapshot.generation;
-// the remaining snapshot fields are left unchanged. Admission writes nothing.
-Decision tryAcquire(const PathHandle& path, uint64_t bytes, Permit& permit,
-                    AdmissionEvidence* evidence, bool capture_snapshot);
 bool isCurrentGeneration(const Permit& permit);
 bool complete(Permit& permit, OutcomeClass outcome, FailureScope scope);
 void recordSignals(DomainState& state, uint32_t generation,
