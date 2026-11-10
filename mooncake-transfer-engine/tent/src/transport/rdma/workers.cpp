@@ -82,13 +82,14 @@ adaptive_congestion_control::TaskCongestionEvidence taskEvidence(
     const adaptive_congestion_control::Snapshot& domain,
     std::optional<TaskCongestionFailureScope> scope = std::nullopt) {
     adaptive_congestion_control::TaskCongestionEvidence evidence;
-    evidence.reason = reason;
-    evidence.failure_scope = scope;
-    evidence.observed_at_ns = getCurrentTimeInNano();
-    evidence.controller_mode = taskControllerMode(domain.mode);
-    evidence.controller_generation = domain.generation;
-    evidence.window_bytes = domain.window_bytes;
-    evidence.inflight_bytes = domain.inflight_bytes;
+    evidence.reason = {true, reason};
+    if (scope) evidence.failure_scope = {true, *scope};
+    evidence.observed_at_ns = {true,
+                               static_cast<uint64_t>(getCurrentTimeInNano())};
+    evidence.controller_mode = {true, taskControllerMode(domain.mode)};
+    evidence.controller_generation = {true, domain.generation};
+    evidence.window_bytes = {true, domain.window_bytes};
+    evidence.inflight_bytes = {true, domain.inflight_bytes};
     if (!slice.source_nic_name.empty() && !slice.target_nic_name.empty() &&
         !slice.target_machine_id.empty()) {
         evidence.path = slice.source_nic_name + " -> " +
@@ -103,10 +104,11 @@ void recordDeviceBlocked(RdmaSlice& slice, const std::string& device,
         !slice.task->congestion_observation)
         return;
     adaptive_congestion_control::TaskCongestionEvidence evidence;
-    evidence.reason = TaskCongestionReason::kPathQuarantined;
-    evidence.failure_scope = TaskCongestionFailureScope::kDevice;
-    evidence.observed_at_ns = getCurrentTimeInNano();
-    evidence.controller_mode = taskControllerMode(mode);
+    evidence.reason = {true, TaskCongestionReason::kPathQuarantined};
+    evidence.failure_scope = {true, TaskCongestionFailureScope::kDevice};
+    evidence.observed_at_ns = {true,
+                               static_cast<uint64_t>(getCurrentTimeInNano())};
+    evidence.controller_mode = {true, taskControllerMode(mode)};
     if (!device.empty()) evidence.path = device;
     slice.congestion_control_observed_blocked =
         slice.task->congestion_observation->avoid(
@@ -122,12 +124,13 @@ void recordRailBlocked(RdmaSlice& slice, const RailMonitor& rail, int local_nic,
     const auto health = rail.healthSnapshot(local_nic, remote_nic);
     if (!health.paused) return;
     adaptive_congestion_control::TaskCongestionEvidence evidence;
-    evidence.reason = TaskCongestionReason::kPathQuarantined;
-    evidence.failure_scope = TaskCongestionFailureScope::kRoute;
-    evidence.observed_at_ns = getCurrentTimeInNano();
-    evidence.controller_mode = taskControllerMode(mode);
+    evidence.reason = {true, TaskCongestionReason::kPathQuarantined};
+    evidence.failure_scope = {true, TaskCongestionFailureScope::kRoute};
+    evidence.observed_at_ns = {true,
+                               static_cast<uint64_t>(getCurrentTimeInNano())};
+    evidence.controller_mode = {true, taskControllerMode(mode)};
     if (!health.probe_in_progress)
-        evidence.retry_after_ns = health.retry_after_ns;
+        evidence.retry_after_ns = {true, health.retry_after_ns};
     const auto* local = rail.local()->getNicEntry(local_nic);
     const auto* remote = rail.remote()->getNicEntry(remote_nic);
     if (local && remote) {

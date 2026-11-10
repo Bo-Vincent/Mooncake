@@ -22,10 +22,10 @@ namespace {
 
 TaskCongestionEvidence windowEvidence() {
     TaskCongestionEvidence evidence;
-    evidence.reason = TaskCongestionReason::kByteWindow;
+    evidence.reason = {true, TaskCongestionReason::kByteWindow};
     evidence.path = "route-a";
-    evidence.observed_at_ns = 100;
-    evidence.controller_generation = 7;
+    evidence.observed_at_ns = {true, 100};
+    evidence.controller_generation = {true, 7};
     return evidence;
 }
 
@@ -38,10 +38,10 @@ TEST(TaskCongestionObservationTest,
     EXPECT_EQ(task.state(), TaskCongestionState::kCongested);
 
     TaskCongestionEvidence isolation;
-    isolation.reason = TaskCongestionReason::kPathQuarantined;
+    isolation.reason = {true, TaskCongestionReason::kPathQuarantined};
     isolation.path = "route-b";
-    isolation.observed_at_ns = 200;
-    isolation.controller_generation = 7;
+    isolation.observed_at_ns = {true, 200};
+    isolation.controller_generation = {true, 7};
     EXPECT_TRUE(task.avoid(2, 1, isolation));
     EXPECT_EQ(task.state(), TaskCongestionState::kLongUnavailable);
 
@@ -72,13 +72,13 @@ TEST(TaskCongestionObservationTest, FailureWithoutCongestionEvidenceIsUnknown) {
 TEST(TaskCongestionObservationTest, DetailNamesTheWorstActiveSlice) {
     TaskCongestionObservation task(2, 1);
     TaskCongestionEvidence isolation;
-    isolation.reason = TaskCongestionReason::kPathQuarantined;
+    isolation.reason = {true, TaskCongestionReason::kPathQuarantined};
     isolation.path = "isolated-route";
-    isolation.observed_at_ns = 100;
+    isolation.observed_at_ns = {true, 100};
     EXPECT_TRUE(task.avoid(0, 1, isolation));
 
     auto window = windowEvidence();
-    window.observed_at_ns = 200;
+    window.observed_at_ns = {true, 200};
     EXPECT_TRUE(task.defer(1, 1, window));
     const auto detail = task.detail();
     EXPECT_EQ(detail.state, TaskCongestionState::kLongUnavailable);
@@ -119,9 +119,9 @@ TEST(TaskCongestionObservationTest, NewAttemptCanUseMoreSubmittedSlices) {
     EXPECT_FALSE(task.defer(0, 1, windowEvidence()));
 
     TaskCongestionEvidence isolation;
-    isolation.reason = TaskCongestionReason::kPathQuarantined;
+    isolation.reason = {true, TaskCongestionReason::kPathQuarantined};
     isolation.path = "second-slice";
-    isolation.controller_generation = 8;
+    isolation.controller_generation = {true, 8};
     EXPECT_TRUE(task.avoid(1, 2, isolation));
     EXPECT_EQ(task.state(), TaskCongestionState::kLongUnavailable);
     const auto detail = task.detail();
@@ -137,7 +137,7 @@ TEST(TaskCongestionObservationTest, PublishedSlicesExtendCurrentAttempt) {
     EXPECT_FALSE(task.extendAttempt(1, 2));
 
     TaskCongestionEvidence isolation;
-    isolation.reason = TaskCongestionReason::kPathQuarantined;
+    isolation.reason = {true, TaskCongestionReason::kPathQuarantined};
     EXPECT_TRUE(task.avoid(2, 1, isolation));
     EXPECT_EQ(task.state(), TaskCongestionState::kLongUnavailable);
     EXPECT_TRUE(task.resolve(2, 1));
@@ -150,9 +150,9 @@ TEST(TaskCongestionObservationTest,
     EXPECT_TRUE(task.defer(0, 1, windowEvidence()));
 
     TaskCongestionEvidence isolation;
-    isolation.reason = TaskCongestionReason::kPathQuarantined;
+    isolation.reason = {true, TaskCongestionReason::kPathQuarantined};
     isolation.path = "other-device";
-    isolation.controller_generation = 2;
+    isolation.controller_generation = {true, 2};
     EXPECT_TRUE(task.avoid(1, 1, isolation));
     EXPECT_EQ(task.state(), TaskCongestionState::kLongUnavailable);
     const auto detail = task.detail();
@@ -165,7 +165,6 @@ TEST(TaskCongestionObservationTest,
 TEST(TaskCongestionObservationTest, RepeatedEventAfterRecoveryIsUnresolved) {
     TaskCongestionObservation task(1, 1);
     const auto evidence = windowEvidence();
-    const auto original = evidence;
     ASSERT_TRUE(task.defer(0, 1, evidence));
     ASSERT_TRUE(task.resolve(0, 1));
     ASSERT_TRUE(task.detail().resolved);
@@ -176,24 +175,25 @@ TEST(TaskCongestionObservationTest, RepeatedEventAfterRecoveryIsUnresolved) {
     EXPECT_FALSE(detail.resolved);
     ASSERT_TRUE(detail.affected_path.observed);
     EXPECT_EQ(detail.affected_path.value, "route-a");
-    EXPECT_EQ(evidence, original);
+    EXPECT_EQ(evidence.path, "route-a");
+    EXPECT_TRUE(evidence.observed_at_ns.observed);
+    EXPECT_EQ(evidence.observed_at_ns.value, 100u);
 }
 
 TEST(TaskCongestionObservationTest, NewEvidenceClearsAbsentOptionalFields) {
     TaskCongestionObservation task(1, 1);
     auto previous = windowEvidence();
-    previous.failure_scope = TaskCongestionFailureScope::kDevice;
-    previous.controller_mode = TaskCongestionControllerMode::kEnforce;
-    previous.window_bytes = 128;
-    previous.inflight_bytes = 64;
-    previous.retry_after_ns = 500;
+    previous.failure_scope = {true, TaskCongestionFailureScope::kDevice};
+    previous.controller_mode = {true, TaskCongestionControllerMode::kEnforce};
+    previous.window_bytes = {true, 128};
+    previous.inflight_bytes = {true, 64};
+    previous.retry_after_ns = {true, 500};
     ASSERT_TRUE(task.avoid(0, 1, previous));
     ASSERT_TRUE(task.resolve(0, 1));
 
     TaskCongestionEvidence next;
-    next.reason = TaskCongestionReason::kFatal;
+    next.reason = {true, TaskCongestionReason::kFatal};
     next.path = "x";
-    const auto original = next;
     ASSERT_TRUE(task.avoid(0, 1, next));
     const auto detail = task.detail();
     EXPECT_EQ(detail.state, TaskCongestionState::kLongUnavailable);
@@ -209,7 +209,9 @@ TEST(TaskCongestionObservationTest, NewEvidenceClearsAbsentOptionalFields) {
     EXPECT_FALSE(detail.window_bytes.observed);
     EXPECT_FALSE(detail.inflight_bytes.observed);
     EXPECT_FALSE(detail.retry_after_ns.observed);
-    EXPECT_EQ(next, original);
+    EXPECT_EQ(next.path, "x");
+    EXPECT_TRUE(next.reason.observed);
+    EXPECT_EQ(next.reason.value, TaskCongestionReason::kFatal);
 
     ASSERT_TRUE(task.resolve(0, 1));
     ASSERT_TRUE(task.defer(0, 1, TaskCongestionEvidence{}));
@@ -220,7 +222,7 @@ TEST(TaskCongestionObservationTest, NewEvidenceClearsAbsentOptionalFields) {
 }
 
 TEST(TaskCongestionObservationTest,
-     EffectivePathDeduplicatesOwnedAndReference) {
+     EquivalentPathRepresentationsRecordCurrentEvent) {
     static const std::string path = "route-a";
     auto owned = windowEvidence();
     auto referenced = owned;
@@ -235,28 +237,28 @@ TEST(TaskCongestionObservationTest,
         ASSERT_TRUE(task.resolve(1, 1));
         const auto detail = task.detail();
         ASSERT_TRUE(detail.slice_id.observed);
-        EXPECT_EQ(detail.slice_id.value, 1u);
+        EXPECT_EQ(detail.slice_id.value, 0u);
         EXPECT_TRUE(detail.resolved);
     }
 }
 
 TEST(TaskCongestionObservationTest, EveryEvidenceFieldChangesTheLastEvent) {
     auto base = windowEvidence();
-    base.failure_scope = TaskCongestionFailureScope::kDevice;
-    base.controller_mode = TaskCongestionControllerMode::kEnforce;
-    base.window_bytes = 128;
-    base.inflight_bytes = 64;
-    base.retry_after_ns = 500;
+    base.failure_scope = {true, TaskCongestionFailureScope::kDevice};
+    base.controller_mode = {true, TaskCongestionControllerMode::kEnforce};
+    base.window_bytes = {true, 128};
+    base.inflight_bytes = {true, 64};
+    base.retry_after_ns = {true, 500};
     std::vector<TaskCongestionEvidence> changed(9, base);
-    changed[0].reason.reset();
-    changed[1].failure_scope.reset();
+    changed[0].reason = {};
+    changed[1].failure_scope = {};
     changed[2].path.reset();
-    changed[3].observed_at_ns.reset();
-    changed[4].controller_mode.reset();
-    changed[5].controller_generation.reset();
-    changed[6].window_bytes.reset();
-    changed[7].inflight_bytes.reset();
-    changed[8].retry_after_ns.reset();
+    changed[3].observed_at_ns = {};
+    changed[4].controller_mode = {};
+    changed[5].controller_generation = {};
+    changed[6].window_bytes = {};
+    changed[7].inflight_bytes = {};
+    changed[8].retry_after_ns = {};
     for (size_t field = 0; field < changed.size(); ++field) {
         SCOPED_TRACE(field);
         TaskCongestionObservation task(2, 1);
@@ -314,6 +316,88 @@ TEST(TaskCongestionObservationTest, OwnedEvidenceExtendsOnlyCurrentAttempt) {
     ASSERT_TRUE(task.resolve(2, 2));
     EXPECT_EQ(task.state(), TaskCongestionState::kNormal);
     EXPECT_TRUE(task.detail().resolved);
+}
+
+TEST(TaskCongestionObservationTest, EveryEvidenceFieldIsReturned) {
+    TaskCongestionObservation task(1, 1);
+    static const std::string path = "interned-route";
+    auto evidence = windowEvidence();
+    evidence.path.reset();
+    evidence.interned_path = &path;
+    evidence.failure_scope = {true, TaskCongestionFailureScope::kDevice};
+    evidence.controller_mode = {true, TaskCongestionControllerMode::kEnforce};
+    evidence.window_bytes = {true, 128};
+    evidence.inflight_bytes = {true, 64};
+    evidence.retry_after_ns = {true, 500};
+    ASSERT_TRUE(task.defer(0, 1, evidence));
+    const auto detail = task.detail();
+    EXPECT_TRUE(detail.reason.observed);
+    EXPECT_TRUE(detail.failure_scope.observed);
+    EXPECT_TRUE(detail.affected_path.observed);
+    EXPECT_TRUE(detail.observed_at_ns.observed);
+    EXPECT_TRUE(detail.controller_mode.observed);
+    EXPECT_TRUE(detail.controller_generation.observed);
+    EXPECT_TRUE(detail.window_bytes.observed);
+    EXPECT_TRUE(detail.inflight_bytes.observed);
+    EXPECT_TRUE(detail.retry_after_ns.observed);
+    EXPECT_EQ(detail.reason.value, evidence.reason.value);
+    EXPECT_EQ(detail.failure_scope.value, evidence.failure_scope.value);
+    EXPECT_EQ(detail.affected_path.value, path);
+    EXPECT_EQ(detail.observed_at_ns.value, 100u);
+    EXPECT_EQ(detail.controller_mode.value, evidence.controller_mode.value);
+    EXPECT_EQ(detail.controller_generation.value, 7u);
+    EXPECT_EQ(detail.window_bytes.value, 128u);
+    EXPECT_EQ(detail.inflight_bytes.value, 64u);
+    EXPECT_EQ(detail.retry_after_ns.value, 500u);
+}
+
+TEST(TaskCongestionObservationTest, ZeroValuedEvidenceRemainsObserved) {
+    TaskCongestionObservation task(2, 1);
+    TaskCongestionEvidence evidence;
+    evidence.reason = {true, TaskCongestionReason::kUnknown};
+    evidence.failure_scope = {true, TaskCongestionFailureScope::kOperation};
+    evidence.observed_at_ns = {true, 0};
+    evidence.controller_mode = {true, TaskCongestionControllerMode::kOff};
+    evidence.controller_generation = {true, 0};
+    evidence.window_bytes = {true, 0};
+    evidence.inflight_bytes = {true, 0};
+    evidence.retry_after_ns = {true, 0};
+    ASSERT_TRUE(task.defer(0, 1, evidence));
+    ASSERT_TRUE(task.defer(1, 1, TaskCongestionEvidence{}));
+    const auto detail = task.detail();
+    EXPECT_EQ(detail.slice_id.value, 0u);
+    EXPECT_TRUE(detail.reason.observed);
+    EXPECT_EQ(detail.reason.value, TaskCongestionReason::kUnknown);
+    EXPECT_TRUE(detail.failure_scope.observed);
+    EXPECT_EQ(detail.failure_scope.value,
+              TaskCongestionFailureScope::kOperation);
+    EXPECT_TRUE(detail.observed_at_ns.observed);
+    EXPECT_EQ(detail.observed_at_ns.value, 0u);
+    EXPECT_TRUE(detail.controller_mode.observed);
+    EXPECT_EQ(detail.controller_mode.value, TaskCongestionControllerMode::kOff);
+    EXPECT_TRUE(detail.controller_generation.observed);
+    EXPECT_EQ(detail.controller_generation.value, 0u);
+    EXPECT_TRUE(detail.window_bytes.observed);
+    EXPECT_EQ(detail.window_bytes.value, 0u);
+    EXPECT_TRUE(detail.inflight_bytes.observed);
+    EXPECT_EQ(detail.inflight_bytes.value, 0u);
+    EXPECT_TRUE(detail.retry_after_ns.observed);
+    EXPECT_EQ(detail.retry_after_ns.value, 0u);
+    EXPECT_FALSE(detail.affected_path.observed);
+
+    ASSERT_TRUE(task.resolve(0, 1));
+    ASSERT_TRUE(task.defer(0, 1, evidence));
+    ASSERT_TRUE(task.resolve(0, 1));
+    ASSERT_TRUE(task.beginAttempt(2, 2));
+    EXPECT_FALSE(task.avoid(0, 1, windowEvidence()));
+    const auto retained = task.detail();
+    EXPECT_EQ(retained.state, TaskCongestionState::kNormal);
+    EXPECT_EQ(retained.attempt_id.value, 2u);
+    EXPECT_TRUE(retained.resolved);
+    EXPECT_TRUE(retained.observed_at_ns.observed);
+    EXPECT_EQ(retained.observed_at_ns.value, 0u);
+    EXPECT_TRUE(retained.retry_after_ns.observed);
+    EXPECT_EQ(retained.retry_after_ns.value, 0u);
 }
 
 }  // namespace

@@ -463,23 +463,39 @@ Status MultiTransport::getTransferStatus(BatchID batch_id, size_t task_id,
     return Status::OK();
 }
 
-Status MultiTransport::getTaskCongestionState(
-    BatchID batch_id, size_t task_id, TaskCongestionState& state) const {
+static Status lookupTask(BatchID batch_id, size_t task_id,
+                         const Transport::TransferTask*& task) {
     if (batch_id == 0 || batch_id == static_cast<BatchID>(-1))
         return Status::InvalidArgument("Invalid Batch ID");
     const auto& batch_desc = Transport::toBatchDesc(batch_id);
     if (task_id >= batch_desc.task_list.size())
         return Status::InvalidArgument("Task ID out of range");
+    task = &batch_desc.task_list[task_id];
+    return Status::OK();
+}
+
+#ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
+static TaskCongestionState stateWithTaskFailure(
+    const Transport::TransferTask& task, TaskCongestionState state) {
+    if (state == TaskCongestionState::kNormal &&
+        __atomic_load_n(&task.failed_slice_count, __ATOMIC_ACQUIRE) != 0)
+        return TaskCongestionState::kUnknown;
+    return state;
+}
+#endif
+
+Status MultiTransport::getTaskCongestionState(
+    BatchID batch_id, size_t task_id, TaskCongestionState& state) const {
+    const Transport::TransferTask* task_ptr;
+    auto status = lookupTask(batch_id, task_id, task_ptr);
+    if (!status.ok()) return status;
     state = TaskCongestionState::kUnknown;
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
-    const auto& task = batch_desc.task_list[task_id];
+    const auto& task = *task_ptr;
     auto observation = std::atomic_load_explicit(&task.congestion_observation,
                                                  std::memory_order_acquire);
     if (observation) {
-        state = observation->state();
-        if (state == TaskCongestionState::kNormal &&
-            __atomic_load_n(&task.failed_slice_count, __ATOMIC_ACQUIRE) != 0)
-            state = TaskCongestionState::kUnknown;
+        state = stateWithTaskFailure(task, observation->state());
     } else if (task.rdma_congestion_control_mode.observed &&
                task.rdma_congestion_control_mode.value !=
                    TaskCongestionControllerMode::kOff &&
@@ -493,21 +509,17 @@ Status MultiTransport::getTaskCongestionState(
 
 Status MultiTransport::getTaskCongestionDetail(
     BatchID batch_id, size_t task_id, TaskCongestionDetail& detail) const {
-    if (batch_id == 0 || batch_id == static_cast<BatchID>(-1))
-        return Status::InvalidArgument("Invalid Batch ID");
-    const auto& batch_desc = Transport::toBatchDesc(batch_id);
-    if (task_id >= batch_desc.task_list.size())
-        return Status::InvalidArgument("Task ID out of range");
-    const auto& task = batch_desc.task_list[task_id];
+    const Transport::TransferTask* task_ptr;
+    auto status = lookupTask(batch_id, task_id, task_ptr);
+    if (!status.ok()) return status;
+    const auto& task = *task_ptr;
     detail = TaskCongestionDetail{};
 #ifdef MOONCAKE_ENABLE_ADAPTIVE_CONGESTION_CONTROL
     auto observation = std::atomic_load_explicit(&task.congestion_observation,
                                                  std::memory_order_acquire);
     if (observation) {
         detail = observation->detail();
-        if (detail.state == TaskCongestionState::kNormal &&
-            __atomic_load_n(&task.failed_slice_count, __ATOMIC_ACQUIRE) != 0)
-            detail.state = TaskCongestionState::kUnknown;
+        detail.state = stateWithTaskFailure(task, detail.state);
     } else if (task.rdma_congestion_control_mode.observed) {
         detail.attempt_kind = TaskCongestionAttemptKind::kRdma;
         detail.controller_mode = task.rdma_congestion_control_mode;

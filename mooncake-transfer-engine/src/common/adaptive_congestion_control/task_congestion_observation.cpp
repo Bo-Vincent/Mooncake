@@ -100,7 +100,6 @@ bool TaskCongestionObservation::recordOwned(
     }
     if (slices_.empty()) slices_.resize(slice_count_);
     auto& slice = slices_[slice_id];
-    if (slice.state == state && slice.evidence == evidence) return true;
     if (slice.state == TaskCongestionState::kCongested) --congested_count_;
     if (slice.state == TaskCongestionState::kLongUnavailable)
         --unavailable_count_;
@@ -169,10 +168,10 @@ TaskCongestionDetail TaskCongestionObservation::detail() const {
             const auto& slice = slices_[slice_id];
             if (slice.state != detail.state) continue;
             const auto& observed_at = slice.evidence.observed_at_ns;
-            if (!selected ||
-                (observed_at &&
-                 (!selected->evidence.observed_at_ns ||
-                  *observed_at >= *selected->evidence.observed_at_ns))) {
+            if (!selected || (observed_at.observed &&
+                              (!selected->evidence.observed_at_ns.observed ||
+                               observed_at.value >=
+                                   selected->evidence.observed_at_ns.value))) {
                 selected = EventRecord{slice_id, slice.evidence, false};
             }
         }
@@ -180,27 +179,18 @@ TaskCongestionDetail TaskCongestionObservation::detail() const {
     if (!selected) selected = last_event_;
     if (!selected) return detail;
 
-    if (selected->evidence.reason)
-        detail.reason = {true, *selected->evidence.reason};
+    detail.reason = selected->evidence.reason;
     detail.slice_id = {true, static_cast<uint64_t>(selected->slice_id)};
     detail.resolved = selected->resolved;
-    if (selected->evidence.failure_scope)
-        detail.failure_scope = {true, *selected->evidence.failure_scope};
+    detail.failure_scope = selected->evidence.failure_scope;
     if (const auto path = selected->evidence.effectivePath())
         detail.affected_path = {true, std::string(*path)};
-    if (selected->evidence.observed_at_ns)
-        detail.observed_at_ns = {true, *selected->evidence.observed_at_ns};
-    if (selected->evidence.controller_mode)
-        detail.controller_mode = {true, *selected->evidence.controller_mode};
-    if (selected->evidence.controller_generation)
-        detail.controller_generation = {
-            true, *selected->evidence.controller_generation};
-    if (selected->evidence.window_bytes)
-        detail.window_bytes = {true, *selected->evidence.window_bytes};
-    if (selected->evidence.inflight_bytes)
-        detail.inflight_bytes = {true, *selected->evidence.inflight_bytes};
-    if (selected->evidence.retry_after_ns)
-        detail.retry_after_ns = {true, *selected->evidence.retry_after_ns};
+    detail.observed_at_ns = selected->evidence.observed_at_ns;
+    detail.controller_mode = selected->evidence.controller_mode;
+    detail.controller_generation = selected->evidence.controller_generation;
+    detail.window_bytes = selected->evidence.window_bytes;
+    detail.inflight_bytes = selected->evidence.inflight_bytes;
+    detail.retry_after_ns = selected->evidence.retry_after_ns;
     return detail;
 }
 
