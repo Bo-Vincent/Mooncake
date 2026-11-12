@@ -7,6 +7,7 @@ struct PutObjectCurrentOptions<'a> {
     policy: Option<&'a ReplicationPolicy>,
     current: Option<&'a ObjectRoute>,
     reclaim_mode: ReclaimMode,
+    create_only: bool,
 }
 
 impl StoreClient {
@@ -427,6 +428,7 @@ impl StoreClient {
             policy,
             current,
             reclaim_mode,
+            create_only,
         } = options;
         if current.is_some_and(|route| route.state == RouteState::Deleting) {
             return Err(StoreError::Conflict(format!(
@@ -626,7 +628,7 @@ impl StoreClient {
                     quota_reservation.as_ref(),
                     "route_compare_and_swap_conflict",
                 );
-                if attempt < max_write_attempts {
+                if !create_only && attempt < max_write_attempts {
                     current = cas.current;
                     continue;
                 }
@@ -689,6 +691,7 @@ impl StoreClient {
                 policy,
                 current: current.as_ref(),
                 reclaim_mode: ReclaimMode::Scheduled,
+                create_only: false,
             },
         )
     }
@@ -733,6 +736,7 @@ impl StoreClient {
                 policy,
                 current: current.as_ref(),
                 reclaim_mode: ReclaimMode::Scheduled,
+                create_only: true,
             },
         )
     }
@@ -1542,6 +1546,7 @@ impl StoreClient {
                     policy: Some(&policy),
                     current: Some(&confirmed),
                     reclaim_mode: ReclaimMode::Deferred,
+                    create_only: false,
                 },
             ) {
                 Ok(next) => {
@@ -1654,6 +1659,7 @@ impl StoreClient {
                     policy: Some(&policy),
                     current: Some(&confirmed),
                     reclaim_mode: ReclaimMode::Deferred,
+                    create_only: false,
                 },
             ) {
                 Ok(next) => {

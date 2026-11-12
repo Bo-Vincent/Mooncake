@@ -61,6 +61,77 @@ fn test_route_write_gate() -> Arc<RouteWriteGate> {
     Arc::new(RouteWriteGate::default())
 }
 
+#[test]
+fn concurrent_single_writes_preserve_create_only_and_overwrite_semantics() {
+    for (create_only, omit_current) in [(true, false), (true, true), (false, false)] {
+        let key = "concurrent-single-write";
+        let object_key = ObjectKey::from_scope(
+            &NamespaceScope::with_defaults(Some("default"), None, None),
+            key,
+        );
+        let metadata = Arc::new(BlockingCasMetadataBackend::new(
+            Arc::new(InMemoryMetadataBackend::new()),
+            &object_key.0,
+        ));
+        if omit_current {
+            metadata.omit_current_on_conflict();
+        }
+        let client = Arc::new(
+            StoreClientBuilder::new(metadata.clone(), "concurrent-single-write")
+                .state(ClientLifecycleState::Active)
+                .route_control(RouteControlMode::MetadataOnly)
+                .transport(Arc::new(TestTransport::new("concurrent-single-write")))
+                .local_memory(storage_config())
+                .build(test_future_expiry_ms())
+                .expect("client should build"),
+        );
+        client
+            .register_local_memory()
+            .expect("memory should register");
+        metadata.arm_blocked_cas();
+        let tasks = [b"first".as_slice(), b"other".as_slice()].map(|payload| {
+            let client = client.clone();
+            std::thread::spawn(move || {
+                if create_only {
+                    let mut source = payload.to_vec();
+                    let buffer = source.as_mut_ptr().cast();
+                    client
+                        .register_buffer(buffer, source.len())
+                        .expect("register source");
+                    let result = client.put_from(key, buffer, source.len()).map(|_| ());
+                    client
+                        .unregister_buffer(buffer, source.len())
+                        .expect("unregister source");
+                    result
+                } else {
+                    client
+                        .put_request(&PutRequest::new(key, payload))
+                        .map(|_| ())
+                }
+            })
+        });
+        let both_blocked = metadata.wait_until_blocked_count(2, Duration::from_secs(5));
+        metadata.release_blocked_cas();
+        let results = tasks.map(|task| task.join().expect("writer should not panic"));
+        assert!(
+            both_blocked,
+            "both writers must reach CAS before publication"
+        );
+        let winners = results.iter().filter(|result| result.is_ok()).count();
+        assert_eq!(winners, if create_only { 1 } else { 2 });
+        let payload = client.get(key).expect("published payload should read");
+        if create_only {
+            assert!(results
+                .iter()
+                .any(|result| matches!(result, Err(StoreError::Conflict(_)))));
+            let winner = results.iter().position(|result| result.is_ok()).unwrap();
+            assert_eq!(payload, [b"first".as_slice(), b"other".as_slice()][winner]);
+        } else {
+            assert!([b"first".as_slice(), b"other".as_slice()].contains(&payload.as_slice()));
+        }
+    }
+}
+
 struct NoHotPathMetadataBackend {
     inner: Arc<InMemoryMetadataBackend>,
     deny_tenant_policy_list: bool,

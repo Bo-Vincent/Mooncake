@@ -226,6 +226,7 @@ Use the buffer-oriented forms when the application already owns stable memory an
 Behavior boundary:
 
 - `put_from` and `batch_put_from` send remote writes from the registered source buffer directly
+- Single-object `put_from` is create-only: a writer that loses route publication returns conflict after releasing its temporary reservation, without overwriting the winner. Ordinary `put` retains its overwrite behavior.
 - `batch_get_into` reads remote payloads directly into registered destination buffers
 - registered source buffers that are not host-readable, such as CUDA buffers, are used only as direct transfer sources; they cannot satisfy local-storage writes or staged scratch writes, and the published replica route omits the CPU payload checksum for those writes
 - routed `batch_put_from` treats per-key route CAS conflicts as successful cache insert races when an active route is already published, releases its own temporary reservation, and returns the published route for that key; when the CAS response omits that active route, the client does one exact bounded recheck for the conflicted key before failing
