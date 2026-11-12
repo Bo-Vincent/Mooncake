@@ -318,6 +318,13 @@ Reclaim is explicit and route-aware.
 - remote release uses batched allocator RPC
 - queued reclaim cleanup is idempotent for duplicate local or remote release, but direct non-cleanup release still surfaces allocator errors
 
+Local Cold Tier offload converts the reservation for each written payload into
+used bytes before publishing its `Materialized` route. Deletes can therefore
+reclaim both the backing and its charged bytes immediately after publication.
+Failed publications roll back the corresponding charge; failed writes release
+their reservation without adding used bytes. Provider-managed NoF keeps its
+separate accounting path.
+
 ### Storage-owner CLOCK with route-owner CAS
 
 Capacity pressure is resolved by the storage owner, but correctness is still enforced by the route owner.

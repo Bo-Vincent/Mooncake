@@ -223,6 +223,9 @@ impl crate::control_plane::EvictionService for NoopEvictionService {
 }
 
 struct BlockingCasMetadataBackend {
+    block_materialized_publication: AtomicBool,
+    reject_materialized_publication: AtomicBool,
+    reject_cold_charge: AtomicBool,
     inner: Arc<InMemoryMetadataBackend>,
     block_key: ObjectKey,
     empty_conflict_key: Option<ObjectKey>,
@@ -536,6 +539,9 @@ impl BlockingCasMetadataBackend {
         error_cas_failures_remaining: usize,
     ) -> Self {
         Self {
+            block_materialized_publication: AtomicBool::new(false),
+            reject_materialized_publication: AtomicBool::new(false),
+            reject_cold_charge: AtomicBool::new(false),
             inner,
             block_key,
             empty_conflict_key,
@@ -2314,6 +2320,43 @@ impl MetadataBackend for FinalizeFailureMetadataBackend {
 }
 
 impl MetadataBackend for BlockingCasMetadataBackend {
+    fn put_cold_tier_device_if_absent(
+        &self,
+        device: &mooncake_store_core::ColdTierDeviceRecord,
+    ) -> mooncake_store_core::Result<mooncake_store_core::ColdTierPutDeviceResult> {
+        self.inner.put_cold_tier_device_if_absent(device)
+    }
+
+    fn get_cold_tier_device(
+        &self,
+        device_id: &str,
+    ) -> mooncake_store_core::Result<Option<mooncake_store_core::ColdTierDeviceRecord>> {
+        self.inner.get_cold_tier_device(device_id)
+    }
+
+    fn update_cold_tier_device(
+        &self,
+        device_id: &str,
+        update: mooncake_store_core::ColdTierDeviceUpdate,
+    ) -> mooncake_store_core::Result<mooncake_store_core::ColdTierDeviceRecord> {
+        self.inner.update_cold_tier_device(device_id, update)
+    }
+
+    fn apply_cold_tier_usage_delta(
+        &self,
+        device_id: &str,
+        delta: mooncake_store_core::ColdTierUsageDelta,
+        updated_at_ms: u64,
+    ) -> mooncake_store_core::Result<mooncake_store_core::ColdTierDeviceRecord> {
+        if delta.used_bytes > 0 && self.reject_cold_charge.load(Ordering::SeqCst) {
+            return Err(StoreError::Metadata(
+                "injected cold charge failure".to_string(),
+            ));
+        }
+        self.inner
+            .apply_cold_tier_usage_delta(device_id, delta, updated_at_ms)
+    }
+
     fn route_namespace(&self) -> String {
         self.inner.route_namespace()
     }
@@ -2481,9 +2524,43 @@ impl MetadataBackend for BlockingCasMetadataBackend {
                 )));
             }
         }
+        if self.reject_materialized_publication.load(Ordering::SeqCst)
+            && *key == self.block_key
+            && next
+                .and_then(|route| route.cold_backing.as_ref())
+                .is_some_and(|backing| {
+                    backing.state == mooncake_store_core::ColdBackingState::Materialized
+                })
+        {
+            return Ok(mooncake_store_core::CasResult {
+                applied: false,
+                current: self.inner.get_object_route(key)?,
+                version_floor: None,
+            });
+        }
         let result = self
             .inner
             .compare_and_swap_object_route(key, expected, next)?;
+        if result.applied
+            && next
+                .and_then(|route| route.cold_backing.as_ref())
+                .is_some_and(|backing| {
+                    backing.state == mooncake_store_core::ColdBackingState::Materialized
+                })
+            && self
+                .block_materialized_publication
+                .swap(false, Ordering::SeqCst)
+        {
+            let (lock, condvar) = &*self.gate;
+            let mut state = lock.lock().expect("publication gate lock should succeed");
+            state.entered = true;
+            condvar.notify_all();
+            while !state.released {
+                state = condvar
+                    .wait(state)
+                    .expect("publication gate wait should succeed");
+            }
+        }
         if self.omit_current_on_conflict.load(Ordering::Relaxed) && !result.applied {
             return Ok(mooncake_store_core::CasResult {
                 applied: false,
@@ -18772,6 +18849,7 @@ fn is_exist_evicts_unreadable_route_and_sets_version_floor() {
 }
 
 mod adversarial;
+mod cold_tier_accounting_tests;
 mod cold_tier_restore_tests;
 mod fault_injection_prop;
 mod lifecycle_tests;

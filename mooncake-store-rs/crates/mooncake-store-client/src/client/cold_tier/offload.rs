@@ -828,6 +828,28 @@ pub(in super::super) fn materialize_prepared_pending_offload_batch(
     // Write to replica backends (best-effort — failures are logged but don't
     // block the primary offload).
     write_pending_offload_replicas(storage_owner, pending, &mut ready);
+    let precharged_bytes = ready.iter().try_fold(0i64, |total, ready| {
+        checked_add_cold_tier_bytes(
+            total,
+            pending_offload_payload_len_i64(&pending[ready.index])?,
+            "cold tier used-byte accounting exceeds range",
+        )
+    })?;
+    // Charge written payloads before publishing Materialized routes. A concurrent
+    // delete can reclaim the payload as soon as publication becomes visible.
+    if let Err(error) =
+        settle_pending_offload_batch(storage_owner, pending, precharged_bytes, precharged_bytes)
+    {
+        let reserved_release_bytes = rollback_ready_pending_offloads(
+            storage_owner,
+            backend.as_ref(),
+            pending,
+            &ready,
+            reserved_release_bytes,
+        )?;
+        settle_pending_offload_batch(storage_owner, pending, 0, reserved_release_bytes)?;
+        return Err(error);
+    }
     let cas_tracker = OperationTracker::new("cold_offload_route_cas_batch");
     let cas_results = match cas_pending_offload_routes(storage_owner, pending, &ready) {
         Ok(results) => {
@@ -843,7 +865,12 @@ pub(in super::super) fn materialize_prepared_pending_offload_batch(
                 &ready,
                 reserved_release_bytes,
             )?;
-            settle_pending_offload_batch(storage_owner, pending, 0, reserved_release_bytes)?;
+            settle_pending_offload_batch(
+                storage_owner,
+                pending,
+                -precharged_bytes,
+                reserved_release_bytes - precharged_bytes,
+            )?;
             return Err(error);
         }
     };
@@ -862,8 +889,8 @@ pub(in super::super) fn materialize_prepared_pending_offload_batch(
     if let Err(error) = settle_pending_offload_batch(
         storage_owner,
         pending,
-        outcome.used_add_bytes,
-        outcome.reserved_release_bytes,
+        outcome.used_add_bytes - precharged_bytes,
+        outcome.reserved_release_bytes - precharged_bytes,
     ) {
         complete_pending_offload_batch(storage_owner, pending);
         return Err(error);
@@ -1489,6 +1516,9 @@ fn settle_pending_offload_batch(
     reserved_release_bytes: i64,
 ) -> Result<()> {
     if pending[0].transient_nof || pending[0].managed_nof {
+        return Ok(());
+    }
+    if used_add_bytes == 0 && reserved_release_bytes == 0 {
         return Ok(());
     }
     storage_owner.apply_cold_tier_usage_delta(
