@@ -1712,7 +1712,7 @@ bool MasterService::QueueManagedWeightMemberOffload(
             }
             auto queued =
                 PushOffloadingQueue(MakeObjectIdentity(member_key, tenant_id),
-                                    replica, &mirror_clients);
+                                    replica, &mirror_clients, true);
             if (queued) {
                 replica.inc_refcnt();
                 source_id = replica.id();
@@ -2045,6 +2045,7 @@ void MasterService::FinalizeExpiredReplicationTaskAfterDurable(
     dynamic_replication_.RecordReplicaRemoval(metadata, erased_replica_ids);
     if (!replicas.empty()) {
         FreeDfsReplicas(metadata.user_key, replicas);
+        ReleaseLocalDiskUsage(replicas);
         std::lock_guard lock(discarded_replicas_mutex_);
         discarded_replicas_.emplace_back(std::move(replicas), ttl);
     }
@@ -5366,6 +5367,31 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         }
     }
 
+    auto member_tier = weight_manager_.ResolveImportMemberTier(
+        object_id.tenant_id, plan->group_id, key, slice_length,
+        plan->residency_affinity_id, config.data_type);
+    if (!member_tier) return tl::make_unexpected(member_tier.error());
+    if (*member_tier == WeightResidencyState::COLD &&
+        (config.replica_num != 1 || config.nof_replica_num != 0 ||
+         config.dfs_replica_num != 0)) {
+        return tl::make_unexpected(ErrorCode::NOT_SUPPORTED);
+    }
+
+    using ColdOwnerGuard = std::pair<UUID, ClientSessionRegistry::SessionGuard>;
+    std::vector<ColdOwnerGuard> cold_owner_guards;
+    if (*member_tier == WeightResidencyState::COLD) {
+        std::vector<UUID> owners;
+        {
+            std::shared_lock lock(master_state_mutex_);
+            for (const auto& [owner, endpoint] : cold_write_endpoints_)
+                owners.push_back(owner);
+        }
+        for (const auto& owner : owners) {
+            auto guard = client_sessions_.TryAcquireRetainingSession(owner);
+            if (guard) cold_owner_guards.emplace_back(owner, std::move(*guard));
+        }
+    }
+
     auto admit = [&](bool* dfs_allocation_failed)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
         auto now = std::chrono::system_clock::now();
@@ -5393,6 +5419,9 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                     metadata.GrantReadLease(
                         std::chrono::milliseconds(default_kv_lease_ttl_));
                 }
+                if (*member_tier == WeightResidencyState::COLD &&
+                    !HasReadableReplica(metadata))
+                    return tl::make_unexpected(ErrorCode::REPLICA_IS_NOT_READY);
                 return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
             }
             if (enable_oplog_ && ordered_oplog_writer_) {
@@ -5406,6 +5435,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                 metadata, &Replica::fn_is_processing);
             if (!replicas.empty()) {
                 FreeDfsReplicas(key, replicas);
+                ReleaseLocalDiskUsage(replicas);
                 std::lock_guard lock(discarded_replicas_mutex_);
                 discarded_replicas_.emplace_back(
                     std::move(replicas),
@@ -5414,6 +5444,30 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             accessor.Erase();
         }
 
+        if (*member_tier == WeightResidencyState::COLD) {
+            std::vector<std::pair<UUID, std::string>> owners(
+                cold_write_endpoints_.begin(), cold_write_endpoints_.end());
+            std::stable_partition(
+                owners.begin(), owners.end(),
+                [&](const auto& entry) { return entry.first == client_id; });
+            for (const auto& [owner, endpoint] : owners) {
+                auto guard = std::find_if(
+                    cold_owner_guards.begin(), cold_owner_guards.end(),
+                    [&](const auto& entry) { return entry.first == owner; });
+                if (guard == cold_owner_guards.end() ||
+                    !local_ssd_manager_.TryReserveBytes(owner, slice_length))
+                    continue;
+                std::vector<Replica> replicas;
+                replicas.emplace_back(owner, slice_length, endpoint,
+                                      ReplicaStatus::PROCESSING,
+                                      guard->second.Session());
+                return InsertMetadata(
+                    accessor, client_id, slice_length, config, plan->group_id,
+                    plan->residency_affinity_id, now, plan->soft_pin_request,
+                    std::move(replicas), std::nullopt);
+            }
+            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+        }
         return AllocateAndInsertMetadata(
             accessor, client_id, slice_length, config, plan->writer_host_id,
             plan->group_id, plan->residency_affinity_id, now,
@@ -5429,8 +5483,49 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     return result;
 }
 
+tl::expected<void, ErrorCode> MasterService::ValidateColdWrite(
+    const ColdWriteRequest& request) {
+    std::shared_lock lock(master_state_mutex_);
+    if (!HasMountedLocalDiskSegment(request.owner))
+        return tl::make_unexpected(ErrorCode::SEGMENT_NOT_FOUND);
+    MetadataAccessorRW accessor(
+        this,
+        MakeObjectIdentityForRequest(request.key, TenantId(request.tenant)));
+    if (!accessor.Exists())
+        return tl::make_unexpected(ErrorCode::OBJECT_NOT_FOUND);
+    auto& metadata = accessor.Get();
+    if (metadata.client_id != request.writer ||
+        metadata.TotalLength() != request.size ||
+        !metadata.HasReplica([&](const Replica& replica) {
+            return replica.id() == request.reservation &&
+                   (replica.is_completed() ||
+                    (replica.is_processing() &&
+                     weight_manager_.AllowsGroupMemberMutation(
+                         metadata.group_id) &&
+                     request.deadline_ms >
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now()
+                                 .time_since_epoch())
+                             .count())) &&
+                   replica.is_local_disk_replica() &&
+                   replica.get_local_disk_client_id() == request.owner;
+        }))
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    return {};
+}
+
+tl::expected<void, ErrorCode> MasterService::FinishColdWrite(
+    const ColdWriteRequest& request) {
+    auto valid = ValidateColdWrite(request);
+    if (!valid) return valid;
+    return PutEnd(request.writer, ObjectMeta{request.key, request.checksum},
+                  TenantId(request.tenant), ReplicaType::LOCAL_DISK,
+                  request.reservation);
+}
+
 auto MasterService::PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
-                           const TenantId& tenant_id, ReplicaType replica_type)
+                           const TenantId& tenant_id, ReplicaType replica_type,
+                           std::optional<ReplicaID> cold_reservation)
     -> tl::expected<void, ErrorCode> {
     const auto& key = object_meta.key;
     std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
@@ -5447,6 +5542,15 @@ auto MasterService::PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
                    << ", was PutStart-ed by " << metadata.client_id;
         return tl::make_unexpected(ErrorCode::ILLEGAL_CLIENT);
     }
+
+    if (cold_reservation && !metadata.HasReplica([&](const Replica& replica) {
+            return replica.id() == *cold_reservation &&
+                   replica.is_local_disk_replica() &&
+                   (replica.is_processing() || replica.is_completed()) &&
+                   HasMountedLocalDiskSegment(
+                       replica.get_local_disk_client_id().value());
+        }))
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
 
     auto is_target_replica = [replica_type](const Replica& replica) {
         if (replica_type == ReplicaType::ALL) {
@@ -5566,13 +5670,17 @@ auto MasterService::PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
         // collected before the marker is recorded.
         std::optional<ReplicaID> source_id;
         std::vector<UUID> mirror_clients;
+        const bool managed_weight =
+            metadata.data_type == ObjectDataType::WEIGHT &&
+            weight_manager_.IsManagedGroup(metadata.group_id);
         metadata.VisitReplicas(
             [](const Replica& replica) {
                 return replica.is_completed() && replica.is_memory_replica();
             },
-            [this, &object_id, &source_id, &mirror_clients](Replica& replica) {
-                auto result =
-                    PushOffloadingQueue(object_id, replica, &mirror_clients);
+            [this, &object_id, &source_id, &mirror_clients,
+             managed_weight](Replica& replica) {
+                auto result = PushOffloadingQueue(
+                    object_id, replica, &mirror_clients, managed_weight);
                 if (result && !source_id.has_value()) {
                     replica.inc_refcnt();
                     source_id = replica.id();
@@ -5928,6 +6036,13 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
     const std::string& group_id = plan->group_id;
     const std::string& residency_affinity_id = plan->residency_affinity_id;
     const ResolvedSoftPinRequest& soft_pin_request = plan->soft_pin_request;
+
+    auto member_tier = weight_manager_.ResolveImportMemberTier(
+        object_id.tenant_id, group_id, key, slice_length, residency_affinity_id,
+        config.data_type);
+    if (!member_tier) return tl::make_unexpected(member_tier.error());
+    if (*member_tier == WeightResidencyState::COLD)
+        return tl::make_unexpected(ErrorCode::NOT_SUPPORTED);
 
     ReplicateConfig allocation_config = config;
     std::string allocation_group_id = group_id;
@@ -8163,7 +8278,8 @@ MasterService::GetStorageConfig() const {
 }
 
 auto MasterService::MountLocalDiskSegment(const UUID& client_id,
-                                          bool enable_offloading)
+                                          bool enable_offloading,
+                                          const std::string& write_endpoint)
     -> tl::expected<void, ErrorCode> {
     if (!enable_offload_) {
         LOG(ERROR) << "	The offload functionality is not enabled";
@@ -8175,8 +8291,12 @@ auto MasterService::MountLocalDiskSegment(const UUID& client_id,
     }
     ErrorCode err;
     {
-        std::shared_lock<std::shared_mutex> snapshot_lock(master_state_mutex_);
+        std::unique_lock<std::shared_mutex> snapshot_lock(master_state_mutex_);
         err = local_ssd_manager_.RegisterClient(client_id, enable_offloading);
+        if ((err == ErrorCode::OK ||
+             err == ErrorCode::SEGMENT_ALREADY_EXISTS) &&
+            !write_endpoint.empty())
+            cold_write_endpoints_[client_id] = write_endpoint;
     }
     if (err != ErrorCode::OK && err != ErrorCode::SEGMENT_ALREADY_EXISTS) {
         return tl::make_unexpected(err);
@@ -8213,6 +8333,7 @@ auto MasterService::UnmountLocalDiskSegment(const UUID& client_id)
     {
         std::unique_lock<std::shared_mutex> snapshot_lock(master_state_mutex_);
         reported_capacity = local_ssd_manager_.UnregisterClient(client_id);
+        cold_write_endpoints_.erase(client_id);
     }
     if (!reported_capacity) {
         // Idempotent, the same way MountLocalDiskSegment treats an
@@ -8522,7 +8643,7 @@ auto MasterService::NotifyOffloadSuccess(
 
 tl::expected<void, ErrorCode> MasterService::PushOffloadingQueue(
     const ObjectIdentity& object_id, Replica& replica,
-    std::vector<UUID>* mirror_clients) {
+    std::vector<UUID>* mirror_clients, bool managed_weight) {
     const auto& segment_names = replica.get_segment_names();
     // No source segment names means there is no usable source segment to
     // offload from. Returning a silent {} here caused the caller to record an
@@ -8579,7 +8700,8 @@ tl::expected<void, ErrorCode> MasterService::PushOffloadingQueue(
             *client_id,
             OffloadTaskItem{.tenant_id = object_id.tenant_id.value(),
                             .key = object_id.user_key,
-                            .size = size},
+                            .size = size,
+                            .managed_weight = managed_weight},
             offloading_queue_limit_);
         if (err == ErrorCode::SEGMENT_NOT_FOUND) {
             return tl::make_unexpected(ErrorCode::UNABLE_OFFLOADING);

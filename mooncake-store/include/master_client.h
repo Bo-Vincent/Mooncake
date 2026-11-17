@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cold_write.h"
+
 #include <atomic>
 #include <csignal>
 #include <memory>
@@ -286,6 +288,11 @@ class MasterClient {
                   const std::vector<std::vector<uint64_t>>& slice_lengths,
                   const ReplicateConfig& config);
 
+    tl::expected<void, ErrorCode> ValidateColdWrite(
+        const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> FinishColdWrite(
+        const ColdWriteRequest& request);
+
     /**
      * @brief Ends a put operation
      * @param object_meta Object key and optional checksum
@@ -489,7 +496,8 @@ class MasterClient {
      * @param enable_offloading If true, enables offloading (write-to-file).
      */
     [[nodiscard]] tl::expected<void, ErrorCode> MountLocalDiskSegment(
-        const UUID& client_id, bool enable_offloading);
+        const UUID& client_id, bool enable_offloading,
+        const std::string& write_endpoint = "");
 
     /**
      * @brief Deregisters this client's local disk segment from the master,

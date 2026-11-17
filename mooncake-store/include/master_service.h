@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cold_write.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -433,6 +435,11 @@ class MasterService {
                   const ReplicateConfig& config)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode>;
 
+    tl::expected<void, ErrorCode> ValidateColdWrite(
+        const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> FinishColdWrite(
+        const ColdWriteRequest& request);
+
     /**
      * @brief Complete a put operation, replica_type indicates the type of
      * replica to complete (memory or disk)
@@ -440,7 +447,8 @@ class MasterService {
      * found, ErrorCode::INVALID_WRITE if replica status is invalid
      */
     auto PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
-                const TenantId& tenant_id, ReplicaType replica_type)
+                const TenantId& tenant_id, ReplicaType replica_type,
+                std::optional<ReplicaID> cold_reservation = std::nullopt)
         -> tl::expected<void, ErrorCode>;
 
     auto PutEnd(const UUID& client_id, const std::string& key,
@@ -725,7 +733,8 @@ class MasterService {
      * @brief Mounts a file storage segment into the master.
      * @param enable_offloading If true, enables offloading (write-to-file).
      */
-    auto MountLocalDiskSegment(const UUID& client_id, bool enable_offloading)
+    auto MountLocalDiskSegment(const UUID& client_id, bool enable_offloading,
+                               const std::string& write_endpoint = "")
         -> tl::expected<void, ErrorCode>;
 
     /**
@@ -1539,7 +1548,8 @@ class MasterService {
     // appended to it on success.
     tl::expected<void, ErrorCode> PushOffloadingQueue(
         const ObjectIdentity& object_id, Replica& replica,
-        std::vector<UUID>* mirror_clients = nullptr);
+        std::vector<UUID>* mirror_clients = nullptr,
+        bool managed_weight = false);
 
     // Cancels the offload task on `object_id`, releasing the source refcnt
     // and dropping the task marker along with its mirrors. Returns false
@@ -2054,6 +2064,9 @@ class MasterService {
     // Segment management
     SegmentManager segment_manager_;
     LocalSsdManager local_ssd_manager_;
+    // Protected by master_state_mutex_; never restored across incarnations.
+    std::unordered_map<UUID, std::string, boost::hash<UUID>>
+        cold_write_endpoints_;
     NoFSegmentManager nof_segment_manager_;
     BufferAllocatorType memory_allocator_type_;
     const AllocationStrategyType allocation_strategy_type_;
