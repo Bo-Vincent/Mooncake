@@ -1025,6 +1025,7 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
             return true;
         };
 
+        std::vector<std::string> cold_eviction_candidates;
         std::vector<size_t> member_keys;
         for (size_t index = 0; index < members->size(); ++index) {
             if ((*members)[index].data_type == ObjectDataType::WEIGHT) {
@@ -1072,8 +1073,13 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
             } else if (affinity.all_have_cold &&
                        view->active_lease_count == 0) {
                 // Every member must be durable before any memory is evicted.
-                backend_.EvictManagedWeightMembersToCold(current, {key});
+                cold_eviction_candidates.push_back(key);
             }
+        }
+
+        if (!cold_eviction_candidates.empty()) {
+            backend_.EvictManagedWeightMembersToCold(current,
+                                                     cold_eviction_candidates);
         }
 
         members = backend_.SnapshotWeightGroup(
