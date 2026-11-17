@@ -17,6 +17,7 @@
 #include <array>
 #include <cctype>
 #include <optional>
+#include <span>
 #include <regex>
 #include <string>
 #include <thread>
@@ -1997,8 +1998,43 @@ tl::expected<void, ErrorCode> BucketStorageBackend::ReadBucketValues(
     // which remain alive until this function returns (~line bucket_guards
     // destructor), keeping inflight_reads_ > 0 throughout the I/O phase.
 
-    // Step 2: Perform IO without holding any locks
-    for (auto& [bucket_id, read_plans] : bucket_read_plans) {
+    size_t concurrency = 1;
+    if (const char* setting =
+            std::getenv("MOONCAKE_OFFLOAD_READ_CONCURRENCY")) {
+        char* end = nullptr;
+        const auto parsed = std::strtol(setting, &end, 10);
+        if (end != setting && *end == '\0' && parsed > 0)
+            concurrency = std::min<long>(parsed, 8);
+    }
+    struct ReadTask {
+        int64_t bucket_id;
+        std::span<ReadPlan> plans;
+    };
+    std::vector<ReadTask> tasks;
+    for (auto& [bucket_id, plans] : bucket_read_plans) {
+        if (concurrency > 1)
+            std::sort(plans.begin(), plans.end(),
+                      [](const auto& a, const auto& b) {
+                          return a.offset < b.offset;
+                      });
+        size_t chunks = std::min(concurrency, plans.size());
+#ifdef USE_URING
+        // Preserve the existing batched io_uring submission for each bucket.
+        if (file_storage_config_.use_uring) chunks = 1;
+#endif
+        for (size_t begin = 0; begin < plans.size();) {
+            const size_t count = (plans.size() - begin + chunks - 1) / chunks;
+            tasks.push_back(
+                {bucket_id, std::span<ReadPlan>(plans).subspan(begin, count)});
+            begin += count;
+            --chunks;
+        }
+    }
+
+    // Tasks use disjoint plans; publish result pointers after joining.
+    auto read_bucket = [&](ReadTask& task) -> tl::expected<void, ErrorCode> {
+        auto bucket_id = task.bucket_id;
+        auto& read_plans = task.plans;
         // Open file for this bucket (cheap syscall, no lock needed).
         // Every plan in a bucket came from that bucket's metadata, so they all
         // carry the same disk. The vector is never empty: entries are only
@@ -2090,11 +2126,11 @@ tl::expected<void, ErrorCode> BucketStorageBackend::ReadBucketValues(
                         << "), got: " << desc.bytes_read;
                     return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
                 }
-                spans.at(plan.key).slice.ptr =
+                read_plans[i].dest_slice.ptr =
                     static_cast<char*>(plan.dest_slice.ptr) +
                     batch_plan.offset_in_buffer;
             }
-            continue;
+            return {};
         }
 #endif
 
@@ -2118,7 +2154,50 @@ tl::expected<void, ErrorCode> BucketStorageBackend::ReadBucketValues(
                 return tl::make_unexpected(ErrorCode::FILE_READ_FAIL);
             }
         }
+        return {};
+    };
+
+    std::atomic<size_t> next{0};
+    auto work = [&]() -> tl::expected<void, ErrorCode> {
+        for (;;) {
+            const size_t index = next.fetch_add(1, std::memory_order_relaxed);
+            if (index >= tasks.size()) return {};
+            auto result = read_bucket(tasks[index]);
+            if (!result) return result;
+        }
+    };
+    std::vector<std::future<tl::expected<void, ErrorCode>>> workers;
+    workers.reserve(concurrency - 1);
+    for (size_t i = 1; i < std::min(concurrency, tasks.size()); ++i) {
+        try {
+            workers.push_back(std::async(std::launch::async, work));
+        } catch (const std::system_error&) {
+            // Already-started workers and this thread finish the remaining IO.
+            break;
+        } catch (const std::bad_alloc&) {
+            break;
+        }
     }
+    std::exception_ptr exception;
+    tl::expected<void, ErrorCode> result;
+    try {
+        result = work();
+    } catch (...) {
+        exception = std::current_exception();
+    }
+    for (auto& worker : workers) {
+        try {
+            auto worker_result = worker.get();
+            if (result && !worker_result) result = worker_result;
+        } catch (...) {
+            if (!exception) exception = std::current_exception();
+        }
+    }
+    if (exception) std::rethrow_exception(exception);
+    if (!result) return result;
+    for (const auto& task : tasks)
+        for (const auto& plan : task.plans)
+            spans.at(plan.key).slice.ptr = plan.dest_slice.ptr;
 
     // bucket_guards go out of scope here, decrementing inflight_reads_
     return {};
