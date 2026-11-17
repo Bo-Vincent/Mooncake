@@ -67,9 +67,6 @@
 #ifdef USE_ASCEND_DIRECT
 #include "transport/ascend_transport/ascend_direct_transport/context_manager.h"
 #endif
-#ifdef USE_NVMEOF
-#include <cufile.h>
-#endif
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -9360,36 +9357,6 @@ int64_t ColdWriteNowMs() {
                std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
-bool TryColdGdsWrite(int fd, const void *source, size_t size, uint64_t offset) {
-#if defined(USE_NVMEOF) && defined(USE_CUDA)
-    if ((reinterpret_cast<uintptr_t>(source) | size | offset) % 4096 != 0)
-        return false;
-    static const bool initialized = cuFileDriverOpen().err == CU_FILE_SUCCESS;
-    if (!initialized) return false;
-    CUfileDrvProps_t props{};
-    if (cuFileDriverGetProperties(&props).err != CU_FILE_SUCCESS ||
-        (props.nvfs.dcontrolflags & (1u << CU_FILE_ALLOW_COMPAT_MODE)))
-        return false;
-    auto path = std::string("/proc/self/fd/") + std::to_string(fd);
-    int direct_fd = open(path.c_str(), O_WRONLY | O_DIRECT);
-    if (direct_fd < 0) return false;
-    CUfileDescr_t descriptor{};
-    descriptor.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-    descriptor.handle.fd = direct_fd;
-    CUfileHandle_t handle{};
-    bool success = false;
-    if (cuFileHandleRegister(&handle, &descriptor).err == CU_FILE_SUCCESS) {
-        success = cuFileWrite(handle, const_cast<void *>(source), size, offset,
-                              0) == static_cast<ssize_t>(size);
-        cuFileHandleDeregister(handle);
-    }
-    close(direct_fd);
-    return success;
-#else
-    return false;
-#endif
-}
-
 tl::expected<void, ErrorCode> ColdPwrite(int fd, const void *data, size_t size,
                                          uint64_t offset) {
     auto *bytes = static_cast<const char *>(data);
@@ -9456,25 +9423,15 @@ tl::expected<void, ErrorCode> WriteColdLocalSlices(
                     static_cast<const char *>(slice.ptr) + consumed;
                 device::PointerInfo info{};
                 auto *dev = accelerator.FindDeviceForPointer(source, &info);
-                bool direct = false;
                 if (dev) {
                     dev->SetContext(info.device_id);
-                    direct =
-                        TryColdGdsWrite(fd, source, size, base_offset + offset);
-                    if (!direct) {
-                        if (!dev->Copy(pool.slots[index].buffer.get(), source,
-                                       size,
-                                       device::CopyDirection::kDeviceToHost))
-                            return tl::make_unexpected(
-                                ErrorCode::TRANSFER_FAIL);
-                        source = pool.slots[index].buffer.get();
-                    }
+                    if (!dev->Copy(pool.slots[index].buffer.get(), source, size,
+                                   device::CopyDirection::kDeviceToHost))
+                        return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
+                    source = pool.slots[index].buffer.get();
                 }
-                if (!direct) {
-                    auto result =
-                        ColdPwrite(fd, source, size, base_offset + offset);
-                    if (!result) return result;
-                }
+                auto result = ColdPwrite(fd, source, size, base_offset + offset);
+                if (!result) return result;
                 consumed += size;
                 offset += size;
             }
@@ -9716,7 +9673,7 @@ RealClient::cold_write_chunk(const ColdWriteChunk &chunk) {
             chunk.size);
         if (read != ErrorCode::OK) {
             // TE timeout does not prove DMA completion. Preserve both
-            // destination registration and its Client until process exit;
+            // destination registration and its engine until process exit;
             // Cancel cannot ACK it.
             auto &pool = ColdPool(false);
             {
