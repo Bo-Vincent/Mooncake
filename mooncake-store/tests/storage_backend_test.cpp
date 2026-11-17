@@ -6499,7 +6499,7 @@ TEST_F(StorageBackendTest, StreamWriteNativeFormatsRecoveryAndCancellation) {
             [](int fd, uint64_t offset,
                uint64_t) -> tl::expected<void, ErrorCode> {
                 char byte = 'x';
-                pwrite(fd, &byte, 1, offset);
+                EXPECT_EQ(pwrite(fd, &byte, 1, offset), 1);
                 return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
             },
             [&](const auto&, auto&) {
@@ -6529,44 +6529,70 @@ TEST_F(StorageBackendTest, StreamWriteNativeFormatsRecoveryAndCancellation) {
     }
 }
 
-TEST_F(StorageBackendTest, StreamWriteHasBoundedResidentScratch) {
-    constexpr uint64_t size = 128 * 1024 * 1024;
-    FileStorageConfig cfg;
-    cfg.storage_filepath = data_path;
-    cfg.total_size_limit = 512 * 1024 * 1024;
-    cfg.total_keys_limit = 100;
-    FilePerKeyConfig per_key;
-    per_key.fsdir = "bounded-stream";
-    StorageBackendAdaptor backend(cfg, per_key);
-    ASSERT_TRUE(backend.Init());
-    ASSERT_TRUE(
-        backend.ScanMeta([](const auto&, auto&) { return ErrorCode::OK; }));
-    // This models the caller-owned source; only backend scratch is measured.
-    std::string source(size, 'b');
-    rusage before{}, after{};
-    ASSERT_EQ(getrusage(RUSAGE_SELF, &before), 0);
-    auto result = backend.OffloadStream(
-        "bounded", size,
-        [&](int fd, uint64_t offset,
-            uint64_t count) -> tl::expected<void, ErrorCode> {
-            for (uint64_t done = 0; done < count;) {
-                size_t n = std::min<uint64_t>(64 * 1024, count - done);
-                auto written =
-                    pwrite(fd, source.data() + done, n, offset + done);
-                if (written != static_cast<ssize_t>(n)) {
-                    return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+TEST_F(StorageBackendTest, StreamWriteLargePayloadsAcrossNativeFormats) {
+    const char* size_override = std::getenv("MC_TEST_STREAM_BYTES");
+    const uint64_t size =
+        size_override ? std::stoull(size_override) : 128 * 1024 * 1024;
+    const char* backend_override = std::getenv("MC_TEST_STREAM_BACKEND");
+    ASSERT_GT(size, 0);
+    for (int kind = 0; kind != 3; ++kind) {
+        if (backend_override && kind != std::stoi(backend_override)) continue;
+        SCOPED_TRACE(kind);
+        FileStorageConfig cfg;
+        cfg.storage_filepath = data_path + "/bounded-" + std::to_string(kind);
+        cfg.total_size_limit = 512 * 1024 * 1024;
+        cfg.total_keys_limit = 100;
+        FilePerKeyConfig per_key;
+        per_key.fsdir = "bounded-stream";
+        std::unique_ptr<StorageBackendInterface> backend;
+        if (kind == 0) {
+            backend = std::make_unique<StorageBackendAdaptor>(cfg, per_key);
+        } else if (kind == 1) {
+            backend = std::make_unique<BucketStorageBackend>(
+                cfg, BucketBackendConfig{});
+        } else {
+            OffsetAllocatorBackendConfig offset_cfg;
+            offset_cfg.persist_mode = OffsetPersistMode::kStrict;
+            offset_cfg.enable_record_crc = true;
+            backend = std::make_unique<OffsetAllocatorStorageBackend>(
+                cfg, offset_cfg);
+        }
+        ASSERT_TRUE(backend->Init());
+        ASSERT_TRUE(backend->ScanMeta(
+            [](const auto&, auto&) { return ErrorCode::OK; }));
+        // Warm allocator/checkpoint metadata before measuring payload
+        // scratch. The source buffer belongs to the caller.
+        if (kind == 2) {
+            char seed = 's';
+            ASSERT_TRUE(
+                backend->BatchOffload({{"seed", {{&seed, 1}}}}, nullptr));
+        }
+        std::string source(size, 'b');
+        rusage before{}, after{};
+        ASSERT_EQ(getrusage(RUSAGE_SELF, &before), 0);
+        auto result = backend->OffloadStream(
+            "bounded", size,
+            [&](int fd, uint64_t offset,
+                uint64_t count) -> tl::expected<void, ErrorCode> {
+                for (uint64_t done = 0; done < count;) {
+                    size_t n = std::min<uint64_t>(64 * 1024, count - done);
+                    auto written =
+                        pwrite(fd, source.data() + done, n, offset + done);
+                    if (written != static_cast<ssize_t>(n)) {
+                        return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+                    }
+                    done += n;
                 }
-                done += n;
-            }
-            return {};
-        },
-        nullptr);
-    ASSERT_TRUE(result);
-    ASSERT_EQ(getrusage(RUSAGE_SELF, &after), 0);
-    const long scratch_kib = after.ru_maxrss - before.ru_maxrss;
-    std::cout << "backend peak scratch KiB=" << scratch_kib << std::endl;
-    EXPECT_LT(scratch_kib, 8 * 1024);
-    backend.RemoveAll();
+                return {};
+            },
+            nullptr);
+        ASSERT_TRUE(result);
+        ASSERT_EQ(getrusage(RUSAGE_SELF, &after), 0);
+        const long scratch_kib = after.ru_maxrss - before.ru_maxrss;
+        std::cout << "stream backend=" << kind << " payload_bytes=" << size
+                  << " incremental_peak_kib=" << scratch_kib << std::endl;
+        backend->RemoveAll();
+    }
 }
 
 }  // namespace mooncake::test

@@ -3049,8 +3049,7 @@ tl::expected<void, ErrorCode> BucketStorageBackend::WriteBucket(
     } else
 #ifdef USE_URING
     // Try to use write_aligned for O_DIRECT I/O if file is UringFile
-    UringFile* uring_file = dynamic_cast<UringFile*>(file.get());
-    if (uring_file != nullptr) {
+    if (UringFile* uring_file = dynamic_cast<UringFile*>(file.get())) {
         size_t total_size = static_cast<size_t>(bucket_metadata->data_size);
         size_t aligned_size = align_up(total_size, kDirectIOAlignment);
 
