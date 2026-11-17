@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,7 +55,8 @@ class WeightColdImportE2ETest : public ::testing::Test {
     }
 
     void Import(WeightResidencyState target, bool batch, bool local,
-                const std::vector<size_t>& sizes, size_t replicas = 1) {
+                const std::vector<size_t>& sizes, size_t replicas = 1,
+                bool paired_affinities = false, bool concurrent = false) {
         ASSERT_TRUE(owner_);
         const std::string hot_control(64 * 1024, 'h');
         ASSERT_EQ(0, source_->put("hot-control", hot_control));
@@ -74,11 +76,17 @@ class WeightColdImportE2ETest : public ::testing::Test {
         payloads_.resize(sizes.size());
         for (size_t index = 0; index < sizes.size(); ++index) {
             const auto key = "payload-" + std::to_string(index);
-            const auto affinity = "tensor-" + std::to_string(index);
+            const auto affinity =
+                "tensor-" +
+                std::to_string(paired_affinities ? index / 2 : index);
             keys.push_back(key);
             affinity_ids.push_back(affinity);
             layout.push_back({key, sizes[index], affinity});
-            units.push_back({affinity, sizes[index]});
+            if (!units.empty() && units.back().affinity_id == affinity) {
+                units.back().logical_bytes += sizes[index];
+            } else {
+                units.push_back({affinity, sizes[index]});
+            }
             total += sizes[index];
             payloads_[index].assign(sizes[index],
                                     static_cast<char>('a' + index));
@@ -118,13 +126,23 @@ class WeightColdImportE2ETest : public ::testing::Test {
             }
             for (const auto status : result) ASSERT_EQ(status, 0);
         } else {
+            std::vector<std::future<int>> writes;
             for (size_t index = 0; index < keys.size(); ++index) {
                 config.group_ids = std::vector<std::string>{group};
                 config.residency_affinity_ids =
                     std::vector<std::string>{affinity_ids[index]};
-                ASSERT_EQ(0,
-                          writer->put(keys[index], payloads_[index], config));
+                if (concurrent) {
+                    writes.push_back(std::async(std::launch::async, [&, index,
+                                                                     config] {
+                        return writer->put_from(keys[index], addresses[index],
+                                                sizes[index], config);
+                    }));
+                } else {
+                    ASSERT_EQ(0, writer->put_from(keys[index], addresses[index],
+                                                  sizes[index], config));
+                }
             }
+            for (auto& write : writes) ASSERT_EQ(0, write.get());
         }
         config.group_ids = std::vector<std::string>{group};
         config.residency_affinity_ids.reset();
@@ -227,6 +245,33 @@ TEST_F(WeightColdImportE2ETest, RemoteBatchBypassesHotSegmentCapacity) {
 TEST_F(WeightColdImportE2ETest, MixedBatchOnlyKeepsPlannedAffinitiesHot) {
     Start(16 * kMiB);
     Import(WeightResidencyState::MIXED, true, false, {8 * kMiB, 24 * kMiB});
+}
+
+TEST_F(WeightColdImportE2ETest, MixedRemoteScalarBypassesHotSegmentCapacity) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::MIXED, false, false, {8 * kMiB, 24 * kMiB});
+}
+
+TEST_F(WeightColdImportE2ETest, MixedLocalScalarBypassesHotSegmentCapacity) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::MIXED, false, true, {8 * kMiB, 24 * kMiB});
+}
+
+TEST_F(WeightColdImportE2ETest, MixedLocalBatchBypassesHotSegmentCapacity) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::MIXED, true, true, {8 * kMiB, 24 * kMiB});
+}
+
+TEST_F(WeightColdImportE2ETest, MixedConcurrentHotAndColdWrites) {
+    Start(20 * kMiB);
+    Import(WeightResidencyState::MIXED, false, false, {8 * kMiB, 24 * kMiB}, 1,
+           false, true);
+}
+
+TEST_F(WeightColdImportE2ETest, MixedLocalBatchKeepsWholeAffinitiesTogether) {
+    Start(20 * kMiB);
+    Import(WeightResidencyState::MIXED, true, true,
+           {8 * kMiB, 8 * kMiB, 12 * kMiB, 12 * kMiB}, 1, true);
 }
 
 TEST_F(WeightColdImportE2ETest,
