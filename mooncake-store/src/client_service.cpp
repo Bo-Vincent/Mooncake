@@ -2115,9 +2115,22 @@ bool Client::RedirectToHotCache(const std::string& key,
     return true;
 }
 
-tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
-                                          std::vector<Slice>& slices,
-                                          const ReplicateConfig& config) {
+ErrorCode Client::ReadColdStagingChunk(const std::string& endpoint,
+                                       uint64_t address, void* destination,
+                                       size_t size) {
+    Replica::Descriptor source;
+    MemoryDescriptor memory;
+    memory.buffer_descriptor.buffer_address_ = address;
+    memory.buffer_descriptor.size_ = size;
+    memory.buffer_descriptor.transport_endpoint_ = endpoint;
+    source.descriptor_variant = std::move(memory);
+    std::vector<Slice> slices{Slice{destination, size}};
+    return TransferRead(source, slices);
+}
+
+tl::expected<void, ErrorCode> Client::Put(
+    const ObjectKey& key, std::vector<Slice>& slices,
+    const ReplicateConfig& config, const WriteBufferStager& prepare_memory) {
     std::optional<uint64_t> object_checksum;
     if (object_checksum_enabled_) {
         auto checksum_result = ComputeObjectChecksumForSlices(
@@ -2165,6 +2178,30 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
                        << ": " << toString(err);
         }
         return tl::unexpected(err);
+    }
+
+    for (const auto& replica : *start_result) {
+        if (replica.is_local_disk_replica()) {
+            if (!cold_write_handler_)
+                return tl::make_unexpected(ErrorCode::UNABLE_OFFLOAD);
+            auto result =
+                cold_write_handler_(key, replica, slices, object_checksum);
+            if (!result) {
+                // An unknown remote completion retains the reservation until
+                // its timeout.
+                return result;
+            }
+            return {};
+        }
+    }
+
+    if (prepare_memory) {
+        auto prepared = prepare_memory(slices);
+        if (!prepared) {
+            auto ignored = master_client_.PutRevoke(key, ReplicaType::ALL);
+            return tl::make_unexpected(prepared.error());
+        }
+        slices = std::move(*prepared);
     }
 
     ReplicaTransferSummary transfer_summary;
@@ -2731,7 +2768,11 @@ void Client::healDanglingLocalDiskBatchStarts(
         }
         op.replicas = std::move(retry_responses[r].value());
         op.RecordAllocatedReplicas();
-        if (!HasExpectedReplicaAllocation(config, op.transfer_summary)) {
+        if (std::none_of(op.replicas.begin(), op.replicas.end(),
+                         [](const auto& replica) {
+                             return replica.is_local_disk_replica();
+                         }) &&
+            !HasExpectedReplicaAllocation(config, op.transfer_summary)) {
             op.SetTerminalError(ErrorCode::NO_AVAILABLE_HANDLE,
                                 PutOperationState::MASTER_FAILED,
                                 "Allocated replicas do not satisfy "
@@ -2824,7 +2865,11 @@ void Client::StartBatchPut(std::vector<PutOperation>& ops,
         } else {
             op.replicas = std::move(start_responses[i].value());
             op.RecordAllocatedReplicas();
-            if (!HasExpectedReplicaAllocation(config, op.transfer_summary)) {
+            if (std::none_of(op.replicas.begin(), op.replicas.end(),
+                             [](const auto& replica) {
+                                 return replica.is_local_disk_replica();
+                             }) &&
+                !HasExpectedReplicaAllocation(config, op.transfer_summary)) {
                 op.SetTerminalError(ErrorCode::NO_AVAILABLE_HANDLE,
                                     PutOperationState::MASTER_FAILED,
                                     "Allocated replicas do not satisfy "
@@ -3733,6 +3778,28 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
         }
     }
     StartBatchPut(ops, client_cfg);
+    for (auto& op : ops) {
+        if (op.IsResolved()) continue;
+        auto cold = std::find_if(op.replicas.begin(), op.replicas.end(),
+                                 [](const auto& replica) {
+                                     return replica.is_local_disk_replica();
+                                 });
+        if (cold == op.replicas.end()) continue;
+        auto result = cold_write_handler_
+                          ? cold_write_handler_(op.key, *cold, op.slices,
+                                                op.object_checksum)
+                          : tl::expected<void, ErrorCode>(
+                                tl::make_unexpected(ErrorCode::UNABLE_OFFLOAD));
+        if (result)
+            op.SetSuccess();
+        else {
+            op.SetTerminalError(result.error(),
+                                PutOperationState::TRANSFER_FAILED,
+                                "Cold write did not confirm completion");
+            op.replicas.clear();
+        }
+    }
+
     StageWriteBuffersForRemoteReplicas(ops, stager);
 
     auto t0 = std::chrono::steady_clock::now();
@@ -3832,6 +3899,15 @@ Client::StartBatchPutForSizes(const std::vector<std::string>& keys,
     for (size_t i = 0; i < ops.size(); ++i) {
         if (ops[i].IsResolved()) {
             results[i] = tl::unexpected(ops[i].result.error());
+            continue;
+        }
+        if (std::any_of(ops[i].replicas.begin(), ops[i].replicas.end(),
+                        [](const auto& replica) {
+                            return replica.is_local_disk_replica();
+                        })) {
+            auto ignored =
+                master_client_.PutRevoke(ops[i].key, ReplicaType::LOCAL_DISK);
+            results[i] = tl::make_unexpected(ErrorCode::NOT_SUPPORTED);
             continue;
         }
         results[i] = std::move(ops[i].replicas);
@@ -4276,6 +4352,19 @@ void Client::OnGracefulUnmountTimer(const UUID& segment_id, int retry_left) {
     }
 }
 
+std::function<tl::expected<void, ErrorCode>()> Client::WeightMemoryRelease(
+    void* address) const {
+    // Quarantine retains transport registration, not Client worker threads.
+    return [engine = transfer_engine_,
+            address]() -> tl::expected<void, ErrorCode> {
+        const int result = engine->unregisterLocalMemory(address, true);
+        if (result != 0 && result != ERR_ADDRESS_NOT_REGISTERED) {
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+        return {};
+    };
+}
+
 tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
     void* addr, size_t length, const std::string& location,
     bool remote_accessible, bool update_metadata) {
@@ -4415,9 +4504,9 @@ WeightRpcResult<WeightRevisionMetadata> Client::DeleteWeightRevision(
 void* Client::GetBaseAddr() { return transfer_engine_->getBaseAddr(); }
 
 tl::expected<void, ErrorCode> Client::MountLocalDiskSegment(
-    bool enable_offloading) {
-    auto response =
-        master_client_.MountLocalDiskSegment(client_id_, enable_offloading);
+    bool enable_offloading, const std::string& write_endpoint) {
+    auto response = master_client_.MountLocalDiskSegment(
+        client_id_, enable_offloading, write_endpoint);
 
     if (!response) {
         LOG(ERROR) << "MountLocalDiskSegment failed, error code is "

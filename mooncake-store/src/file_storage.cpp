@@ -163,14 +163,19 @@ FileStorage::FileStorage(const FileStorageConfig& config,
 #endif
 }
 
-FileStorage::~FileStorage() {
+FileStorage::~FileStorage() { Shutdown(); }
+
+void FileStorage::Shutdown() {
+    std::lock_guard shutdown_lock(shutdown_mutex_);
     LOG(INFO) << "Shutdown FileStorage...";
+    draining_.store(true);
     heartbeat_running_ = false;
     WakeHeartbeat();
+    client_buffer_gc_running_ = false;
+    worker_wait_cv_.notify_all();
     if (heartbeat_thread_.joinable()) {
         heartbeat_thread_.join();
     }
-    client_buffer_gc_running_ = false;
     if (client_buffer_gc_thread_.joinable()) {
         client_buffer_gc_thread_.join();
     }
@@ -225,7 +230,7 @@ tl::expected<void, ErrorCode> FileStorage::Init() {
         MutexLocker locker(&offloading_mutex_);
         enable_offloading_ = enable_offloading_result.value();
         auto mount_file_storage_result =
-            client_->MountLocalDiskSegment(enable_offloading_);
+            client_->MountLocalDiskSegment(enable_offloading_, local_rpc_addr_);
         if (!mount_file_storage_result) {
             LOG(ERROR) << "Failed to mount file storage: "
                        << mount_file_storage_result.error();
@@ -244,15 +249,18 @@ tl::expected<void, ErrorCode> FileStorage::Init() {
         }
     }
 
+    cold_write_journal_ =
+        std::make_unique<ColdWriteJournal>(config_.storage_filepath);
+    auto journal_initialized = cold_write_journal_->Init();
+    if (!journal_initialized) return journal_initialized;
+
     auto scan_meta_result = storage_backend_->ScanMeta(
         [this](const std::vector<std::string>& keys,
                std::vector<StorageObjectMetadata>& metadatas) {
             for (auto& metadata : metadatas) {
                 metadata.transport_endpoint = local_rpc_addr_;
             }
-            auto tasks = BuildOffloadTasksFromStorageKeys(keys, metadatas);
-            auto add_object_result =
-                client_->NotifyOffloadSuccess(tasks, metadatas);
+            auto add_object_result = RecoverOffloadedObjects(keys, metadatas);
             if (!add_object_result) {
                 LOG(ERROR) << "Failed to add object to master: "
                            << add_object_result.error();
@@ -520,11 +528,56 @@ tl::expected<void, ErrorCode> FileStorage::OffloadObjects(
     if (offloading_objects.empty() && deferred_task_by_storage_key_.empty()) {
         return {};
     }
+    for (const auto& task : offloading_objects) {
+        if (!task.managed_weight) continue;
+        std::unordered_map<std::string, std::vector<Slice>> sources;
+        auto queried =
+            BatchQuerySegmentSlices({task.key}, task.tenant_id, sources);
+        bool success = false;
+        auto found = sources.find(task.key);
+        if (queried && found != sources.end()) {
+            ColdWriteRequest recovery_fence{client_->getClientId(),
+                                            client_->getClientId(),
+                                            0,
+                                            task.tenant_id,
+                                            task.key,
+                                            static_cast<uint64_t>(task.size),
+                                            0,
+                                            std::nullopt};
+            auto journaled = PrepareColdWrite(recovery_fence);
+            if (!journaled) return journaled;
+            auto result = OffloadStream(
+                TenantId(task.tenant_id).MakeScopedKey(task.key), task.size,
+                [&](int fd, uint64_t offset, uint64_t) {
+                    auto deadline =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count() +
+                        300000;
+                    return WriteColdLocalSlices(client_, fd, offset,
+                                                found->second, deadline);
+                },
+                [this, &task](const auto&, auto& metadatas) {
+                    for (auto& metadata : metadatas)
+                        metadata.transport_endpoint = local_rpc_addr_;
+                    auto notified =
+                        client_->NotifyOffloadSuccess({task}, metadatas);
+                    return notified ? ErrorCode::OK : notified.error();
+                });
+            success = result.has_value();
+        }
+        if (!success) {
+            StorageObjectMetadata metadata;
+            metadata.data_size = -1;
+            auto ignored = client_->NotifyOffloadSuccess({task}, {metadata});
+        }
+    }
     std::unordered_map<std::string, int64_t> storage_object_sizes;
     std::unordered_map<std::string, OffloadTaskItem> task_by_storage_key;
     storage_object_sizes.reserve(offloading_objects.size());
     task_by_storage_key.reserve(offloading_objects.size());
     for (const auto& task : offloading_objects) {
+        if (task.managed_weight) continue;
         const auto storage_key =
             TenantId(task.tenant_id).MakeScopedKey(task.key);
         storage_object_sizes.emplace(storage_key, task.size);
@@ -748,6 +801,7 @@ tl::expected<void, ErrorCode> FileStorage::OffloadObjects(
             }
             return res;
         };
+        std::unique_lock disk_write_lock(disk_write_mutex_);
         auto offload_res = storage_backend_->BatchOffload(
             host_batch_object, bucket_complete_handler,
             [this](const std::vector<std::string>& evicted_keys) {
@@ -999,8 +1053,8 @@ tl::expected<void, ErrorCode> FileStorage::Heartbeat() {
                              << "SEGMENT_NOT_FOUND, attempting to "
                              << "re-register local disk segment and "
                              << "re-register object metadata";
-                auto remount_result =
-                    client_->MountLocalDiskSegment(enable_offloading_);
+                auto remount_result = client_->MountLocalDiskSegment(
+                    enable_offloading_, local_rpc_addr_);
                 if (remount_result) {
                     // Report configured SSD capacity so the Master can
                     // restore file_total_capacity_ (the denominator in
@@ -1082,7 +1136,60 @@ tl::expected<void, ErrorCode> FileStorage::Heartbeat() {
     return {};
 }
 
+tl::expected<void, ErrorCode> FileStorage::PrepareColdWrite(
+    const ColdWriteRequest& request) {
+    if (!cold_write_journal_)
+        return tl::make_unexpected(ErrorCode::UNABLE_OFFLOAD);
+    return cold_write_journal_->Put(
+        TenantId(request.tenant).MakeScopedKey(request.key), request);
+}
+
+tl::expected<void, ErrorCode> FileStorage::RecoverOffloadedObjects(
+    const std::vector<std::string>& keys,
+    std::vector<StorageObjectMetadata>& metadatas) {
+    auto entries = cold_write_journal_->List();
+    if (!entries) return tl::make_unexpected(entries.error());
+    std::vector<std::string> ordinary_keys;
+    std::vector<StorageObjectMetadata> ordinary_metadata;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        auto found = entries->find(keys[i]);
+        if (found != entries->end()) {
+            // A cold record never falls through to generic AddReplica recovery.
+            // A changed owner incarnation requires an explicit reattach
+            // protocol.
+            if (found->second.owner == client_->getClientId()) {
+                auto recovered = client_->FinishColdWrite(found->second);
+                if (!recovered)
+                    LOG(WARNING) << "Cold recovery deferred for key=" << keys[i]
+                                 << ", error=" << recovered.error();
+            }
+            continue;
+        }
+        ordinary_keys.push_back(keys[i]);
+        ordinary_metadata.push_back(metadatas[i]);
+    }
+    if (ordinary_keys.empty()) return {};
+    auto tasks =
+        BuildOffloadTasksFromStorageKeys(ordinary_keys, ordinary_metadata);
+    return client_->NotifyOffloadSuccess(tasks, ordinary_metadata);
+}
+
+tl::expected<int64_t, ErrorCode> FileStorage::OffloadStream(
+    const std::string& key, uint64_t size,
+    const StorageBackendInterface::StreamWriter& writer,
+    std::function<ErrorCode(const std::vector<std::string>&,
+                            std::vector<StorageObjectMetadata>&)>
+        complete) {
+    std::unique_lock lock(disk_write_mutex_);
+    return storage_backend_->OffloadStream(
+        key, size, writer, std::move(complete),
+        [this](const std::vector<std::string>& keys) {
+            return NotifyEvictedDiskReplicas(keys);
+        });
+}
+
 void FileStorage::RemoveAll() {
+    std::unique_lock disk_write_lock(disk_write_mutex_);
     // Explicit physical reset: this bypasses per-object metadata protection
     // and clears every tenant sharing the backend. Generic Client::RemoveAll
     // must not request it; callers must ensure no live object depends on the
@@ -1743,8 +1850,11 @@ void FileStorage::ClientBufferGCThreadFunc() {
                 }
             }
         }
-        std::this_thread::sleep_for(
-            std::chrono::seconds(config_.client_buffer_gc_interval_seconds));
+        std::unique_lock wait_lock(worker_wait_mutex_);
+        worker_wait_cv_.wait_for(
+            wait_lock,
+            std::chrono::seconds(config_.client_buffer_gc_interval_seconds),
+            [this] { return !client_buffer_gc_running_.load(); });
     }
     LOG(INFO) << "action=client_buffer_gc_thread_stopped";
 }
@@ -1805,9 +1915,8 @@ tl::expected<void, ErrorCode> FileStorage::ReRegisterOffloadedObjects() {
                 for (auto& metadata : metadatas) {
                     metadata.transport_endpoint = local_rpc_addr_;
                 }
-                auto tasks = BuildOffloadTasksFromStorageKeys(keys, metadatas);
                 auto add_object_result =
-                    client_->NotifyOffloadSuccess(tasks, metadatas);
+                    RecoverOffloadedObjects(keys, metadatas);
                 if (!add_object_result) {
                     total_failures++;
                     LOG(ERROR)

@@ -7,6 +7,7 @@
 #include <unordered_set>
 
 #include "client_service.h"
+#include "cold_write_journal.h"
 #include "client_buffer.h"
 #include "storage_backend.h"
 #include "pinned_buffer_pool.h"
@@ -21,10 +22,23 @@ class FileStorage {
                 const std::string& local_rpc_addr,
                 SsdMetric* ssd_metric = nullptr);
     ~FileStorage();
+    void Shutdown();
 
     tl::expected<void, ErrorCode> Init();
 
     void RemoveAll();
+    tl::expected<void, ErrorCode> PrepareColdWrite(
+        const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> RecoverOffloadedObjects(
+        const std::vector<std::string>& keys,
+        std::vector<StorageObjectMetadata>& metadatas);
+
+    tl::expected<int64_t, ErrorCode> OffloadStream(
+        const std::string& key, uint64_t size,
+        const StorageBackendInterface::StreamWriter& writer,
+        std::function<ErrorCode(const std::vector<std::string>&,
+                                std::vector<StorageObjectMetadata>&)>
+            complete);
 
     /**
      * @brief Deregisters this store's disk tier from the master, then waits out
@@ -419,12 +433,17 @@ class FileStorage {
     std::unordered_map<std::string, OffloadTaskItem>
         deferred_task_by_storage_key_;
 
+    std::unique_ptr<ColdWriteJournal> cold_write_journal_;
+    std::mutex disk_write_mutex_;
     mutable Mutex offloading_mutex_;
     bool GUARDED_BY(offloading_mutex_) enable_offloading_;
     std::atomic<bool> heartbeat_running_;
     std::thread heartbeat_thread_;
     std::atomic<bool> client_buffer_gc_running_;
     std::thread client_buffer_gc_thread_;
+    std::mutex shutdown_mutex_;
+    std::mutex worker_wait_mutex_;
+    std::condition_variable worker_wait_cv_;
     std::future<void> rescan_future_;
     std::atomic<bool> metadata_resync_pending_{false};
     // Set by DrainLocalDiskSegment under offloading_mutex_. Stops the

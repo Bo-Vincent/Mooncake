@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cold_write.h"
+
 #include <atomic>
 #include <boost/functional/hash.hpp>
 #include <condition_variable>
@@ -107,6 +109,24 @@ class Client {
     };
     ReadReplicaSelector MakeReadReplicaSelector() const {
         return ReadReplicaSelector(this);
+    }
+
+    ErrorCode ReadColdStagingChunk(const std::string& endpoint,
+                                   uint64_t address, void* destination,
+                                   size_t size);
+    using ColdWriteHandler = std::function<tl::expected<void, ErrorCode>(
+        const std::string&, const Replica::Descriptor&,
+        const std::vector<Slice>&, std::optional<uint64_t>)>;
+    void SetColdWriteHandler(ColdWriteHandler handler) {
+        cold_write_handler_ = std::move(handler);
+    }
+    tl::expected<void, ErrorCode> ValidateColdWrite(
+        const ColdWriteRequest& request) {
+        return master_client_.ValidateColdWrite(request);
+    }
+    tl::expected<void, ErrorCode> FinishColdWrite(
+        const ColdWriteRequest& request) {
+        return master_client_.FinishColdWrite(request);
     }
 
     using WriteBufferStager =
@@ -312,9 +332,10 @@ class Client {
      * @param config Replication configuration
      * @return ErrorCode indicating success/failure
      */
-    tl::expected<void, ErrorCode> Put(const ObjectKey& key,
-                                      std::vector<Slice>& slices,
-                                      const ReplicateConfig& config);
+    tl::expected<void, ErrorCode> Put(
+        const ObjectKey& key, std::vector<Slice>& slices,
+        const ReplicateConfig& config,
+        const WriteBufferStager& prepare_memory = {});
 
     /**
      * @brief Batch put data with replication
@@ -639,7 +660,8 @@ class Client {
      * @brief Mounts a local disk segment into the master.
      * @param enable_offloading If true, enables offloading (write-to-file).
      */
-    tl::expected<void, ErrorCode> MountLocalDiskSegment(bool enable_offloading);
+    tl::expected<void, ErrorCode> MountLocalDiskSegment(
+        bool enable_offloading, const std::string& write_endpoint = "");
 
     /**
      * @brief Deregisters this client's local disk segment from the master.
@@ -834,6 +856,9 @@ class Client {
     [[nodiscard]] std::string GetTransportEndpoint() {
         return transfer_engine_->getLocalIpAndPort();
     }
+
+    std::function<tl::expected<void, ErrorCode>()> WeightMemoryRelease(
+        void* address) const;
 
     [[nodiscard]] const std::string& GetProtocol() const { return protocol_; }
 
@@ -1184,6 +1209,7 @@ class Client {
     std::unordered_map<std::string, std::shared_ptr<GatherPeer>>
         gather_clients_;
     MasterClient master_client_;
+    ColdWriteHandler cold_write_handler_;
     std::unique_ptr<TransferSubmitter> transfer_submitter_;
     // NoF initiator injected by RealClient; nullptr when NoF is unavailable.
     std::shared_ptr<NVMeoFInitiator> nof_initiator_;

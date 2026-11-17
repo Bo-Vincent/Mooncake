@@ -1,5 +1,10 @@
 #pragma once
 
+#include <array>
+#include <thread>
+
+#include "cold_write.h"
+
 #include <atomic>
 #include <boost/lockfree/queue.hpp>
 #include <chrono>
@@ -923,6 +928,18 @@ class RealClient : public PyClient {
 
     tl::expected<PingResponse, ErrorCode> ping(const UUID &client_id);
 
+    async_simple::coro::Lazy<tl::expected<void, ErrorCode>> cold_write_begin(
+        const ColdWriteRequest &request);
+    async_simple::coro::Lazy<tl::expected<void, ErrorCode>> cold_write_chunk(
+        const ColdWriteChunk &chunk);
+    async_simple::coro::Lazy<tl::expected<void, ErrorCode>> cold_write_cancel(
+        const ColdWriteRequest &request);
+    async_simple::coro::Lazy<tl::expected<void, ErrorCode>> cold_write_finish(
+        const ColdWriteRequest &request);
+    tl::expected<void, ErrorCode> WriteColdObject(
+        const std::string &key, const Replica::Descriptor &replica,
+        const std::vector<Slice> &slices, std::optional<uint64_t> checksum);
+
     async_simple::coro::Lazy<
         tl::expected<BatchGetOffloadObjectResponse, ErrorCode>>
     batch_get_offload_object(const std::vector<std::string> &keys,
@@ -1351,6 +1368,11 @@ class RealClient : public PyClient {
     tl::expected<std::string, ErrorCode> StartEmbeddedMaster(
         bool enable_ssd_offload);
 
+    void InitColdWrites();
+    void StopColdWrites();
+    struct ColdWriteSession;
+    struct ColdWriteRuntime;
+    std::shared_ptr<ColdWriteRuntime> cold_write_runtime_;
     std::unique_ptr<class EmbeddedMaster> embedded_master_;
 
     struct SessionRangeReadRequest {
