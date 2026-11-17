@@ -3877,6 +3877,11 @@ TEST_F(MasterServiceHATest,
             .payload_group_id = {},
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
@@ -3992,6 +3997,11 @@ TEST_F(MasterServiceHATest,
         .payload_group_id = {},
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
         .affinity_summary =
             WeightAffinitySummary{
                 .affinity_count = 2,
@@ -4035,6 +4045,11 @@ TEST_F(MasterServiceHATest, WeightMetadataRejectsOpLogSubmissionFailure) {
         .payload_group_id = {},
         .expected_payload_count = 2,
         .expected_logical_bytes = 2048,
+        .policy =
+            WeightStoragePolicy{
+                .preferred_residency = WeightResidencyState::HOT,
+                .migration_mode = WeightMigrationMode::MANUAL,
+            },
         .affinity_summary =
             WeightAffinitySummary{
                 .affinity_count = 2,
@@ -4076,6 +4091,11 @@ TEST_F(MasterServiceHATest,
             .identity = identity,
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
@@ -4198,6 +4218,11 @@ TEST_F(MasterServiceHATest,
             .identity = identity,
             .expected_payload_count = 2,
             .expected_logical_bytes = 2048,
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = 2,
@@ -4253,6 +4278,11 @@ TEST_F(MasterServiceHATest,
             .payload_group_id = {},
             .expected_payload_count = payload_count,
             .expected_logical_bytes = logical_bytes,
+            .policy =
+                WeightStoragePolicy{
+                    .preferred_residency = WeightResidencyState::HOT,
+                    .migration_mode = WeightMigrationMode::MANUAL,
+                },
             .affinity_summary =
                 WeightAffinitySummary{
                     .affinity_count = payload_count,

@@ -267,13 +267,17 @@ TEST_F(MasterServiceWeightManagementTest, RejectsWrongManifestType) {
     PutObject(service, client_id, "payload-a",
               importing.manifest.payload_group_id, ObjectDataType::WEIGHT,
               1024);
-    PutObject(service, client_id, ManifestKey(),
-              importing.manifest.payload_group_id, ObjectDataType::WEIGHT, 128);
-
-    auto result = service.CommitWeightImport(
-        CommitRequest(importing, {"payload-a"}, 1024));
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.with_hard_pin = true;
+    config.data_type = ObjectDataType::WEIGHT;
+    config.group_ids =
+        std::vector<std::string>{importing.manifest.payload_group_id};
+    config.residency_affinity_ids = std::vector<std::string>{ManifestKey()};
+    auto result = service.PutStart(client_id, ManifestKey(),
+                                   TenantId::Default(), 128, config);
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(WeightManagementError::CONFLICT, result.error());
+    EXPECT_EQ(ErrorCode::INVALID_PARAMS, result.error());
 }
 
 TEST_F(MasterServiceWeightManagementTest, RejectsManifestInWrongGroup) {

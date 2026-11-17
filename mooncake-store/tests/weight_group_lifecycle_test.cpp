@@ -263,30 +263,23 @@ TEST_F(WeightGroupLifecycleTest,
     }
 }
 
-TEST_F(WeightGroupLifecycleTest, DefaultMixedImportRemainsObservedHot) {
+TEST_F(WeightGroupLifecycleTest, DefaultMixedImportRejectsMissingLayout) {
     MasterService service;
-    [[maybe_unused]] const auto context = PrepareSimpleSegment(service);
-    const UUID client_id = generate_uuid();
-    auto ready = PublishReadyWithPayloads(
-        service, client_id,
-        {{"payload-a", 1024, "affinity-a"}, {"payload-b", 1024, "affinity-b"}},
-        std::nullopt);
-    ASSERT_EQ(WeightResidencyState::HOT, ready.residency);
-    ASSERT_EQ(1.0, ready.observed_hot_ratio);
-    ASSERT_TRUE(ready.operation_id.has_value());
-    auto reconciled =
-        service.ReconcileWeightRevision({.identity = ready.identity});
-    ASSERT_TRUE(reconciled.has_value());
-    EXPECT_EQ(WeightResidencyState::HOT, reconciled->residency);
-    EXPECT_EQ(1.0, reconciled->observed_hot_ratio);
-    EXPECT_EQ(ready.operation_id, reconciled->operation_id);
-    auto operation =
-        service.QueryWeightOperation({.operation_id = *ready.operation_id});
-    ASSERT_TRUE(operation.has_value());
-    EXPECT_EQ(1, operation->processed_units);
-    EXPECT_EQ(1024, operation->processed_bytes);
-    EXPECT_EQ(2, operation->total_units);
-    EXPECT_EQ(2048, operation->total_bytes);
+    const std::vector<WeightAffinityMappingEntry> mapping{
+        {"payload-a", 1024, "affinity-a"}, {"payload-b", 1024, "affinity-b"}};
+    auto importing = service.BeginWeightImport(BeginWeightImportRequest{
+        .identity = Identity(),
+        .expected_payload_count = mapping.size(),
+        .expected_logical_bytes = 2048,
+        .affinity_summary = {.affinity_count = 2,
+                             .affinity_digest =
+                                 ComputeWeightAffinityMappingSha256(mapping)},
+    });
+    ASSERT_FALSE(importing.has_value());
+    EXPECT_EQ(WeightManagementError::INVALID_ARGUMENT, importing.error());
+    auto revision = service.GetWeightRevision({.identity = Identity()});
+    ASSERT_FALSE(revision.has_value());
+    EXPECT_EQ(WeightManagementError::NOT_FOUND, revision.error());
 }
 
 TEST_F(WeightGroupLifecycleTest,
