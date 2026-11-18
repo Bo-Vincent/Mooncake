@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 
 #include "rpc_types.h"
@@ -14,6 +15,13 @@ tl::expected<void, ErrorCode> WriteColdLocalSlices(
 inline constexpr uint64_t kColdWriteChunkBytes = 4 * 1024 * 1024;
 inline constexpr size_t kColdWriteSlots = 8;
 
+struct ColdWriteBuffer {
+    int fd{-1};
+    uint64_t size{0};
+    std::shared_ptr<std::atomic<uint64_t>> reserved_bytes;
+    ~ColdWriteBuffer();
+};
+
 struct ColdWriteRequest {
     UUID writer;
     UUID owner;
@@ -23,9 +31,10 @@ struct ColdWriteRequest {
     uint64_t size{0};
     int64_t deadline_ms{0};
     std::optional<uint64_t> checksum;
+    bool ranged{false};
 };
 YLT_REFL(ColdWriteRequest, writer, owner, reservation, tenant, key, size,
-         deadline_ms, checksum);
+         deadline_ms, checksum, ranged);
 
 struct ColdWriteChunk {
     ColdWriteRequest request;

@@ -3901,15 +3901,6 @@ Client::StartBatchPutForSizes(const std::vector<std::string>& keys,
             results[i] = tl::unexpected(ops[i].result.error());
             continue;
         }
-        if (std::any_of(ops[i].replicas.begin(), ops[i].replicas.end(),
-                        [](const auto& replica) {
-                            return replica.is_local_disk_replica();
-                        })) {
-            auto ignored =
-                master_client_.PutRevoke(ops[i].key, ReplicaType::LOCAL_DISK);
-            results[i] = tl::make_unexpected(ErrorCode::NOT_SUPPORTED);
-            continue;
-        }
         results[i] = std::move(ops[i].replicas);
     }
     return results;

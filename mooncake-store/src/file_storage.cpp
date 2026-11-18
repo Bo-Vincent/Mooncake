@@ -1136,6 +1136,48 @@ tl::expected<void, ErrorCode> FileStorage::Heartbeat() {
     return {};
 }
 
+ColdWriteBuffer::~ColdWriteBuffer() {
+    if (fd >= 0) close(fd);
+    if (reserved_bytes) reserved_bytes->fetch_sub(size);
+}
+
+tl::expected<std::shared_ptr<ColdWriteBuffer>, ErrorCode>
+FileStorage::CreateColdWriteBuffer(uint64_t size) {
+    const auto limit =
+        static_cast<uint64_t>(std::max<int64_t>(0, config_.total_size_limit));
+    auto reserved = cold_staging_bytes_->load();
+    do {
+        if (size == 0 || size > limit || reserved > limit - size)
+            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+    } while (
+        !cold_staging_bytes_->compare_exchange_weak(reserved, reserved + size));
+    auto buffer = std::make_shared<ColdWriteBuffer>();
+    buffer->size = size;
+    buffer->reserved_bytes = cold_staging_bytes_;
+    for (const auto& root : ResolveOffloadDiskPaths(config_.storage_filepath)) {
+        std::error_code ec;
+        const auto space = std::filesystem::space(root, ec);
+        // Reserve the spool now and leave room for its native-format commit.
+        if (ec || size > space.available / 2) continue;
+        auto pattern =
+            (std::filesystem::path(root) / ".cold-ranges-XXXXXX").string();
+        const int fd = mkstemp(pattern.data());
+        if (fd < 0) continue;
+        if (unlink(pattern.c_str()) != 0) {
+            close(fd);
+            continue;
+        }
+        const int error = posix_fallocate(fd, 0, size);
+        if (error != 0) {
+            close(fd);
+            continue;
+        }
+        buffer->fd = fd;
+        return buffer;
+    }
+    return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+}
+
 tl::expected<void, ErrorCode> FileStorage::PrepareColdWrite(
     const ColdWriteRequest& request) {
     if (!cold_write_journal_)

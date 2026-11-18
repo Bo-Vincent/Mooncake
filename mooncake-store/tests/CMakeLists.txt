@@ -661,6 +661,8 @@ target_link_libraries(hf3fs_resource_manager_test PRIVATE gtest gtest_main
 add_test(NAME hf3fs_resource_manager_test COMMAND hf3fs_resource_manager_test)
 
 add_store_test(weight_cold_import_e2e_test weight_cold_import_e2e_test.cpp)
+target_link_options(weight_cold_import_e2e_test PRIVATE
+                    "-Wl,--wrap=posix_memalign")
 add_store_test(weight_cold_process_e2e_test weight_cold_process_e2e_test.cpp)
 set_tests_properties(weight_cold_process_e2e_test PROPERTIES TIMEOUT 180)
 set_tests_properties(weight_cold_import_e2e_test PROPERTIES TIMEOUT 420)

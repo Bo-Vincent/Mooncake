@@ -27,6 +27,8 @@ class FileStorage {
     tl::expected<void, ErrorCode> Init();
 
     void RemoveAll();
+    tl::expected<std::shared_ptr<ColdWriteBuffer>, ErrorCode>
+    CreateColdWriteBuffer(uint64_t size);
     tl::expected<void, ErrorCode> PrepareColdWrite(
         const ColdWriteRequest& request);
     tl::expected<void, ErrorCode> RecoverOffloadedObjects(
@@ -434,6 +436,8 @@ class FileStorage {
         deferred_task_by_storage_key_;
 
     std::unique_ptr<ColdWriteJournal> cold_write_journal_;
+    std::shared_ptr<std::atomic<uint64_t>> cold_staging_bytes_{
+        std::make_shared<std::atomic<uint64_t>>(0)};
     std::mutex disk_write_mutex_;
     mutable Mutex offloading_mutex_;
     bool GUARDED_BY(offloading_mutex_) enable_offloading_;

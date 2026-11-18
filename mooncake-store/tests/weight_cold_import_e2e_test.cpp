@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cerrno>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -11,6 +12,20 @@
 #include "real_client.h"
 #include "test_server_helpers.h"
 #include "weight_residency_planner.h"
+
+namespace {
+thread_local bool fail_cold_source_allocation = false;
+}
+
+extern "C" int __real_posix_memalign(void**, size_t, size_t);
+extern "C" int __wrap_posix_memalign(void** pointer, size_t alignment,
+                                     size_t size) {
+    if (fail_cold_source_allocation && size == 4 * 1024 * 1024) {
+        fail_cold_source_allocation = false;
+        return ENOMEM;
+    }
+    return __real_posix_memalign(pointer, alignment, size);
+}
 
 namespace mooncake::testing {
 namespace {
@@ -56,7 +71,9 @@ class WeightColdImportE2ETest : public ::testing::Test {
 
     void Import(WeightResidencyState target, bool batch, bool local,
                 const std::vector<size_t>& sizes, size_t replicas = 1,
-                bool paired_affinities = false, bool concurrent = false) {
+                bool paired_affinities = false, bool concurrent = false,
+                bool session = false, bool revoke = false,
+                bool fail_source_allocation = false) {
         ASSERT_TRUE(owner_);
         const std::string hot_control(64 * 1024, 'h');
         ASSERT_EQ(0, source_->put("hot-control", hot_control));
@@ -90,6 +107,11 @@ class WeightColdImportE2ETest : public ::testing::Test {
             total += sizes[index];
             payloads_[index].assign(sizes[index],
                                     static_cast<char>('a' + index));
+            if (session) {
+                for (size_t offset = 0; offset < sizes[index]; ++offset)
+                    payloads_[index][offset] =
+                        static_cast<char>((offset * 17 + index) % 251);
+            }
             addresses.push_back(payloads_[index].data());
             ASSERT_EQ(0,
                       source_->register_buffer(addresses.back(), sizes[index]));
@@ -112,7 +134,76 @@ class WeightColdImportE2ETest : public ::testing::Test {
         config.replica_num = replicas;
         config.data_type = ObjectDataType::WEIGHT;
         auto* writer = local ? owner_.get() : source_.get();
-        if (batch) {
+        if (fail_source_allocation) {
+            config.group_ids = std::vector<std::string>{group};
+            config.residency_affinity_ids =
+                std::vector<std::string>{affinity_ids[0]};
+            fail_cold_source_allocation = true;
+            EXPECT_LT(writer->put_from(keys[0], addresses[0], sizes[0], config),
+                      0);
+            EXPECT_FALSE(fail_cold_source_allocation);
+            EXPECT_LT(source_->get_into(keys[0], addresses[0], sizes[0]), 0);
+            config.residency_affinity_ids =
+                std::vector<std::string>{affinity_ids[1]};
+            EXPECT_EQ(writer->put_from(keys[1], addresses[1], sizes[1], config),
+                      0);
+            return;
+        }
+        if (session) {
+            config.group_ids = std::vector<std::string>(keys.size(), group);
+            config.residency_affinity_ids = affinity_ids;
+            auto starts = writer->batch_put_session_start(keys, sizes, config);
+            ASSERT_EQ(starts.size(), keys.size());
+            for (auto status : starts) ASSERT_EQ(status, 0);
+            for (size_t i = 0; i < keys.size(); ++i) {
+                const size_t half = sizes[i] / 2;
+                auto tail = writer->batch_put_from_multi_buffer_ranges(
+                    {keys[i]}, {{static_cast<char*>(addresses[i]) + half}},
+                    {{sizes[i] - half}}, {{half}});
+                ASSERT_EQ(tail.size(), 1u);
+                ASSERT_EQ(tail[0], sizes[i] - half);
+                if (target == WeightResidencyState::COLD) {
+                    auto overlap = writer->batch_put_from_multi_buffer_ranges(
+                        {keys[i]}, {{static_cast<char*>(addresses[i]) + half}},
+                        {{sizes[i] - half}}, {{half}});
+                    ASSERT_EQ(overlap.size(), 1u);
+                    ASSERT_EQ(overlap[0], sizes[i] - half);
+                }
+                auto invalid = writer->batch_put_from_multi_buffer_ranges(
+                    {keys[i]}, {{addresses[i]}}, {{2}}, {{sizes[i] - 1}});
+                ASSERT_EQ(invalid.size(), 1u);
+                EXPECT_LT(invalid[0], 0);
+            }
+            if (revoke) {
+                auto revoked = writer->batch_put_session_revoke(keys);
+                ASSERT_EQ(revoked.size(), keys.size());
+                for (auto status : revoked) ASSERT_EQ(status, 0);
+                auto late = writer->batch_put_from_multi_buffer_ranges(
+                    {keys.front()}, {{addresses.front()}}, {{1}}, {{0}});
+                ASSERT_EQ(late.size(), 1u);
+                EXPECT_LT(late[0], 0);
+                return;
+            }
+            if (target == WeightResidencyState::COLD) {
+                auto holes = writer->batch_put_session_end(keys);
+                for (auto status : holes)
+                    EXPECT_EQ(status, toInt(ErrorCode::INVALID_WRITE));
+            }
+            for (size_t i = 0; i < keys.size(); ++i) {
+                const size_t half = sizes[i] / 2;
+                const size_t quarter = half / 2;
+                auto head = writer->batch_put_from_multi_buffer_ranges(
+                    {keys[i]},
+                    {{static_cast<char*>(addresses[i]) + quarter,
+                      addresses[i]}},
+                    {{half - quarter, quarter}}, {{quarter, 0}});
+                ASSERT_EQ(head.size(), 1u);
+                ASSERT_EQ(head[0], half);
+            }
+            auto ends = writer->batch_put_session_end(keys);
+            ASSERT_EQ(ends.size(), keys.size());
+            for (auto status : ends) ASSERT_EQ(status, 0);
+        } else if (batch) {
             config.group_ids = std::vector<std::string>(keys.size(), group);
             config.residency_affinity_ids = affinity_ids;
             auto result =
@@ -202,6 +293,20 @@ class WeightColdImportE2ETest : public ::testing::Test {
                 static_cast<int64_t>(actual.size()),
                 source_->get_into(keys[index], actual.data(), actual.size()));
             EXPECT_EQ(actual, payloads_[index]);
+            if (session) {
+                auto starts = source_->batch_get_session_start({keys[index]});
+                ASSERT_EQ(starts.size(), 1u);
+                ASSERT_EQ(starts[0], 0);
+                std::fill(actual.begin(), actual.end(), '\0');
+                const size_t half = actual.size() / 2;
+                auto ranges = source_->batch_get_into_multi_buffer_ranges(
+                    {keys[index]}, {{actual.data() + half, actual.data()}},
+                    {{actual.size() - half, half}}, {{half, 0}});
+                ASSERT_EQ(ranges.size(), 1u);
+                EXPECT_EQ(ranges[0], actual.size());
+                EXPECT_EQ(actual, payloads_[index]);
+                EXPECT_EQ(source_->batch_get_session_end({keys[index]}), 0);
+            }
             EXPECT_EQ(0, source_->unregister_buffer(actual.data()));
         }
         auto manifest = source_->batch_query({MakeWeightManifestKey(identity)});
@@ -226,6 +331,37 @@ class WeightColdImportE2ETest : public ::testing::Test {
     std::vector<std::string> payloads_;
     std::vector<void*> registered_;
 };
+
+TEST_F(WeightColdImportE2ETest, SourceAllocationFailureCancelsOwnerStream) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::COLD, false, false, {4 * kMiB, 4 * kMiB}, 1,
+           false, false, false, false, true);
+}
+
+TEST_F(WeightColdImportE2ETest,
+       RemoteRangedSessionSupportsMultipleColdObjects) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::COLD, false, false, {12 * kMiB, 12 * kMiB}, 1,
+           false, false, true);
+}
+
+TEST_F(WeightColdImportE2ETest, RangedSessionRevokeFencesFurtherWrites) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::COLD, false, false, {12 * kMiB}, 1, false,
+           false, true, true);
+}
+
+TEST_F(WeightColdImportE2ETest, LocalRangedSessionSupportsColdObjects) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::COLD, false, true, {12 * kMiB}, 1, false,
+           false, true);
+}
+
+TEST_F(WeightColdImportE2ETest, RangedSessionSupportsMixedPlacement) {
+    Start(16 * kMiB);
+    Import(WeightResidencyState::MIXED, false, false, {8 * kMiB, 24 * kMiB}, 1,
+           false, false, true);
+}
 
 TEST_F(WeightColdImportE2ETest, RemoteScalarBypassesHotSegmentCapacity) {
     Start(16 * kMiB);

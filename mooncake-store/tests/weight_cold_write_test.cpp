@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "real_client.h"
+#include "file_storage.h"
 #include "test_server_helpers.h"
 
 namespace mooncake::testing {
@@ -96,6 +97,61 @@ class WeightColdWriteTest : public ::testing::Test {
     std::string endpoint_;
     std::filesystem::path directory_;
 };
+
+TEST(ColdWriteBufferTest, EnforcesAndReleasesDiskBudgetOnEveryPath) {
+    auto pattern =
+        (std::filesystem::current_path() / "cold-buffer-XXXXXX").string();
+    ASSERT_NE(mkdtemp(pattern.data()), nullptr);
+    const std::filesystem::path path(pattern);
+    {
+        auto config = FileStorageConfig::FromEnvironment();
+        config.storage_filepath = path.string();
+        config.local_buffer_size = 1024 * 1024;
+        config.use_uring = false;
+        FileStorage storage(config, nullptr, "");
+        storage.config_.total_size_limit = 8192;
+        auto first = storage.CreateColdWriteBuffer(4096);
+        auto second = storage.CreateColdWriteBuffer(4096);
+        ASSERT_TRUE(first);
+        ASSERT_TRUE(second);
+        auto full = storage.CreateColdWriteBuffer(1);
+        ASSERT_FALSE(full);
+        EXPECT_EQ(full.error(), ErrorCode::NO_AVAILABLE_HANDLE);
+        first->reset();
+        auto replacement = storage.CreateColdWriteBuffer(4096);
+        ASSERT_TRUE(replacement);
+        replacement->reset();
+        second->reset();
+        std::filesystem::remove_all(path);
+        EXPECT_FALSE(storage.CreateColdWriteBuffer(8192));
+        std::filesystem::create_directory(path);
+        EXPECT_TRUE(storage.CreateColdWriteBuffer(8192));
+    }
+    std::filesystem::remove_all(path);
+}
+
+TEST_F(WeightColdWriteTest,
+       RangedSessionsExpireAndRevokeWithoutHoldingAdmission) {
+    ClientRequester requester;
+    const auto deadline = NowMs() + 2000;
+    for (unsigned index = 0; index < 8; ++index) {
+        ASSERT_NO_FATAL_FAILURE(Reserve(deadline, index));
+        request_.ranged = true;
+        ASSERT_TRUE(requester.cold_write_begin(endpoint_, request_));
+    }
+    ASSERT_NO_FATAL_FAILURE(Reserve(NowMs() + 30000, 8));
+    request_.ranged = true;
+    auto full = requester.cold_write_begin(endpoint_, request_);
+    ASSERT_FALSE(full);
+    EXPECT_EQ(full.error(), ErrorCode::NO_AVAILABLE_HANDLE);
+    std::this_thread::sleep_until(std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(deadline + 10)));
+    ASSERT_TRUE(requester.cold_write_begin(endpoint_, request_));
+    EXPECT_TRUE(requester.cold_write_cancel(endpoint_, request_));
+    EXPECT_TRUE(requester.cold_write_cancel(endpoint_, request_));
+    auto ended = requester.cold_write_finish(endpoint_, request_);
+    EXPECT_FALSE(ended);
+}
 
 TEST_F(WeightColdWriteTest, ExpiredOwnerRequestCannotBeginOrPublish) {
     ASSERT_NO_FATAL_FAILURE(Reserve(NowMs() - 1));
