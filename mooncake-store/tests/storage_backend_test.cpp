@@ -6416,6 +6416,90 @@ TEST_F(StorageBackendTest, MultiDiskValidateRejectsNonPositiveQuotaEntry) {
 
 //-----------------------------------------------------------------------------
 
+TEST_F(StorageBackendTest, StreamFailureCheckpointsCommittedEvictions) {
+    auto config = MakeOffsetPersistConfig(data_path, 64 * 1024);
+    OffsetAllocatorBackendConfig backend_config;
+    backend_config.eviction_policy = OffsetEvictionPolicy::FIFO;
+    backend_config.persist_mode = OffsetPersistMode::kStrict;
+    std::vector<std::string> evicted;
+    {
+        OffsetAllocatorStorageBackend backend(config, backend_config);
+        ASSERT_TRUE(backend.Init());
+        std::vector<std::unique_ptr<char[]>> buffers;
+        for (const auto& key : {"victim-a", "victim-b", "victim-c"}) {
+            auto batch =
+                MakeSingleKeyBatch(key, std::string(4096, 'v'), buffers);
+            ASSERT_TRUE(backend.BatchOffload(batch, NoopCompleteHandler(),
+                                             AcceptAllEvictionHandler()));
+        }
+        backend.SetSkipFinalCheckpointForTest();
+        bool published = false;
+        auto result = backend.OffloadStream(
+            "failed-stream", 48 * 1024,
+            [](int, uint64_t, uint64_t) -> tl::expected<void, ErrorCode> {
+                return tl::make_unexpected(
+                    ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+            },
+            [&](const auto&, auto&) {
+                published = true;
+                return ErrorCode::OK;
+            },
+            [&](const std::vector<std::string>& keys)
+                -> tl::expected<void, ErrorCode> {
+                evicted.insert(evicted.end(), keys.begin(), keys.end());
+                return {};
+            });
+        ASSERT_FALSE(result);
+        EXPECT_EQ(result.error(), ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+        EXPECT_FALSE(published);
+        ASSERT_EQ(evicted.size(), 3U);
+        for (const auto& key : evicted) EXPECT_FALSE(*backend.IsExist(key));
+    }
+    OffsetAllocatorStorageBackend recovered(config, backend_config);
+    ASSERT_TRUE(recovered.Init());
+    for (const auto& key : evicted)
+        EXPECT_FALSE(*recovered.IsExist(key)) << key;
+    EXPECT_FALSE(*recovered.IsExist("failed-stream"));
+}
+
+TEST_F(StorageBackendTest, StreamRecoveryCleansOrphansWithoutEviction) {
+    FileStorageConfig config;
+    config.storage_filepath = data_path;
+    FilePerKeyConfig backend_config;
+    backend_config.fsdir = "stream-recovery";
+    backend_config.enable_eviction = false;
+    const std::string value = "committed-value";
+    {
+        StorageBackendAdaptor backend(config, backend_config);
+        ASSERT_TRUE(backend.Init());
+        ASSERT_TRUE(backend.ScanMeta(NoopCompleteHandler()));
+        ASSERT_TRUE(backend.OffloadStream(
+            "committed", value.size(),
+            [&](int fd, uint64_t offset,
+                uint64_t size) -> tl::expected<void, ErrorCode> {
+                if (pwrite(fd, value.data(), size, offset) !=
+                    static_cast<ssize_t>(size))
+                    return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+                return {};
+            },
+            NoopCompleteHandler()));
+    }
+    const auto temporary = fs::path(data_path) / backend_config.fsdir /
+                           ".streaming" / "interrupted";
+    fs::create_directories(temporary.parent_path());
+    std::ofstream(temporary) << "partial-payload";
+    StorageBackendAdaptor recovered(config, backend_config);
+    ASSERT_TRUE(recovered.Init());
+    ASSERT_TRUE(recovered.ScanMeta(NoopCompleteHandler()));
+    EXPECT_FALSE(fs::exists(temporary));
+    EXPECT_FALSE(*recovered.IsExist("interrupted"));
+    std::string output(value.size(), '\0');
+    std::unordered_map<std::string, Slice> reads{
+        {"committed", {output.data(), output.size()}}};
+    ASSERT_TRUE(recovered.BatchLoad(reads));
+    EXPECT_EQ(output, value);
+}
+
 TEST_F(StorageBackendTest, StreamWriteNativeFormatsRecoveryAndCancellation) {
     constexpr uint64_t size = 5 * 1024 * 1024 + 37;
     for (int kind = 0; kind != 3; ++kind) {

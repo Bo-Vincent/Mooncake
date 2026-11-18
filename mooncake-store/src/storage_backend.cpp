@@ -86,13 +86,16 @@ bool StreamCompletionUnknown(ErrorCode code) {
     return code == ErrorCode::RPC_FAIL || code == ErrorCode::RPC_TIMEOUT;
 }
 
-// Open a buffered descriptor for small format prefixes and bounded checksum
-// I/O. The streaming writer may reopen this same file with O_DIRECT for cuFile.
+// Use a buffered descriptor for format prefixes and the streaming callback.
 tl::expected<size_t, ErrorCode> WriteStreamFile(
     StorageFile& file, const std::vector<iovec>& iovs, uint64_t offset,
     const StorageBackendInterface::StreamWriter& writer) {
+    auto fail = [](ErrorCode code, int err) {
+        errno = err;
+        return tl::make_unexpected(code);
+    };
     FdGuard fd(open(file.filename().c_str(), O_RDWR));
-    if (fd.get() < 0) return tl::make_unexpected(ErrorCode::FILE_OPEN_FAIL);
+    if (fd.get() < 0) return fail(ErrorCode::FILE_OPEN_FAIL, errno);
     uint64_t cursor = offset;
     for (const auto& io : iovs) {
         if (!io.iov_base) {
@@ -105,15 +108,17 @@ tl::expected<size_t, ErrorCode> WriteStreamFile(
                                    static_cast<const char*>(io.iov_base) + done,
                                    io.iov_len - done, cursor + done);
                 if (n < 0 && errno == EINTR) continue;
-                if (n <= 0)
-                    return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+                if (n <= 0) {
+                    return fail(ErrorCode::FILE_WRITE_FAIL,
+                                n == 0 ? EIO : errno);
+                }
                 done += n;
             }
         }
         cursor += io.iov_len;
     }
     if (fdatasync(fd.get()) != 0) {
-        return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+        return fail(ErrorCode::FILE_WRITE_FAIL, errno);
     }
     return cursor - offset;
 }
@@ -148,12 +153,6 @@ bool StorageBackend::IsFilePendingEviction(const std::string& path) const {
 }
 
 tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
-    // Skip eviction initialization if disabled
-    if (!IsEvictionEnabled()) {
-        initialized_.store(true, std::memory_order_release);
-        return {};
-    }
-
     if (initialized_.load(std::memory_order_acquire)) {
         LOG(WARNING) << "StorageBackend is already initialized. Skipping.";
         return {};
@@ -172,14 +171,18 @@ tl::expected<void, ErrorCode> StorageBackend::Init(uint64_t quota_bytes = 0) {
             return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
         }
     }
+    // Incomplete streams live outside the key fanout and are never recovered.
+    fs::remove_all(storage_root / ".streaming", ec);
+    if (ec) return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
+    if (!IsEvictionEnabled()) {
+        initialized_.store(true, std::memory_order_release);
+        return {};
+    }
     const auto space_info = fs::space(storage_root, ec);
     if (ec) {
         LOG(ERROR) << "Init: Failed to get disk space info: " << ec.message();
         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
     }
-    // Incomplete streams live outside the key fanout and are never recovered.
-    fs::remove_all(storage_root / ".streaming", ec);
-    if (ec) return tl::make_unexpected(ErrorCode::FILE_WRITE_FAIL);
     LOG(INFO) << "Reconstructing storage state from disk at: " << storage_root;
     std::vector<fs::directory_entry> existing_files;
     try {
@@ -5699,6 +5702,7 @@ OffsetAllocatorStorageBackend::BatchOffloadImpl(
     // Prepared victims are held here until the master accepts their removal.
     // Their allocation handles prevent reuse before notification succeeds.
     PendingEviction pending_eviction;
+    std::optional<ErrorCode> stream_error;
 
     for (const auto& [key, slices] : batch_object) {
         if (slices.empty()) continue;
@@ -5922,7 +5926,10 @@ OffsetAllocatorStorageBackend::BatchOffloadImpl(
             if (!sync) write_result = tl::make_unexpected(sync.error());
         }
         if (!write_result) {
-            if (writer) return tl::make_unexpected(write_result.error());
+            if (writer) {
+                stream_error = write_result.error();
+                break;
+            }
             LOG(ERROR) << "Failed to write record for key: " << key
                        << ", error: " << write_result.error();
             continue;
@@ -6074,6 +6081,9 @@ OffsetAllocatorStorageBackend::BatchOffloadImpl(
             }
         }
     }
+
+    // A failed stream can still have committed evictions to checkpoint above.
+    if (stream_error) return tl::make_unexpected(*stream_error);
 
     // ---- Complete handler ----
     if (complete_handler != nullptr && !keys.empty()) {
