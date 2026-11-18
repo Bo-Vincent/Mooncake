@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -8095,9 +8096,8 @@ std::vector<int> RealClient::batch_put_session_start(
             keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
     }
 
-    // Ranged session writes never reach DFS and session end finalizes MEMORY
-    // only, so a DFS reservation would stay PROCESSING until the put-start
-    // discard timeout while the object looks complete.
+    // DFS has no ranged-session write/finalize path. A DFS reservation would
+    // stay PROCESSING until put-start discard while the object looks complete.
     if (config.dfs_replica_num > 0) {
         LOG(ERROR) << "batch_put_session_start rejects DFS configs: "
                    << "session path never writes DFS "
@@ -8145,7 +8145,6 @@ std::vector<int> RealClient::batch_put_session_start(
     std::vector<std::string> keys_to_revoke;
     std::vector<std::string> hot_keys_to_remove;
     {
-        std::lock_guard<std::mutex> lock(session_mutex_);
         for (size_t j = 0; j < start_keys.size(); ++j) {
             const size_t i = start_indices[j];
             if (!start_responses[j]) {
@@ -8161,17 +8160,45 @@ std::vector<int> RealClient::batch_put_session_start(
                     break;
                 }
             }
+            std::optional<ColdWriteRequest> cold_request;
             if (!has_memory_replica) {
-                hot_keys_to_remove.push_back(keys[i]);
-                keys_to_revoke.push_back(keys[i]);
-                results[i] =
-                    static_cast<int>(toInt(ErrorCode::INVALID_REPLICA));
-                continue;
+                if (replicas.size() == 1 &&
+                    replicas.front().is_local_disk_replica()) {
+                    const auto &replica = replicas.front();
+                    const auto &disk = replica.get_local_disk_descriptor();
+                    const auto now =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+                    cold_request = ColdWriteRequest{client_->getClientId(),
+                                                    disk.client_id,
+                                                    replica.id,
+                                                    client_->tenant_id(),
+                                                    keys[i],
+                                                    disk.object_size,
+                                                    now + 300000,
+                                                    std::nullopt,
+                                                    true};
+                    auto begin = client_requester_->cold_write_begin(
+                        disk.transport_endpoint, *cold_request);
+                    if (!begin) {
+                        results[i] = toInt(begin.error());
+                        keys_to_revoke.push_back(keys[i]);
+                        continue;
+                    }
+                } else {
+                    hot_keys_to_remove.push_back(keys[i]);
+                    keys_to_revoke.push_back(keys[i]);
+                    results[i] = toInt(ErrorCode::INVALID_REPLICA);
+                    continue;
+                }
             }
+            std::lock_guard<std::mutex> lock(session_mutex_);
             put_sessions_[keys[i]] = PutSessionEntry{
                 .replicas = std::move(replicas),
                 .object_size = static_cast<uint64_t>(sizes[i]),
                 .write_mode = write_mode,
+                .cold_request = std::move(cold_request),
             };
         }
     }
@@ -8199,6 +8226,7 @@ std::vector<int> RealClient::batch_put_from_multi_buffer_ranges(
     }
 
     std::vector<std::vector<Replica::Descriptor>> replicas_per_entry;
+    std::vector<std::optional<ColdWriteRequest>> cold_requests;
     std::vector<std::vector<Slice>> slices;
     std::vector<std::vector<uint64_t>> dst_offsets;
     std::vector<size_t> idx_map;
@@ -8239,6 +8267,7 @@ std::vector<int> RealClient::batch_put_from_multi_buffer_ranges(
             ++it->second.inflight_transfers;
             inflight_keys.push_back(keys[i]);
             replicas_per_entry.push_back(it->second.replicas);
+            cold_requests.push_back(it->second.cold_request);
             slices.push_back(std::move(entry_slices));
             dst_offsets.push_back(std::move(entry_offsets));
             idx_map.push_back(i);
@@ -8270,10 +8299,36 @@ std::vector<int> RealClient::batch_put_from_multi_buffer_ranges(
         }
     } inflight_guard{this, std::move(inflight_keys)};
 
-    auto transfer = client_->BatchTransferWriteRanges(replicas_per_entry,
-                                                      slices, dst_offsets);
-    for (size_t k = 0; k < transfer.size(); ++k) {
-        results[idx_map[k]] = std::move(transfer[k]);
+    std::vector<std::vector<Replica::Descriptor>> hot_replicas;
+    std::vector<std::vector<Slice>> hot_slices;
+    std::vector<std::vector<uint64_t>> hot_offsets;
+    std::vector<size_t> hot_indices;
+    for (size_t i = 0; i < cold_requests.size(); ++i) {
+        if (cold_requests[i]) {
+            const auto &disk =
+                replicas_per_entry[i].front().get_local_disk_descriptor();
+            auto result =
+                TransferColdRanges(*cold_requests[i], disk.transport_endpoint,
+                                   slices[i], dst_offsets[i]);
+            if (!result)
+                results[idx_map[i]] = tl::unexpected(result.error());
+            else {
+                int64_t bytes = 0;
+                for (const auto &slice : slices[i]) bytes += slice.size;
+                results[idx_map[i]] = bytes;
+            }
+        } else {
+            hot_replicas.push_back(std::move(replicas_per_entry[i]));
+            hot_slices.push_back(std::move(slices[i]));
+            hot_offsets.push_back(std::move(dst_offsets[i]));
+            hot_indices.push_back(idx_map[i]);
+        }
+    }
+    if (!hot_indices.empty()) {
+        auto transfer = client_->BatchTransferWriteRanges(
+            hot_replicas, hot_slices, hot_offsets);
+        for (size_t i = 0; i < transfer.size(); ++i)
+            results[hot_indices[i]] = std::move(transfer[i]);
     }
     return ToPyResults(results);
 }
@@ -8290,12 +8345,28 @@ std::vector<int> RealClient::batch_put_session_end(
     std::vector<std::string> end_keys;
     std::vector<size_t> end_indices;
     std::vector<char> has_nof;
+    struct ColdEnd {
+        std::string key;
+        std::string endpoint;
+        ColdWriteRequest request;
+        size_t index;
+    };
+    std::vector<ColdEnd> cold_ends;
     {
         std::unique_lock<std::mutex> lock(session_mutex_);
         for (size_t i = 0; i < keys.size(); ++i) {
             auto it = put_sessions_.find(keys[i]);
             if (it == put_sessions_.end()) {
                 results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
+                continue;
+            }
+            if (it->second.cold_request) {
+                it->second.writable = false;
+                cold_ends.push_back({keys[i],
+                                     it->second.replicas.front()
+                                         .get_local_disk_descriptor()
+                                         .transport_endpoint,
+                                     *it->second.cold_request, i});
                 continue;
             }
             bool nof = false;
@@ -8319,8 +8390,23 @@ std::vector<int> RealClient::batch_put_session_end(
             end_indices.push_back(i);
             has_nof.push_back(static_cast<char>(nof));
         }
-        if (!end_keys.empty()) {
-            wait_session_put_idle(lock, end_keys);
+        auto sealed_keys = end_keys;
+        for (const auto &cold : cold_ends) sealed_keys.push_back(cold.key);
+        if (!sealed_keys.empty()) wait_session_put_idle(lock, sealed_keys);
+    }
+    for (const auto &cold : cold_ends) {
+        auto result =
+            client_requester_->cold_write_finish(cold.endpoint, cold.request);
+        std::lock_guard lock(session_mutex_);
+        if (result) {
+            put_sessions_.erase(cold.key);
+            results[cold.index] = {};
+        } else {
+            results[cold.index] = tl::unexpected(result.error());
+            if (result.error() == ErrorCode::INVALID_WRITE) {
+                auto found = put_sessions_.find(cold.key);
+                if (found != put_sessions_.end()) found->second.writable = true;
+            }
         }
     }
     if (end_keys.empty()) {
@@ -8423,6 +8509,35 @@ std::vector<int> RealClient::batch_put_session_revoke(
         return ToPyResults(results);
     }
 
+    std::vector<std::string> safe_keys;
+    std::vector<size_t> safe_indices;
+    for (size_t j = 0; j < revoke_keys.size(); ++j) {
+        std::optional<ColdWriteRequest> request;
+        std::string endpoint;
+        {
+            std::lock_guard lock(session_mutex_);
+            auto found = put_sessions_.find(revoke_keys[j]);
+            if (found != put_sessions_.end() && found->second.cold_request) {
+                request = found->second.cold_request;
+                endpoint = found->second.replicas.front()
+                               .get_local_disk_descriptor()
+                               .transport_endpoint;
+            }
+        }
+        if (request) {
+            auto cancelled =
+                client_requester_->cold_write_cancel(endpoint, *request);
+            if (!cancelled) {
+                results[revoke_indices[j]] = tl::unexpected(cancelled.error());
+                continue;
+            }
+        }
+        safe_keys.push_back(revoke_keys[j]);
+        safe_indices.push_back(revoke_indices[j]);
+    }
+    revoke_keys = std::move(safe_keys);
+    revoke_indices = std::move(safe_indices);
+    if (revoke_keys.empty()) return ToPyResults(results);
     if (client_->GetHotCache() && !revoke_keys.empty()) {
         client_->GetHotCache()->RemoveHotKeys(revoke_keys);
     }
@@ -9453,6 +9568,24 @@ struct RealClient::ColdWriteSession {
     int fd{-1};
     uint64_t file_offset{0};
     uint64_t written{0};
+    std::shared_ptr<ColdWriteBuffer> spool;
+    std::map<uint64_t, uint64_t> ranges;
+    void RecordRange(uint64_t begin, uint64_t size) {
+        uint64_t end = begin + size;
+        auto next = ranges.lower_bound(begin);
+        if (next != ranges.begin()) {
+            auto previous = std::prev(next);
+            if (previous->second >= begin) next = previous;
+        }
+        while (next != ranges.end() && next->first <= end) {
+            begin = std::min(begin, next->first);
+            end = std::max(end, next->second);
+            written -= next->second - next->first;
+            next = ranges.erase(next);
+        }
+        ranges.emplace(begin, end);
+        written += end - begin;
+    }
     bool ready{false};
     bool finish{false};
     bool completed{false};
@@ -9462,6 +9595,11 @@ struct RealClient::ColdWriteSession {
     size_t staging_slot{kColdWriteSlots};
     std::thread worker;
     ~ColdWriteSession() {
+        if (request.ranged && staging_slot != kColdWriteSlots) {
+            auto &pool = ColdPool(false);
+            std::lock_guard lock(pool.mutex);
+            pool.slots[staging_slot].busy = false;
+        }
         if (worker.joinable()) {
             if (worker.get_id() == std::this_thread::get_id())
                 worker.detach();
@@ -9528,8 +9666,16 @@ RealClient::cold_write_begin(const ColdWriteRequest &request) {
                 bool completed = false;
                 {
                     std::lock_guard lock(entry.second->mutex);
-                    completed = entry.second->completed &&
-                                !entry.second->transfer_unknown;
+                    auto &session = *entry.second;
+                    if (session.request.ranged && !session.transfer_unknown &&
+                        session.request.deadline_ms <= ColdWriteNowMs()) {
+                        session.error = ErrorCode::INVALID_WRITE;
+                        session.finish = true;
+                        session.completed = true;
+                        session.fd = -1;
+                        session.spool.reset();
+                    }
+                    completed = session.completed && !session.transfer_unknown;
                 }
                 if (completed && entry.second->worker.joinable())
                     entry.second->worker.join();
@@ -9539,12 +9685,22 @@ RealClient::cold_write_begin(const ColdWriteRequest &request) {
                 std::any_of(state->sessions.begin(), state->sessions.end(),
                             [](const auto &entry) {
                                 std::lock_guard lock(entry.second->mutex);
-                                return !entry.second->completed;
+                                return !entry.second->request.ranged &&
+                                       !entry.second->completed;
                             });
-            if (active_stream || state->sessions.size() >= kColdWriteSlots ||
+            if ((!request.ranged && active_stream) ||
+                state->sessions.size() >= kColdWriteSlots ||
                 state->sessions.contains(request.reservation))
                 return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+            if (request.ranged) {
+                auto spool = storage->CreateColdWriteBuffer(request.size);
+                if (!spool) return tl::make_unexpected(spool.error());
+                session->spool = std::move(*spool);
+                session->fd = session->spool->fd;
+                session->ready = true;
+            }
             state->sessions.emplace(request.reservation, session);
+            if (request.ranged) return {};
             session->worker = std::thread([session, storage, client, request] {
                 auto result = storage->OffloadStream(
                     TenantId(request.tenant).MakeScopedKey(request.key),
@@ -9626,9 +9782,11 @@ RealClient::cold_write_chunk(const ColdWriteChunk &chunk) {
             chunk.request.owner != session->request.owner ||
             chunk.request.key != session->request.key ||
             chunk.request.tenant != session->request.tenant ||
-            chunk.offset != session->written || chunk.size == 0 ||
+            chunk.request.ranged != session->request.ranged ||
+            (!session->request.ranged && chunk.offset != session->written) ||
+            chunk.offset > session->request.size || chunk.size == 0 ||
             chunk.size > kColdWriteChunkBytes ||
-            chunk.size > session->request.size - session->written ||
+            chunk.size > session->request.size - chunk.offset ||
             ColdWriteNowMs() >= session->request.deadline_ms)
             return tl::make_unexpected(ErrorCode::INVALID_WRITE);
         auto valid = client->ValidateColdWrite(session->request);
@@ -9695,7 +9853,10 @@ RealClient::cold_write_chunk(const ColdWriteChunk &chunk) {
             session->cv.notify_all();
             return written;
         }
-        session->written += chunk.size;
+        if (session->request.ranged)
+            session->RecordRange(chunk.offset, chunk.size);
+        else
+            session->written += chunk.size;
         return {};
     };
     auto result = co_await coro_io::post(std::move(job));
@@ -9724,13 +9885,26 @@ RealClient::cold_write_cancel(const ColdWriteRequest &request) {
         if (request.writer != session->request.writer ||
             request.key != session->request.key ||
             request.tenant != session->request.tenant ||
-            request.owner != session->request.owner)
+            request.owner != session->request.owner ||
+            request.ranged != session->request.ranged)
             return tl::make_unexpected(ErrorCode::INVALID_WRITE);
         session->error = ErrorCode::INVALID_WRITE;
         session->finish = true;
         session->cv.notify_all();
         if (session->transfer_unknown)
             return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
+        if (session->request.ranged) {
+            session->fd = -1;
+            session->spool.reset();
+            session->completed = true;
+            if (session->staging_slot != kColdWriteSlots) {
+                auto &pool = ColdPool(false);
+                std::lock_guard pool_lock(pool.mutex);
+                pool.slots[session->staging_slot].busy = false;
+                session->staging.reset();
+                session->staging_slot = kColdWriteSlots;
+            }
+        }
         return {};
     };
     auto result = co_await coro_io::post(std::move(job));
@@ -9758,8 +9932,65 @@ RealClient::cold_write_finish(const ColdWriteRequest &request) {
             request.key != session->request.key ||
             request.tenant != session->request.tenant ||
             request.owner != session->request.owner ||
+            request.ranged != session->request.ranged ||
             session->written != session->request.size)
             return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+        if (session->error != ErrorCode::OK || session->transfer_unknown)
+            return tl::make_unexpected(session->error == ErrorCode::OK
+                                           ? ErrorCode::TRANSFER_FAIL
+                                           : session->error);
+        if (session->request.ranged && !session->completed) {
+            // Arbitrary ranges are committed only once the entire object is
+            // present. The anonymous spool remains unpublished until
+            // native-format durability.
+            auto result = storage->OffloadStream(
+                TenantId(request.tenant).MakeScopedKey(request.key),
+                request.size,
+                [session](int fd, uint64_t offset,
+                          uint64_t size) -> tl::expected<void, ErrorCode> {
+                    uint64_t done = 0;
+                    while (done < size) {
+                        if (ColdWriteNowMs() >= session->request.deadline_ms)
+                            return tl::make_unexpected(
+                                ErrorCode::INVALID_WRITE);
+                        const auto count = std::min<uint64_t>(
+                            kColdWriteChunkBytes, size - done);
+                        size_t read = 0;
+                        while (read < count) {
+                            const auto n = pread(
+                                session->fd,
+                                static_cast<char *>(session->staging.get()) +
+                                    read,
+                                count - read, done + read);
+                            if (n < 0 && errno == EINTR) continue;
+                            if (n <= 0)
+                                return tl::make_unexpected(
+                                    ErrorCode::FILE_READ_FAIL);
+                            read += n;
+                        }
+                        auto write = ColdPwrite(fd, session->staging.get(),
+                                                count, offset + done);
+                        if (!write) return write;
+                        done += count;
+                    }
+                    return {};
+                },
+                [client, request](const auto &, auto &) {
+                    auto result = client->FinishColdWrite(request);
+                    return result ? ErrorCode::OK : result.error();
+                });
+            if (!result) return tl::make_unexpected(result.error());
+            session->completed = true;
+            session->fd = -1;
+            session->spool.reset();
+            if (session->staging_slot != kColdWriteSlots) {
+                auto &pool = ColdPool(false);
+                std::lock_guard pool_lock(pool.mutex);
+                pool.slots[session->staging_slot].busy = false;
+                session->staging.reset();
+                session->staging_slot = kColdWriteSlots;
+            }
+        }
         session->finish = true;
         session->cv.notify_all();
         auto deadline = std::chrono::system_clock::time_point(
@@ -9789,6 +10020,47 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
                              disk.object_size,
                              ColdWriteNowMs() + 300000,
                              checksum};
+    if (disk.client_id == client_->getClientId() && file_storage_) {
+        auto valid = client_->ValidateColdWrite(request);
+        if (!valid) return valid;
+        auto journaled = file_storage_->PrepareColdWrite(request);
+        if (!journaled) return journaled;
+        auto result = file_storage_->OffloadStream(
+            TenantId(request.tenant).MakeScopedKey(key), request.size,
+            [&](int fd, uint64_t offset, uint64_t) {
+                return WriteColdLocalSlices(client_, fd, offset, slices,
+                                            request.deadline_ms);
+            },
+            [this, request](const auto &, auto &) {
+                auto finish = client_->FinishColdWrite(request);
+                return finish ? ErrorCode::OK : finish.error();
+            });
+        if (!result) return tl::make_unexpected(result.error());
+        return {};
+    }
+    auto begin =
+        client_requester_->cold_write_begin(disk.transport_endpoint, request);
+    if (!begin) return begin;
+    std::vector<uint64_t> offsets;
+    uint64_t offset = 0;
+    for (const auto &slice : slices) {
+        offsets.push_back(offset);
+        offset += slice.size;
+    }
+    auto result =
+        TransferColdRanges(request, disk.transport_endpoint, slices, offsets);
+    if (!result) {
+        (void)client_requester_->cold_write_cancel(disk.transport_endpoint,
+                                                   request);
+        return result;
+    }
+    return client_requester_->cold_write_finish(disk.transport_endpoint,
+                                                request);
+}
+
+tl::expected<void, ErrorCode> RealClient::TransferColdRanges(
+    const ColdWriteRequest &request, const std::string &endpoint,
+    const std::vector<Slice> &slices, const std::vector<uint64_t> &offsets) {
     auto &source_pool = ColdPool(true);
     auto &cold_source_mutex_ = source_pool.mutex;
     auto &cold_source_slots_ = source_pool.slots;
@@ -9833,37 +10105,9 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
         slot.release_registration = client_->WeightMemoryRelease(buffer);
         slot.client_id = client_->getClientId();
     }
-    if (disk.client_id == client_->getClientId() && file_storage_) {
-        {
-            std::lock_guard lock(cold_source_mutex_);
-            slot.busy = false;
-        }
-        auto valid = client_->ValidateColdWrite(request);
-        if (!valid) return valid;
-        auto journaled = file_storage_->PrepareColdWrite(request);
-        if (!journaled) return journaled;
-        auto result = file_storage_->OffloadStream(
-            TenantId(request.tenant).MakeScopedKey(key), request.size,
-            [&](int fd, uint64_t offset, uint64_t) {
-                return WriteColdLocalSlices(client_, fd, offset, slices,
-                                            request.deadline_ms);
-            },
-            [this, request](const auto &, auto &) {
-                auto finish = client_->FinishColdWrite(request);
-                return finish ? ErrorCode::OK : finish.error();
-            });
-        if (!result) return tl::make_unexpected(result.error());
-        return {};
-    }
-    auto begin =
-        client_requester_->cold_write_begin(disk.transport_endpoint, request);
-    if (!begin) {
-        std::lock_guard lock(cold_source_mutex_);
-        slot.busy = false;
-        return begin;
-    }
-    uint64_t offset = 0;
-    for (const auto &slice : slices) {
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const auto &slice = slices[i];
+        uint64_t offset = offsets[i];
         uint64_t consumed = 0;
         while (consumed < slice.size) {
             auto size =
@@ -9877,8 +10121,8 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
                 dev->SetContext(info.device_id);
                 if (!dev->Copy(slot.buffer.get(), source, size,
                                device::CopyDirection::kDeviceToHost)) {
-                    (void)client_requester_->cold_write_cancel(
-                        disk.transport_endpoint, request);
+                    (void)client_requester_->cold_write_cancel(endpoint,
+                                                               request);
                     std::lock_guard lock(cold_source_mutex_);
                     slot.busy = false;
                     return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
@@ -9889,11 +10133,10 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
             ColdWriteChunk chunk{request, client_->GetSegmentEndpoint(),
                                  reinterpret_cast<uint64_t>(slot.buffer.get()),
                                  offset, size};
-            auto result = client_requester_->cold_write_chunk(
-                disk.transport_endpoint, chunk);
+            auto result = client_requester_->cold_write_chunk(endpoint, chunk);
             if (!result) {
-                auto cancelled = client_requester_->cold_write_cancel(
-                    disk.transport_endpoint, request);
+                auto cancelled =
+                    client_requester_->cold_write_cancel(endpoint, request);
                 if (cancelled) {
                     std::lock_guard lock(cold_source_mutex_);
                     slot.busy = false;
@@ -9915,8 +10158,7 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
         std::lock_guard lock(cold_source_mutex_);
         slot.busy = false;
     }
-    return client_requester_->cold_write_finish(disk.transport_endpoint,
-                                                request);
+    return {};
 }
 
 async_simple::coro::Lazy<tl::expected<BatchGetOffloadObjectResponse, ErrorCode>>

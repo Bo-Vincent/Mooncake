@@ -946,6 +946,9 @@ class RealClient : public PyClient {
         const ColdWriteRequest &request);
     async_simple::coro::Lazy<tl::expected<void, ErrorCode>> cold_write_finish(
         const ColdWriteRequest &request);
+    tl::expected<void, ErrorCode> TransferColdRanges(
+        const ColdWriteRequest &request, const std::string &endpoint,
+        const std::vector<Slice> &slices, const std::vector<uint64_t> &offsets);
     tl::expected<void, ErrorCode> WriteColdObject(
         const std::string &key, const Replica::Descriptor &replica,
         const std::vector<Slice> &slices, std::optional<uint64_t> checksum);
@@ -1278,6 +1281,7 @@ class RealClient : public PyClient {
         ReplicaWriteMode write_mode{ReplicaWriteMode::SINGLE_REPLICA};
         bool writable{true};
         size_t inflight_transfers{0};
+        std::optional<ColdWriteRequest> cold_request;
     };
     mutable std::mutex session_mutex_;
     std::condition_variable session_cv_;
