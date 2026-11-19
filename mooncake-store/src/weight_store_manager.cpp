@@ -1073,6 +1073,10 @@ WeightStoreManager::ReconcileWeightRevisionInternal(
                               : (member.has_cold && !member.has_memory)) {
                 continue;
             }
+            if (!should_be_hot && member.has_cold &&
+                (!affinity.all_have_cold || view->active_lease_count != 0)) {
+                continue;
+            }
             if (!reserve_member(member.size)) {
                 break;
             }
