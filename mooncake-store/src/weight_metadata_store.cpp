@@ -317,6 +317,7 @@ WeightMetadataStore::PrepareBeginImport(const BeginWeightImportRequest& request,
         .updated_at_ms = now_ms,
         .last_accessed_at_ms = now_ms,
         .import_layout = request.payload_layout,
+        .committed_cold_replicas = {},
     };
     return WeightMetadataMutation{
         .kind = WeightMetadataMutationKind::UPSERT,
@@ -557,6 +558,98 @@ WeightMetadataStore::Publish(const WeightMetadataMutation& mutation) {
         operations_[mutation.operation->operation_id] = *mutation.operation;
     }
     return next;
+}
+
+WeightMetadataStore::Result<WeightColdReplicaRecovery>
+WeightMetadataStore::GetColdReplica(const std::string& group_id,
+                                    const std::string& key,
+                                    uint64_t reservation) const {
+    std::lock_guard lock(mutex_);
+    const auto group = group_index_.find(group_id);
+    if (group == group_index_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto revision = revisions_.find(group->second);
+    if (revision == revisions_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto& metadata = revision->second;
+    const auto lineage =
+        lineages_.find(ToWeightLineageIdentity(metadata.identity));
+    if (lineage != lineages_.end() &&
+        (metadata.identity.weight_generation <
+             lineage->second.committed_weight_generation ||
+         IsBaseLeaseFenced(lineage->second, metadata.identity))) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    const auto token = std::find_if(
+        metadata.committed_cold_replicas.begin(),
+        metadata.committed_cold_replicas.end(), [&](const auto& entry) {
+            return entry.key == key && entry.reservation == reservation;
+        });
+    if (token == metadata.committed_cold_replicas.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    return WeightColdReplicaRecovery{
+        .identity = metadata.identity,
+        .availability = metadata.availability,
+        .has_operation = metadata.operation_id.has_value(),
+        .token = *token,
+    };
+}
+
+WeightMetadataStore::Result<WeightMetadataMutation>
+WeightMetadataStore::PrepareReattachColdReplica(
+    const WeightRevisionIdentity& identity, uint64_t reservation,
+    const std::pair<uint64_t, uint64_t>& expected_current_owner,
+    const std::pair<uint64_t, uint64_t>& new_owner, uint64_t now_ms) const {
+    if (reservation == 0 || new_owner == std::pair<uint64_t, uint64_t>{}) {
+        return tl::make_unexpected(WeightManagementError::INVALID_ARGUMENT);
+    }
+    std::lock_guard lock(mutex_);
+    const auto revision = revisions_.find(identity);
+    if (revision == revisions_.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    const auto& current = revision->second;
+    const auto lineage = lineages_.find(ToWeightLineageIdentity(identity));
+    if (lineage != lineages_.end() &&
+        (identity.weight_generation <
+             lineage->second.committed_weight_generation ||
+         IsBaseLeaseFenced(lineage->second, identity))) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    if ((current.availability != WeightAvailabilityState::READY &&
+         current.availability != WeightAvailabilityState::DEGRADED) ||
+        current.operation_id.has_value()) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    auto next = current;
+    auto token = std::find_if(next.committed_cold_replicas.begin(),
+                              next.committed_cold_replicas.end(),
+                              [reservation](const auto& entry) {
+                                  return entry.reservation == reservation;
+                              });
+    if (token == next.committed_cold_replicas.end()) {
+        return tl::make_unexpected(WeightManagementError::NOT_FOUND);
+    }
+    if (token->current_owner != expected_current_owner) {
+        return tl::make_unexpected(WeightManagementError::CONFLICT);
+    }
+    if (token->current_owner == new_owner) {
+        return WeightMetadataMutation{.identity = identity,
+                                      .previous = current,
+                                      .next = current,
+                                      .no_op = true};
+    }
+    if (!CanAdvanceWeightMetadataGeneration(current.metadata_generation)) {
+        return tl::make_unexpected(WeightManagementError::GENERATION_EXHAUSTED);
+    }
+    token->current_owner = new_owner;
+    ++next.metadata_generation;
+    next.updated_at_ms = std::max(next.updated_at_ms, now_ms);
+    return WeightMetadataMutation{
+        .identity = identity, .previous = current, .next = std::move(next)};
 }
 
 WeightMetadataStore::Result<WeightMetadataMutation>
@@ -1855,6 +1948,7 @@ WeightMetadataStore::PrepareFinishDelete(const WeightRevisionIdentity& identity,
     }
     auto next = revision->second;
     next.availability = WeightAvailabilityState::DELETED;
+    next.committed_cold_replicas.clear();
     next.residency = WeightResidencyState::ABSENT;
     next.observed_hot_ratio = 0.0;
     next.operation_id.reset();

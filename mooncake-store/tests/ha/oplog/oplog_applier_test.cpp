@@ -316,6 +316,66 @@ TEST_F(OpLogApplierTest, AppliesWeightMetadataAndRejectsStaleGeneration) {
               mock_metadata_store_->GetWeightMetadata(generation_one.identity));
 }
 
+TEST_F(OpLogApplierTest, ColdRecoveryOwnerSurvivesOpLogAndSnapshotRestore) {
+    WeightMetadataStore producer;
+    const auto reference = MakeWeightMetadata(1);
+    auto begin = producer.PrepareBeginImport(
+        {.identity = reference.identity,
+         .payload_group_id = reference.manifest.payload_group_id,
+         .expected_payload_count = reference.manifest.payload_count,
+         .expected_logical_bytes = reference.manifest.logical_bytes,
+         .policy = WeightStoragePolicy{.preferred_residency =
+                                           WeightResidencyState::COLD},
+         .affinity_summary = {.affinity_count = reference.affinity_count,
+                              .affinity_digest = reference.affinity_digest}},
+        100);
+    ASSERT_TRUE(begin);
+    ASSERT_TRUE(producer.Publish(*begin));
+    auto commit = producer.PrepareCommitImport(
+        {.identity = reference.identity,
+         .expected_metadata_generation = 1,
+         .manifest = reference.manifest},
+        200,
+        WeightResidencyObservation{.residency = WeightResidencyState::COLD,
+                                   .hot_ratio = 0.0,
+                                   .preferred_placement_satisfied = true});
+    ASSERT_TRUE(commit);
+    ASSERT_FALSE(commit->next->operation_id.has_value());
+    commit->next->committed_cold_replicas.push_back(
+        WeightColdReplicaToken{.key = "tensor-0",
+                               .size = 1024,
+                               .writer = {1, 2},
+                               .original_owner = {3, 4},
+                               .reservation = 9,
+                               .checksum = 17,
+                               .affinity_id = "tensor-0",
+                               .current_owner = {3, 4}});
+    ASSERT_TRUE(producer.Publish(*commit));
+    auto reattach = producer.PrepareReattachColdReplica(reference.identity, 9,
+                                                        {3, 4}, {5, 6}, 300);
+    ASSERT_TRUE(reattach.has_value()) << static_cast<int>(reattach.error());
+    ASSERT_TRUE(producer.Publish(*reattach));
+
+    StandbyMetadataStore standby;
+    OpLogApplier applier(&standby, cluster_id_);
+    const auto key = MakeWeightRevisionMetadataKey(reference.identity);
+    uint64_t sequence = 1;
+    for (const auto* mutation : {&*begin, &*commit, &*reattach}) {
+        ASSERT_TRUE(applier.ApplyOpLogEntry(
+            MakeEntry(sequence++, OpType::WEIGHT_METADATA_UPSERT, key,
+                      SerializeWeightUpsert(*mutation->next))));
+    }
+    WeightMetadataStore restored;
+    ASSERT_TRUE(restored.RestoreSnapshot(standby.SnapshotWeightMetadata()));
+    EXPECT_EQ(producer.ExportSnapshot(), restored.ExportSnapshot());
+    auto retry = restored.PrepareReattachColdReplica(reference.identity, 9,
+                                                     {5, 6}, {5, 6}, 301);
+    ASSERT_TRUE(retry);
+    EXPECT_TRUE(retry->no_op);
+    EXPECT_FALSE(restored.PrepareReattachColdReplica(reference.identity, 9,
+                                                     {3, 4}, {7, 8}, 301));
+}
+
 TEST_F(OpLogApplierTest, AppliesImportingToReadyTransition) {
     auto importing = MakeWeightMetadata(1);
     importing.manifest.manifest_key.clear();

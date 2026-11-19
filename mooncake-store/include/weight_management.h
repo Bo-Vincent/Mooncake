@@ -253,6 +253,24 @@ inline bool IsValidWeightPayloadLayout(
                summary.affinity_digest;
 }
 
+// Durable proof of a committed managed disk replica, independent of its
+// process-local route. The original reservation remains stable across reattach.
+struct WeightColdReplicaToken {
+    std::string key;
+    uint64_t size{0};
+    std::pair<uint64_t, uint64_t> writer;
+    std::pair<uint64_t, uint64_t> original_owner;
+    uint64_t reservation{0};
+    std::optional<uint64_t> checksum;
+    std::string affinity_id;
+    std::pair<uint64_t, uint64_t> current_owner;
+
+    friend bool operator==(const WeightColdReplicaToken&,
+                           const WeightColdReplicaToken&) = default;
+};
+YLT_REFL(WeightColdReplicaToken, key, size, writer, original_owner, reservation,
+         checksum, affinity_id, current_owner);
+
 struct WeightRevisionMetadata {
     WeightRevisionIdentity identity;
     WeightManifestReference manifest;
@@ -270,6 +288,7 @@ struct WeightRevisionMetadata {
 
     // The declared physical layout is retained only until import commits.
     std::vector<WeightAffinityMappingEntry> import_layout;
+    std::vector<WeightColdReplicaToken> committed_cold_replicas;
 
     friend bool operator==(const WeightRevisionMetadata&,
                            const WeightRevisionMetadata&) = default;
@@ -277,7 +296,7 @@ struct WeightRevisionMetadata {
 YLT_REFL(WeightRevisionMetadata, identity, manifest, policy, availability,
          residency, operation_id, affinity_count, affinity_digest,
          observed_hot_ratio, metadata_generation, created_at_ms, updated_at_ms,
-         last_accessed_at_ms, import_layout);
+         last_accessed_at_ms, import_layout, committed_cold_replicas);
 
 struct WeightRevisionLease {
     uint64_t lease_id{0};
@@ -839,6 +858,29 @@ inline WeightValidationResult ValidateWeightRevisionMetadata(
     });
     if (!affinity_result.ok()) {
         return affinity_result;
+    }
+    std::set<std::string> cold_keys;
+    std::set<uint64_t> cold_reservations;
+    uint64_t cold_bytes = 0;
+    for (const auto& token : metadata.committed_cold_replicas) {
+        if (!IsValidWeightComponent(token.key) || token.size == 0 ||
+            token.reservation == 0 ||
+            !IsValidWeightComponent(token.affinity_id) ||
+            token.writer == std::pair<uint64_t, uint64_t>{} ||
+            token.original_owner == std::pair<uint64_t, uint64_t>{} ||
+            token.current_owner == std::pair<uint64_t, uint64_t>{} ||
+            !cold_keys.insert(token.key).second ||
+            !cold_reservations.insert(token.reservation).second ||
+            token.size > metadata.manifest.logical_bytes - cold_bytes ||
+            metadata.availability == WeightAvailabilityState::IMPORTING ||
+            metadata.availability == WeightAvailabilityState::DELETED) {
+            return WeightValidationResult::Failure(
+                "invalid cold recovery token");
+        }
+        cold_bytes += token.size;
+    }
+    if (cold_keys.size() > metadata.manifest.payload_count) {
+        return WeightValidationResult::Failure("invalid cold recovery count");
     }
     if (!metadata.import_layout.empty()) {
         uint64_t bytes = 0;
