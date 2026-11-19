@@ -302,6 +302,14 @@ WeightStoreManager::CommitWeightImport(
     auto mutation =
         weight_metadata_.PrepareCommitImport(request, now_ms, *validation);
     if (!mutation) return tl::make_unexpected(mutation.error());
+    auto members = backend_.SnapshotWeightGroup(
+        request.identity, current->metadata.manifest.payload_group_id);
+    if (!members) return tl::make_unexpected(members.error());
+    for (const auto& member : *members) {
+        mutation->next->committed_cold_replicas.insert(
+            mutation->next->committed_cold_replicas.end(),
+            member.cold_replicas.begin(), member.cold_replicas.end());
+    }
     auto committed = PersistAndPublishWeightMutation(*mutation);
     if (committed) {
         std::lock_guard lock(import_activity_mutex_);
@@ -310,6 +318,18 @@ WeightStoreManager::CommitWeightImport(
                 .MakeScopedKey(committed->manifest.payload_group_id));
     }
     return committed;
+}
+
+WeightMetadataStore::Result<WeightRevisionMetadata>
+WeightStoreManager::ReattachColdReplica(
+    const WeightRevisionIdentity& identity, uint64_t reservation,
+    const std::pair<uint64_t, uint64_t>& expected_current_owner,
+    const std::pair<uint64_t, uint64_t>& new_owner) {
+    auto mutation = weight_metadata_.PrepareReattachColdReplica(
+        identity, reservation, expected_current_owner, new_owner,
+        WeightNowMs());
+    if (!mutation) return tl::make_unexpected(mutation.error());
+    return PersistAndPublishWeightMutation(*mutation);
 }
 
 WeightMetadataStore::Result<WeightRevisionMetadata>
@@ -1054,6 +1074,21 @@ WeightStoreManager::ReconcileWeightRevisionBounded(
             if (!mutation) {
                 return tl::make_unexpected(mutation.error());
             }
+            auto& tokens = mutation->metadata.next->committed_cold_replicas;
+            std::erase_if(tokens, [&](const auto& token) {
+                return std::none_of(
+                    members->begin(), members->end(), [&](const auto& member) {
+                        return std::any_of(
+                            member.cold_replicas.begin(),
+                            member.cold_replicas.end(),
+                            [&](const auto& replica) {
+                                return replica.key == token.key &&
+                                       replica.size == token.size &&
+                                       replica.current_owner ==
+                                           token.current_owner;
+                            });
+                    });
+            });
             auto finished = PersistAndPublishWeightOperationMutation(*mutation);
             if (!finished) {
                 return tl::make_unexpected(finished.error());

@@ -17,6 +17,7 @@ struct WeightGroupMemberSnapshot {
     bool readable{false};
     bool has_memory{false};
     bool has_cold{false};
+    std::vector<WeightColdReplicaToken> cold_replicas;
 };
 
 class WeightStoreBackend {

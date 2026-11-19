@@ -80,6 +80,112 @@ WeightRevisionMetadata PublishReady(WeightMetadataStore& metadata_store) {
     return *published;
 }
 
+TEST(WeightMetadataStoreTest, ColdReattachPersistsOwnerAndRejectsStaleCas) {
+    WeightMetadataStore store;
+    PublishReady(store);
+    auto snapshot = store.ExportSnapshot();
+    auto& metadata = snapshot.metadata.front();
+    metadata.committed_cold_replicas.push_back(WeightColdReplicaToken{
+        .key = "tensor-0",
+        .size = 1024,
+        .writer = {1, 2},
+        .original_owner = {3, 4},
+        .reservation = 9,
+        .checksum = 17,
+        .affinity_id = "tensor-0",
+        .current_owner = {3, 4},
+    });
+    ASSERT_TRUE(store.RestoreSnapshot(snapshot));
+    auto recovery =
+        store.GetColdReplica(metadata.manifest.payload_group_id, "tensor-0", 9);
+    ASSERT_TRUE(recovery);
+    EXPECT_EQ(metadata.identity, recovery->identity);
+    EXPECT_EQ(metadata.committed_cold_replicas.front(), recovery->token);
+    EXPECT_FALSE(recovery->has_operation);
+    EXPECT_FALSE(store.GetColdReplica("other-group", "tensor-0", 9));
+    EXPECT_FALSE(store.GetColdReplica(metadata.manifest.payload_group_id,
+                                      "other-key", 9));
+    EXPECT_FALSE(store.GetColdReplica(metadata.manifest.payload_group_id,
+                                      "tensor-0", 10));
+    auto mutation = store.PrepareReattachColdReplica(metadata.identity, 9,
+                                                     {3, 4}, {5, 6}, 300);
+    ASSERT_TRUE(mutation);
+    auto published = store.Publish(*mutation);
+    ASSERT_TRUE(published);
+    EXPECT_EQ((std::pair<uint64_t, uint64_t>{3, 4}),
+              published->committed_cold_replicas.front().original_owner);
+    EXPECT_EQ((std::pair<uint64_t, uint64_t>{5, 6}),
+              published->committed_cold_replicas.front().current_owner);
+    EXPECT_FALSE(store.PrepareReattachColdReplica(metadata.identity, 9, {3, 4},
+                                                  {7, 8}, 301));
+    auto retry = store.PrepareReattachColdReplica(metadata.identity, 9, {5, 6},
+                                                  {5, 6}, 301);
+    ASSERT_TRUE(retry);
+    EXPECT_TRUE(retry->no_op);
+    WeightMetadataStore restored;
+    ASSERT_TRUE(restored.RestoreSnapshot(store.ExportSnapshot()));
+    EXPECT_EQ(*published, restored.Get(metadata.identity, 301)->metadata);
+    auto operation = restored.PrepareStartOperation(
+        {.identity = metadata.identity,
+         .expected_metadata_generation = published->metadata_generation,
+         .target_residency = WeightResidencyState::COLD},
+        302);
+    ASSERT_TRUE(operation);
+    ASSERT_TRUE(restored.Publish(*operation));
+    EXPECT_TRUE(
+        restored
+            .GetColdReplica(metadata.manifest.payload_group_id, "tensor-0", 9)
+            ->has_operation);
+    EXPECT_FALSE(restored.PrepareReattachColdReplica(metadata.identity, 9,
+                                                     {5, 6}, {7, 8}, 303));
+
+    auto deleting = store.PrepareDelete(
+        {.identity = metadata.identity,
+         .expected_metadata_generation = published->metadata_generation},
+        302);
+    ASSERT_TRUE(deleting);
+    ASSERT_TRUE(store.Publish(*deleting));
+    EXPECT_FALSE(store.PrepareReattachColdReplica(metadata.identity, 9, {5, 6},
+                                                  {7, 8}, 303));
+    auto deleted = store.PrepareFinishDelete(
+        metadata.identity, deleting->next->metadata_generation, 304);
+    ASSERT_TRUE(deleted);
+    auto finished = store.Publish(*deleted);
+    ASSERT_TRUE(finished);
+    EXPECT_TRUE(finished->committed_cold_replicas.empty());
+    EXPECT_FALSE(store.GetColdReplica(metadata.manifest.payload_group_id,
+                                      "tensor-0", 9));
+    EXPECT_FALSE(store.PrepareReattachColdReplica(metadata.identity, 9, {5, 6},
+                                                  {7, 8}, 305));
+}
+
+TEST(WeightMetadataStoreTest, RejectsInvalidColdRecoveryProofInSnapshot) {
+    WeightMetadataStore store;
+    PublishReady(store);
+    const auto ready = store.ExportSnapshot();
+    auto snapshot = ready;
+    auto& tokens = snapshot.metadata.front().committed_cold_replicas;
+    tokens.push_back(WeightColdReplicaToken{.key = "tensor-0",
+                                            .size = 1024,
+                                            .writer = {1, 2},
+                                            .original_owner = {3, 4},
+                                            .reservation = 9,
+                                            .affinity_id = "tensor-0",
+                                            .current_owner = {3, 4}});
+    EXPECT_TRUE(ValidateWeightMetadataSnapshot(snapshot));
+    const auto valid = snapshot;
+    tokens.front().reservation = 0;
+    EXPECT_FALSE(ValidateWeightMetadataSnapshot(snapshot));
+    snapshot = valid;
+    snapshot.metadata.front().committed_cold_replicas.front().size = 4097;
+    EXPECT_FALSE(ValidateWeightMetadataSnapshot(snapshot));
+    snapshot = valid;
+    snapshot.metadata.front().committed_cold_replicas.push_back(
+        snapshot.metadata.front().committed_cold_replicas.front());
+    EXPECT_FALSE(ValidateWeightMetadataSnapshot(snapshot));
+    EXPECT_EQ(ready, store.ExportSnapshot());
+}
+
 TEST(WeightMetadataStoreTest, BeginIsIdempotent) {
     WeightMetadataStore metadata_store;
     auto first = PublishBegin(metadata_store, BeginRequest());

@@ -46,6 +46,16 @@ class WeightStoreManager {
     WeightMetadataStore::Result<void> RestoreSnapshot(
         const WeightMetadataSnapshot& snapshot);
     void Clear();
+    WeightMetadataStore::Result<WeightColdReplicaRecovery> GetColdReplica(
+        const std::string& group_id, const std::string& key,
+        uint64_t reservation) const {
+        return weight_metadata_.GetColdReplica(group_id, key, reservation);
+    }
+    // The caller holds the group lock and fences the old/new owner sessions.
+    WeightMetadataStore::Result<WeightRevisionMetadata> ReattachColdReplica(
+        const WeightRevisionIdentity& identity, uint64_t reservation,
+        const std::pair<uint64_t, uint64_t>& expected_current_owner,
+        const std::pair<uint64_t, uint64_t>& new_owner);
     // Configure before starting the master workers; this is not a live setter.
     void SetImportIdleTimeoutMs(uint64_t timeout_ms) {
         import_idle_timeout_ms_ = timeout_ms;

@@ -109,7 +109,23 @@ MasterStoreBackend::SnapshotWeightGroup(
                 return !replica.is_memory_replica() &&
                        master_.IsReplicaReadable(replica);
             }),
+            .cold_replicas = {},
         });
+        for (const auto& replica : metadata.GetAllReplicas()) {
+            if (!replica.is_local_disk_replica() || !replica.is_completed())
+                continue;
+            const auto owner = replica.get_local_disk_client_id().value();
+            members.back().cold_replicas.push_back(WeightColdReplicaToken{
+                .key = key,
+                .size = metadata.TotalLength(),
+                .writer = metadata.client_id,
+                .original_owner = owner,
+                .reservation = replica.id(),
+                .checksum = metadata.GetPart(0).checksum(),
+                .affinity_id = metadata.residency_affinity_id,
+                .current_owner = owner,
+            });
+        }
     }
     return members;
 }

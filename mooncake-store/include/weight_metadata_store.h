@@ -13,7 +13,14 @@
 
 namespace mooncake {
 
-inline constexpr uint32_t kWeightMetadataSchemaVersion = 3;
+inline constexpr uint32_t kWeightMetadataSchemaVersion = 4;
+
+struct WeightColdReplicaRecovery {
+    WeightRevisionIdentity identity;
+    WeightAvailabilityState availability;
+    bool has_operation{false};
+    WeightColdReplicaToken token;
+};
 
 struct WeightResidencyObservation {
     WeightResidencyState residency{WeightResidencyState::UNKNOWN};
@@ -81,6 +88,13 @@ class WeightMetadataStore {
         const AbortWeightImportRequest& request, uint64_t now_ms) const;
     Result<WeightRevisionMetadata> Publish(
         const WeightMetadataMutation& mutation);
+    Result<WeightColdReplicaRecovery> GetColdReplica(
+        const std::string& group_id, const std::string& key,
+        uint64_t reservation) const;
+    Result<WeightMetadataMutation> PrepareReattachColdReplica(
+        const WeightRevisionIdentity& identity, uint64_t reservation,
+        const std::pair<uint64_t, uint64_t>& expected_current_owner,
+        const std::pair<uint64_t, uint64_t>& new_owner, uint64_t now_ms) const;
     Result<WeightMetadataMutation> PrepareUpdatePolicy(
         const UpdateWeightPolicyRequest& request, uint64_t now_ms);
 
