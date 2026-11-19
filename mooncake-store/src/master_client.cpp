@@ -237,6 +237,10 @@ struct RpcNameTraits<&WrappedMasterService::ValidateColdWrite> {
     static constexpr const char* value = "ValidateColdWrite";
 };
 template <>
+struct RpcNameTraits<&WrappedMasterService::ReattachColdWrite> {
+    static constexpr const char* value = "ReattachColdWrite";
+};
+template <>
 struct RpcNameTraits<&WrappedMasterService::FinishColdWrite> {
     static constexpr const char* value = "FinishColdWrite";
 };
@@ -846,9 +850,15 @@ MasterClient::BatchPutStart(
     return result;
 }
 
-tl::expected<void, ErrorCode> MasterClient::ValidateColdWrite(
+tl::expected<std::string, ErrorCode> MasterClient::ValidateColdWrite(
     const ColdWriteRequest& request) {
-    return invoke_rpc<&WrappedMasterService::ValidateColdWrite, void>(request);
+    return invoke_rpc<&WrappedMasterService::ValidateColdWrite, std::string>(
+        request);
+}
+tl::expected<void, ErrorCode> MasterClient::ReattachColdWrite(
+    const UUID& owner, const ColdWriteRequest& request) {
+    return invoke_rpc<&WrappedMasterService::ReattachColdWrite, void>(owner,
+                                                                      request);
 }
 tl::expected<void, ErrorCode> MasterClient::FinishColdWrite(
     const ColdWriteRequest& request) {

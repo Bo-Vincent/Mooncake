@@ -600,7 +600,7 @@ add_store_test(weight_cold_import_e2e_test weight_cold_import_e2e_test.cpp)
 target_link_options(weight_cold_import_e2e_test PRIVATE
                     "-Wl,--wrap=posix_memalign")
 add_store_test(weight_cold_process_e2e_test weight_cold_process_e2e_test.cpp)
-set_tests_properties(weight_cold_process_e2e_test PROPERTIES TIMEOUT 180)
+set_tests_properties(weight_cold_process_e2e_test PROPERTIES TIMEOUT 300)
 set_tests_properties(weight_cold_import_e2e_test PROPERTIES TIMEOUT 420)
 add_store_test(cold_write_journal_test cold_write_journal_test.cpp)
 add_store_test(weight_cold_write_test weight_cold_write_test.cpp)

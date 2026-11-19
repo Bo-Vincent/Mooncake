@@ -219,8 +219,15 @@ tl::expected<void, ErrorCode> FileStorage::Init() {
         });
 
     if (!scan_meta_result) {
-        if (config_.enable_dfs &&
-            scan_meta_result.error() == ErrorCode::NOT_SUPPORTED) {
+        if (scan_meta_result.error() ==
+                ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS ||
+            scan_meta_result.error() == ErrorCode::RPC_FAIL ||
+            scan_meta_result.error() == ErrorCode::INTERNAL_ERROR) {
+            // A restarted owner may mount before the old incarnation expires.
+            // Reuse the existing heartbeat rescan retry after that fence opens.
+            metadata_resync_pending_.store(true);
+        } else if (config_.enable_dfs &&
+                   scan_meta_result.error() == ErrorCode::NOT_SUPPORTED) {
             LOG(INFO) << "Currently, DFS backend does not support ScanMeta; "
                          "skip re-registering offloaded objects";
         } else {
@@ -1118,6 +1125,8 @@ tl::expected<void, ErrorCode> FileStorage::PrepareColdWrite(
     const ColdWriteRequest& request) {
     if (!cold_write_journal_)
         return tl::make_unexpected(ErrorCode::UNABLE_OFFLOAD);
+    if (request.reservation != 0 && request.group_id.empty())
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
     return cold_write_journal_->Put(
         TenantId(request.tenant).MakeScopedKey(request.key), request);
 }
@@ -1127,29 +1136,40 @@ tl::expected<void, ErrorCode> FileStorage::RecoverOffloadedObjects(
     std::vector<StorageObjectMetadata>& metadatas) {
     auto entries = cold_write_journal_->List();
     if (!entries) return tl::make_unexpected(entries.error());
+    std::optional<ErrorCode> retry_error;
     std::vector<std::string> ordinary_keys;
     std::vector<StorageObjectMetadata> ordinary_metadata;
     for (size_t i = 0; i < keys.size(); ++i) {
         auto found = entries->find(keys[i]);
         if (found != entries->end()) {
-            // A cold record never falls through to generic AddReplica recovery.
-            // A changed owner incarnation requires an explicit reattach
-            // protocol.
-            if (found->second.owner == client_->getClientId()) {
-                auto recovered = client_->FinishColdWrite(found->second);
-                if (!recovered)
-                    LOG(WARNING) << "Cold recovery deferred for key=" << keys[i]
-                                 << ", error=" << recovered.error();
-            }
+            // The journal identifies a committed reservation; only the master
+            // may transfer that authority to a new owner incarnation.
+            auto recovered = found->second.owner == client_->getClientId()
+                                 ? client_->FinishColdWrite(found->second)
+                                 : client_->ReattachColdWrite(found->second);
+            if (!recovered && (recovered.error() ==
+                                   ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS ||
+                               recovered.error() == ErrorCode::RPC_FAIL ||
+                               recovered.error() == ErrorCode::INTERNAL_ERROR))
+                retry_error = recovered.error();
+            if (!recovered)
+                LOG(WARNING) << "Cold recovery deferred for key=" << keys[i]
+                             << ", error=" << recovered.error();
             continue;
         }
         ordinary_keys.push_back(keys[i]);
         ordinary_metadata.push_back(metadatas[i]);
     }
-    if (ordinary_keys.empty()) return {};
+    if (ordinary_keys.empty()) {
+        if (retry_error) return tl::make_unexpected(*retry_error);
+        return {};
+    }
     auto tasks =
         BuildOffloadTasksFromStorageKeys(ordinary_keys, ordinary_metadata);
-    return client_->NotifyOffloadSuccess(tasks, ordinary_metadata);
+    auto result = client_->NotifyOffloadSuccess(tasks, ordinary_metadata);
+    if (!result) return result;
+    if (retry_error) return tl::make_unexpected(*retry_error);
+    return {};
 }
 
 tl::expected<int64_t, ErrorCode> FileStorage::OffloadStream(

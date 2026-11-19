@@ -289,10 +289,12 @@ class MasterClient {
      * @param replica_type Type of replica (memory or disk)
      * @return tl::expected<void, ErrorCode> indicating success/failure
      */
-    tl::expected<void, ErrorCode> ValidateColdWrite(
+    tl::expected<std::string, ErrorCode> ValidateColdWrite(
         const ColdWriteRequest& request);
     tl::expected<void, ErrorCode> FinishColdWrite(
         const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> ReattachColdWrite(
+        const UUID& owner, const ColdWriteRequest& request);
 
     [[nodiscard]] tl::expected<void, ErrorCode> PutEnd(
         const ObjectMeta& object_meta, ReplicaType replica_type);

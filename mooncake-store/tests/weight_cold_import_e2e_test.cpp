@@ -6,10 +6,12 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "real_client.h"
+#include "master_client.h"
 #include "test_server_helpers.h"
 #include "weight_residency_planner.h"
 
@@ -256,6 +258,7 @@ class WeightColdImportE2ETest : public ::testing::Test {
         EXPECT_EQ((*committed)->residency, target);
         EXPECT_FALSE((*committed)->operation_id.has_value());
         EXPECT_TRUE((*committed)->import_layout.empty());
+        committed_ = **committed;
 
         std::vector<std::string> hot_affinities;
         if (target == WeightResidencyState::MIXED) {
@@ -324,6 +327,7 @@ class WeightColdImportE2ETest : public ::testing::Test {
         EXPECT_EQ(0, source_->unregister_buffer(control_readback.data()));
     }
 
+    std::optional<WeightRevisionMetadata> committed_;
     InProcMaster server_;
     std::unique_ptr<RealClient> owner_;
     std::unique_ptr<RealClient> source_;
@@ -331,6 +335,122 @@ class WeightColdImportE2ETest : public ::testing::Test {
     std::vector<std::string> payloads_;
     std::vector<void*> registered_;
 };
+
+TEST_F(WeightColdImportE2ETest,
+       ReattachRequiresCommittedReservationAndLiveOwnerFence) {
+    Start(16 * kMiB);
+    ASSERT_NO_FATAL_FAILURE(
+        Import(WeightResidencyState::COLD, false, false, {4 * kMiB}));
+    ASSERT_TRUE(committed_);
+    ASSERT_EQ(committed_->committed_cold_replicas.size(), 1u);
+    const auto token = committed_->committed_cold_replicas.front();
+    ColdWriteRequest request{token.writer,
+                             token.original_owner,
+                             token.reservation,
+                             committed_->identity.tenant_id,
+                             token.key,
+                             token.size,
+                             0,
+                             token.checksum};
+    request.group_id = committed_->manifest.payload_group_id;
+    MasterClient rpc(token.writer);
+    ASSERT_EQ(rpc.Connect(server_.master_address()), ErrorCode::OK);
+    auto before = source_->batch_query({token.key});
+    ASSERT_EQ(before.size(), 1u);
+    ASSERT_TRUE(before.front());
+    ASSERT_TRUE(rpc.ReportSsdCapacity(token.current_owner, 2 * token.size - 1));
+    ASSERT_TRUE(rpc.ReattachColdWrite(token.current_owner, request));
+    ASSERT_TRUE(rpc.ReattachColdWrite(token.current_owner, request));
+    auto after = source_->batch_query({token.key});
+    ASSERT_EQ(after.size(), 1u);
+    ASSERT_TRUE(after.front());
+    EXPECT_EQ(after.front()->replicas.size(), before.front()->replicas.size());
+    ASSERT_EQ(after.front()->replicas.size(), 1u);
+    EXPECT_EQ(after.front()->replicas.front().id,
+              before.front()->replicas.front().id);
+    auto unchanged =
+        source_->get_weight_revision({.identity = committed_->identity});
+    ASSERT_TRUE(unchanged && *unchanged);
+    EXPECT_EQ((*unchanged)->metadata.metadata_generation,
+              committed_->metadata_generation);
+
+    auto rejected = rpc.ReattachColdWrite(token.writer, request);
+    ASSERT_FALSE(rejected);
+    EXPECT_EQ(rejected.error(), ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+    const auto expect_invalid = [&](const ColdWriteRequest& invalid) {
+        auto result = rpc.ReattachColdWrite(token.current_owner, invalid);
+        EXPECT_FALSE(result);
+        if (!result) {
+            EXPECT_EQ(result.error(), ErrorCode::INVALID_WRITE);
+        }
+    };
+    auto invalid = request;
+    ++invalid.size;
+    expect_invalid(invalid);
+    invalid = request;
+    invalid.checksum = token.checksum.value_or(0) + 1;
+    expect_invalid(invalid);
+    invalid = request;
+    invalid.key += "-other";
+    expect_invalid(invalid);
+    invalid = request;
+    invalid.tenant = "other-tenant";
+    expect_invalid(invalid);
+    invalid = request;
+    invalid.group_id += "-other-generation";
+    expect_invalid(invalid);
+    invalid = request;
+    ++invalid.reservation;
+    expect_invalid(invalid);
+    invalid = request;
+    ++invalid.writer.first;
+    expect_invalid(invalid);
+    invalid = request;
+    ++invalid.owner.first;
+    expect_invalid(invalid);
+
+    // A second accounting charge would consume the capacity needed here.
+    // Leave margin for the fixture's small HOT control/manifest offloads.
+    const std::string probe(2 * kMiB, 'p');
+    auto probe_identity = committed_->identity;
+    probe_identity.revision += "-capacity-probe";
+    const std::vector<WeightAffinityMappingEntry> probe_layout{
+        {"capacity-probe", probe.size(), "probe-affinity"}};
+    auto probe_import = source_->begin_weight_import(
+        {.identity = probe_identity,
+         .payload_group_id = MakeWeightPayloadGroupId(probe_identity),
+         .expected_payload_count = 1,
+         .expected_logical_bytes = probe.size(),
+         .policy = WeightStoragePolicy{.preferred_residency =
+                                           WeightResidencyState::COLD},
+         .affinity_summary = {.affinity_count = 1,
+                              .affinity_digest =
+                                  ComputeWeightAffinityMappingSha256(
+                                      probe_layout)},
+         .payload_layout = probe_layout});
+    ASSERT_TRUE(probe_import && *probe_import);
+    ReplicateConfig probe_config;
+    probe_config.data_type = ObjectDataType::WEIGHT;
+    probe_config.group_ids =
+        std::vector<std::string>{(*probe_import)->manifest.payload_group_id};
+    probe_config.residency_affinity_ids =
+        std::vector<std::string>{"probe-affinity"};
+    EXPECT_EQ(source_->put("capacity-probe", probe, probe_config), 0);
+    auto aborted = source_->abort_weight_import(
+        {.identity = probe_identity,
+         .expected_metadata_generation = (*probe_import)->metadata_generation});
+    ASSERT_TRUE(aborted && *aborted);
+
+    auto deleted = source_->delete_weight_revision(
+        {.identity = committed_->identity,
+         .expected_metadata_generation = committed_->metadata_generation});
+    ASSERT_TRUE(deleted && *deleted);
+    EXPECT_EQ((*deleted)->availability, WeightAvailabilityState::DELETED);
+    expect_invalid(request);
+    auto absent = source_->batch_query({token.key});
+    ASSERT_EQ(absent.size(), 1u);
+    EXPECT_FALSE(absent.front());
+}
 
 TEST_F(WeightColdImportE2ETest, SourceAllocationFailureCancelsOwnerStream) {
     Start(16 * kMiB);

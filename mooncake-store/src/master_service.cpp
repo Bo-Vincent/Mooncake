@@ -5586,7 +5586,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     return result;
 }
 
-tl::expected<void, ErrorCode> MasterService::ValidateColdWrite(
+tl::expected<std::string, ErrorCode> MasterService::ValidateColdWrite(
     const ColdWriteRequest& request) {
     std::shared_lock lock(master_state_mutex_);
     if (!HasMountedLocalDiskSegment(request.owner))
@@ -5599,6 +5599,7 @@ tl::expected<void, ErrorCode> MasterService::ValidateColdWrite(
     auto& metadata = accessor.Get();
     if (metadata.client_id != request.writer ||
         metadata.TotalLength() != request.size ||
+        (!request.group_id.empty() && metadata.group_id != request.group_id) ||
         !metadata.HasReplica([&](const Replica& replica) {
             return replica.id() == request.reservation &&
                    (replica.is_completed() ||
@@ -5614,13 +5615,144 @@ tl::expected<void, ErrorCode> MasterService::ValidateColdWrite(
                    replica.get_local_disk_client_id() == request.owner;
         }))
         return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    return metadata.group_id;
+}
+
+tl::expected<void, ErrorCode> MasterService::ReattachColdWrite(
+    const UUID& owner, const ColdWriteRequest& request) {
+    if (request.reservation == 0 || request.size == 0)
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    const auto matches = [&](const WeightColdReplicaToken& token) {
+        return token.key == request.key && token.size == request.size &&
+               token.writer == request.writer &&
+               token.original_owner == request.owner &&
+               token.reservation == request.reservation &&
+               token.checksum == request.checksum;
+    };
+    auto recovery = weight_manager_.GetColdReplica(
+        request.group_id, request.key, request.reservation);
+    if (!recovery || recovery->identity.tenant_id != request.tenant ||
+        MakeWeightPayloadGroupId(recovery->identity) != request.group_id ||
+        !matches(recovery->token) ||
+        (recovery->availability != WeightAvailabilityState::READY &&
+         recovery->availability != WeightAvailabilityState::DEGRADED))
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    const auto identity = recovery->identity;
+    auto group_lock = weight_manager_.LockGroup(TenantId(identity.tenant_id),
+                                                request.group_id);
+    recovery = weight_manager_.GetColdReplica(request.group_id, request.key,
+                                              request.reservation);
+    if (!recovery || !matches(recovery->token) ||
+        (recovery->availability != WeightAvailabilityState::READY &&
+         recovery->availability != WeightAvailabilityState::DEGRADED))
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    if (recovery->has_operation)
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+    const auto token = recovery->token;
+    const auto owner_record = FindClientRecord(owner);
+    const auto previous_owner_record = FindClientRecord(token.current_owner);
+    auto owner_guard =
+        owner_record ? owner_record->TryAcquireRetainingGuard() : std::nullopt;
+    if (!owner_guard)
+        return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+    const TenantId tenant(identity.tenant_id);
+    {
+        std::shared_lock lock(master_state_mutex_);
+        // An unmounted disk has already relinquished its routes. Otherwise
+        // recovery must wait for the old incarnation's terminal fence.
+        if (token.current_owner != owner &&
+            HasMountedLocalDiskSegment(token.current_owner) &&
+            (previous_owner_record &&
+             previous_owner_record->ShouldRetainResources()))
+            return tl::make_unexpected(
+                ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+        if (!HasMountedLocalDiskSegment(owner) ||
+            !cold_write_endpoints_.contains(owner))
+            return tl::make_unexpected(ErrorCode::SEGMENT_NOT_FOUND);
+        MetadataAccessorRO accessor(this,
+                                    MakeObjectIdentity(request.key, tenant));
+        if (accessor.Exists()) {
+            const auto& metadata = accessor.Get();
+            if (metadata.group_id != request.group_id ||
+                metadata.TotalLength() != token.size ||
+                metadata.client_id != token.writer ||
+                metadata.GetPart(0).checksum() != token.checksum)
+                return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+            for (const auto& replica : metadata.GetAllReplicas()) {
+                const auto other = replica.get_local_disk_client_id();
+                if (other && *other != owner &&
+                    (replica.getClientLiveness() &&
+                     replica.getClientLiveness()->ShouldRetainResources()))
+                    return tl::make_unexpected(
+                        ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS);
+            }
+        }
+    }
+    // Persist the owner CAS before publishing its route. A crash between the
+    // two leaves a retryable token, never a second live owner.
+    auto rebound = weight_manager_.ReattachColdReplica(
+        identity, token.reservation, token.current_owner, owner);
+    if (!rebound) return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    std::shared_lock lock(master_state_mutex_);
+    if (!HasMountedLocalDiskSegment(owner) ||
+        !cold_write_endpoints_.contains(owner))
+        return tl::make_unexpected(ErrorCode::SEGMENT_NOT_FOUND);
+    auto current = weight_manager_.GetColdReplica(request.group_id, request.key,
+                                                  request.reservation);
+    if (!current ||
+        (current->availability != WeightAvailabilityState::READY &&
+         current->availability != WeightAvailabilityState::DEGRADED) ||
+        !matches(current->token) || current->token.current_owner != owner)
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    MetadataAccessorRW accessor(this, MakeObjectIdentity(request.key, tenant),
+                                MetadataAccessorRW::CreateKey{});
+    if (!accessor.IsPublished()) {
+        accessor.Publish(token.writer, std::chrono::system_clock::now(),
+                         token.size, std::vector<Replica>{}, std::nullopt,
+                         false, ObjectDataType::WEIGHT, request.group_id,
+                         tenant, request.key, token.affinity_id);
+        accessor.Get().MutablePart(0).SetChecksum(token.checksum);
+    }
+    auto& metadata = accessor.Get();
+    if (metadata.group_id != request.group_id ||
+        metadata.TotalLength() != token.size ||
+        metadata.client_id != token.writer)
+        return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+    if (metadata.HasReplica([&](const Replica& replica) {
+            return replica.is_completed() &&
+                   replica.get_local_disk_client_id() == owner;
+        }))
+        return {};
+    const auto previous_media = KvMediaSnapshot(metadata);
+    Replica recovered(owner, token.size, cold_write_endpoints_.at(owner),
+                      ReplicaStatus::COMPLETE, owner_record);
+    if (enable_oplog_ && ordered_oplog_writer_) {
+        std::vector<Replica::Descriptor> post;
+        for (const auto& replica : metadata.GetAllReplicas())
+            if (!replica.is_local_disk_replica() && replica.is_completed())
+                post.push_back(replica.get_descriptor());
+        post.push_back(recovered.get_descriptor());
+        auto persisted = AppendOpLogVisibleBeforeDurable(
+            OpType::PUT_END, tenant.value(), request.key,
+            SerializeMetadataForOpLogFromReplicaDescriptors(metadata, post));
+        if (!persisted) return tl::make_unexpected(persisted.error());
+    }
+    auto removed = PopReplicasWithCacheTotalAccounting(
+        metadata, &Replica::fn_is_local_disk_replica);
+    ReleaseLocalDiskUsage(removed);
+    std::vector<Replica> replicas;
+    replicas.emplace_back(std::move(recovered));
+    metadata.AddReplicas(std::move(replicas));
+    SyncCacheTotalAccounting(metadata);
+    local_ssd_manager_.AdjustUsedBytes(owner, token.size);
+    SyncKvObjectState(request.key, metadata, tenant, previous_media);
     return {};
 }
 
 tl::expected<void, ErrorCode> MasterService::FinishColdWrite(
     const ColdWriteRequest& request) {
     auto valid = ValidateColdWrite(request);
-    if (!valid) return valid;
+    if (!valid) return tl::make_unexpected(valid.error());
     return PutEnd(request.writer, ObjectMeta{request.key, request.checksum},
                   TenantId(request.tenant), ReplicaType::LOCAL_DISK,
                   request.reservation);

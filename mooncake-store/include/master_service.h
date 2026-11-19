@@ -456,10 +456,12 @@ class MasterService {
      * @return ErrorCode::OK on success, ErrorCode::OBJECT_NOT_FOUND if not
      * found, ErrorCode::INVALID_WRITE if replica status is invalid
      */
-    tl::expected<void, ErrorCode> ValidateColdWrite(
+    tl::expected<std::string, ErrorCode> ValidateColdWrite(
         const ColdWriteRequest& request);
     tl::expected<void, ErrorCode> FinishColdWrite(
         const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> ReattachColdWrite(
+        const UUID& owner, const ColdWriteRequest& request);
 
     auto PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
                 const TenantId& tenant_id, ReplicaType replica_type,
