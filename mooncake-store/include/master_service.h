@@ -435,10 +435,12 @@ class MasterService {
                   const ReplicateConfig& config)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode>;
 
-    tl::expected<void, ErrorCode> ValidateColdWrite(
+    tl::expected<std::string, ErrorCode> ValidateColdWrite(
         const ColdWriteRequest& request);
     tl::expected<void, ErrorCode> FinishColdWrite(
         const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> ReattachColdWrite(
+        const UUID& owner, const ColdWriteRequest& request);
 
     /**
      * @brief Complete a put operation, replica_type indicates the type of

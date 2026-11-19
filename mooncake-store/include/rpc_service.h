@@ -109,10 +109,12 @@ class WrappedMasterService {
         const uint64_t slice_length, const ReplicateConfig& config,
         const std::string& tenant_id = "default");
 
-    tl::expected<void, ErrorCode> ValidateColdWrite(
+    tl::expected<std::string, ErrorCode> ValidateColdWrite(
         const ColdWriteRequest& request);
     tl::expected<void, ErrorCode> FinishColdWrite(
         const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> ReattachColdWrite(
+        const UUID& owner, const ColdWriteRequest& request);
 
     tl::expected<void, ErrorCode> PutEnd(
         const UUID& client_id, const ObjectMeta& object_meta,

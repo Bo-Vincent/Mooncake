@@ -32,9 +32,10 @@ struct ColdWriteRequest {
     int64_t deadline_ms{0};
     std::optional<uint64_t> checksum;
     bool ranged{false};
+    std::string group_id{};
 };
 YLT_REFL(ColdWriteRequest, writer, owner, reservation, tenant, key, size,
-         deadline_ms, checksum, ranged);
+         deadline_ms, checksum, ranged, group_id);
 
 struct ColdWriteChunk {
     ColdWriteRequest request;

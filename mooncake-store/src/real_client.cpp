@@ -9872,13 +9872,16 @@ void RealClient::StopColdWrites() {
 async_simple::coro::Lazy<tl::expected<void, ErrorCode>>
 RealClient::cold_write_begin(const ColdWriteRequest &request) {
     auto job = [state = cold_write_runtime_, storage = file_storage_,
-                client = client_, request]() -> tl::expected<void, ErrorCode> {
+                client = client_,
+                request = ColdWriteRequest(
+                    request)]() mutable -> tl::expected<void, ErrorCode> {
         if (!state || !client || !storage ||
             request.owner != client->getClientId() || request.size == 0 ||
             request.deadline_ms <= ColdWriteNowMs())
             return tl::make_unexpected(ErrorCode::INVALID_WRITE);
         auto valid = client->ValidateColdWrite(request);
-        if (!valid) return valid;
+        if (!valid) return tl::make_unexpected(valid.error());
+        request.group_id = *valid;
         auto journaled = storage->PrepareColdWrite(request);
         if (!journaled) return journaled;
         auto session = std::make_shared<ColdWriteSession>();
@@ -10016,7 +10019,7 @@ RealClient::cold_write_chunk(const ColdWriteChunk &chunk) {
             ColdWriteNowMs() >= session->request.deadline_ms)
             return tl::make_unexpected(ErrorCode::INVALID_WRITE);
         auto valid = client->ValidateColdWrite(session->request);
-        if (!valid) return valid;
+        if (!valid) return tl::make_unexpected(valid.error());
         if (!session->staging) {
             auto &pool = ColdPool(false);
             std::lock_guard pool_lock(pool.mutex);
@@ -10248,7 +10251,8 @@ tl::expected<void, ErrorCode> RealClient::WriteColdObject(
                              checksum};
     if (disk.client_id == client_->getClientId() && file_storage_) {
         auto valid = client_->ValidateColdWrite(request);
-        if (!valid) return valid;
+        if (!valid) return tl::make_unexpected(valid.error());
+        request.group_id = *valid;
         auto journaled = file_storage_->PrepareColdWrite(request);
         if (!journaled) return journaled;
         auto result = file_storage_->OffloadStream(

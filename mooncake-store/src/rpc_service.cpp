@@ -494,9 +494,14 @@ WrappedMasterService::PutStart(const UUID& client_id, const std::string& key,
     return result;
 }
 
-tl::expected<void, ErrorCode> WrappedMasterService::ValidateColdWrite(
+tl::expected<std::string, ErrorCode> WrappedMasterService::ValidateColdWrite(
     const ColdWriteRequest& request) {
     return master_service_.ValidateColdWrite(request);
+}
+
+tl::expected<void, ErrorCode> WrappedMasterService::ReattachColdWrite(
+    const UUID& owner, const ColdWriteRequest& request) {
+    return master_service_.ReattachColdWrite(owner, request);
 }
 
 tl::expected<void, ErrorCode> WrappedMasterService::FinishColdWrite(
@@ -2106,7 +2111,8 @@ void RegisterRpcService(coro_rpc::coro_rpc_server& server,
         &WrappedMasterService::BatchGetReplicaList,
         &WrappedMasterService::PutStart,
         &WrappedMasterService::ValidateColdWrite,
-        &WrappedMasterService::FinishColdWrite, &WrappedMasterService::PutEnd,
+        &WrappedMasterService::FinishColdWrite,
+        &WrappedMasterService::ReattachColdWrite, &WrappedMasterService::PutEnd,
         &WrappedMasterService::PutRevoke, &WrappedMasterService::BatchPutStart,
         &WrappedMasterService::BatchPutEnd,
         &WrappedMasterService::BatchPutRevoke,

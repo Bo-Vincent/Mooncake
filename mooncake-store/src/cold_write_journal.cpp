@@ -16,7 +16,7 @@
 namespace mooncake {
 namespace {
 
-constexpr uint32_t kRecordVersion = 1;
+constexpr uint32_t kRecordVersion = 2;
 constexpr size_t kMaxRecordBytes = 1024 * 1024;
 
 struct TokenPayload {

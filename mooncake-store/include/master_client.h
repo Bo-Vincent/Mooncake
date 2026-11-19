@@ -288,10 +288,12 @@ class MasterClient {
                   const std::vector<std::vector<uint64_t>>& slice_lengths,
                   const ReplicateConfig& config);
 
-    tl::expected<void, ErrorCode> ValidateColdWrite(
+    tl::expected<std::string, ErrorCode> ValidateColdWrite(
         const ColdWriteRequest& request);
     tl::expected<void, ErrorCode> FinishColdWrite(
         const ColdWriteRequest& request);
+    tl::expected<void, ErrorCode> ReattachColdWrite(
+        const UUID& owner, const ColdWriteRequest& request);
 
     /**
      * @brief Ends a put operation

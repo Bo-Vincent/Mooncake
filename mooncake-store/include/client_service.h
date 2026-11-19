@@ -120,13 +120,18 @@ class Client {
     void SetColdWriteHandler(ColdWriteHandler handler) {
         cold_write_handler_ = std::move(handler);
     }
-    tl::expected<void, ErrorCode> ValidateColdWrite(
+    tl::expected<std::string, ErrorCode> ValidateColdWrite(
         const ColdWriteRequest& request) {
         return master_client_.ValidateColdWrite(request);
     }
     tl::expected<void, ErrorCode> FinishColdWrite(
         const ColdWriteRequest& request) {
         return master_client_.FinishColdWrite(request);
+    }
+
+    tl::expected<void, ErrorCode> ReattachColdWrite(
+        const ColdWriteRequest& request) {
+        return master_client_.ReattachColdWrite(client_id_, request);
     }
 
     using WriteBufferStager =
